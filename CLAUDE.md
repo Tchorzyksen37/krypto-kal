@@ -17,6 +17,8 @@ MCP server that exposes market data to Claude: crypto derivatives (Coinalyze, Co
 | [kraken-client.ts](kraken-client.ts) | Kraken spot REST: public market data plus signed private account/trading calls. |
 | [kraken-futures-client.ts](kraken-futures-client.ts) | Kraken Futures (derivatives) REST: a separate exchange with its own keys. Market data, account, positions and trading for the planned bot. Not exposed through MCP yet. |
 | [futures-risk.ts](futures-risk.ts) | Pure pre-trade risk check for the futures bot: caps per-symbol and total exposure, leverage, open positions, order size and rate, and daily loss. |
+| [futures-pnl.ts](futures-pnl.ts), [trade-store.ts](trade-store.ts) | Realized PnL statistics for Kraken Futures: fills are synced into SQLite (`futures_fills`), turned into closed trades by average-cost netting (`futures_trades`) and summarized. Gross of fees and funding; linear contracts (PF_/FF_) only. |
+| [liquidation-heatmap.ts](liquidation-heatmap.ts) | Pure model that ESTIMATES a liquidation heatmap from price bars, open interest and the long/short ratio (OI-delta cohorts over assumed leverage tiers; model OI follows real OI). Behind `coinalyze_liquidation_heatmap_estimate`. Not measured data. |
 | [http-utils.ts](http-utils.ts) | Shared by all clients: `RequestQueue` (serialize + weighted spacing), `withRetry`, `TtlCache`. |
 | [history-store.ts](history-store.ts) | SQLite (`node:sqlite`) store of series points plus coverage ranges. |
 | [series-cache.ts](series-cache.ts) | Provider-independent read-through history cache on top of `HistoryStore`. |
@@ -28,7 +30,7 @@ MCP server that exposes market data to Claude: crypto derivatives (Coinalyze, Co
 
 - **Start the server:** `npm start` (runs `node --env-file-if-exists=.env mcp-server.ts`).
 - **All tests:** `npm test`.
-- **Offline tests only:** `npm run test:offline`. These are [coinalyze-cache.test.ts](coinalyze-cache.test.ts), [yahoo-client.test.ts](yahoo-client.test.ts), [kraken-client.test.ts](kraken-client.test.ts), [kraken-futures-client.test.ts](kraken-futures-client.test.ts), [futures-risk.test.ts](futures-risk.test.ts) (with a randomized check that no allowed order breaks a cap) and [x-sync.test.ts](x-sync.test.ts). They stub `fetch` with fake APIs and need no keys or network.
+- **Offline tests only:** `npm run test:offline`. These are [coinalyze-cache.test.ts](coinalyze-cache.test.ts), [yahoo-client.test.ts](yahoo-client.test.ts), [kraken-client.test.ts](kraken-client.test.ts), [kraken-futures-client.test.ts](kraken-futures-client.test.ts), [futures-risk.test.ts](futures-risk.test.ts) (with a randomized check that no allowed order breaks a cap), [futures-pnl.test.ts](futures-pnl.test.ts), [liquidation-heatmap.test.ts](liquidation-heatmap.test.ts) and [x-sync.test.ts](x-sync.test.ts). They stub `fetch` with fake APIs and need no keys or network.
 - **End-to-end tests against the real APIs:** `npm run test:coinalyze`, `npm run test:yahoo`, `npm run test:kraken`, `npm run test:x` or `npm run test:coinglass`.
   - `test:x` always tests the brain tools (temporary `BRAIN_DIR`); its X part runs only with `X_BEARER_TOKEN` and syncs at most 10 posts per query from the last hour.
   - Each spawns `mcp-server.ts` on a free port through [test-helpers.ts](test-helpers.ts), checks auth and `tools/list`, calls every tool and validates the data shape.
@@ -45,7 +47,7 @@ MCP server that exposes market data to Claude: crypto derivatives (Coinalyze, Co
 - Coinalyze and Coinglass are enabled by their keys.
 - Yahoo and Kraken are on by default; `YAHOO_ENABLED=false` or `KRAKEN_ENABLED=false` turns them off.
 - Kraken account tools also need `KRAKEN_API_KEY` and `KRAKEN_API_SECRET`.
-- Kraken Futures private calls need `KRAKEN_FUTURES_API_KEY` and `KRAKEN_FUTURES_API_SECRET` (different keys from spot).
+- Kraken Futures read-only tools need `KRAKEN_FUTURES_RO_API_KEY` and `KRAKEN_FUTURES_RO_API_SECRET` (a read-only key pair for the futures exchange, different from spot). `KrakenFuturesClient` itself defaults to `KRAKEN_FUTURES_API_KEY`/`_SECRET`, reserved for the future trading bot's keys.
 - X is enabled by `X_BEARER_TOKEN`. `X_COLLECT=true` turns on the background sync every `X_SYNC_EVERY_MINUTES` (30); `X_BACKFILL_HOURS` (24), `X_MAX_POSTS_PER_QUERY` (200) and `X_REQUIRE_VERIFIED` (true) tune it. Spend caps: `X_DAILY_BUDGET_USD` (default 1) and `X_TOTAL_BUDGET_USD` (default none).
 
 **Optional:**
@@ -80,6 +82,7 @@ MCP server that exposes market data to Claude: crypto derivatives (Coinalyze, Co
   - `coinalyze_*`: symbols like `BTCUSDT_PERP.A`, found with `coinalyze_future_markets`. `aggregate: true` sums OI or liquidations across symbols in USD.
   - `yahoo_*`: `search`, `quote`, `history`.
   - `kraken_*`: `ticker`, `ohlc`, `order_book`, `system_status`, plus read-only `balance` and `open_orders` when keys are set. **Kraken trading is never exposed as an MCP tool.**
+  - `kraken_futures_*` (registered only with `KRAKEN_FUTURES_RO_API_KEY`/`_SECRET`; `KRAKEN_FUTURES_ENABLED=false` turns them off): `positions` (open positions + margin account), `open_orders`, `fills` and `pnl`. The last two first sync new fills into the local DB (`CACHE_DB_PATH`), so history goes past the API's 100-fill window. The MCP client never has `tradingEnabled`.
   - `x_*`: `sync` (fetch new posts into `brain/raw/x/`) and `accounts` (curated list + live profiles); `x_recent` reads the local archive and works without a token.
   - `brain_*`: `list`, `read`, `search`, `write`. Always registered, so Claude Desktop can run the brain workflow. `raw/` is never writable through MCP.
 - **Future plan** (not started): server-side processing of data before tools return it. Keep raw points in the cache and put processing in a separate layer between the cache and tool output.

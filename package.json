@@ -5,8 +5,8 @@
   "main": "mcp-server.ts",
   "scripts": {
     "start": "node --env-file-if-exists=.env mcp-server.ts",
-    "test": "node --env-file-if-exists=.env --test coinalyze-cache.test.ts yahoo-client.test.ts kraken-client.test.ts kraken-futures-client.test.ts futures-risk.test.ts x-sync.test.ts coinglass.test.ts coinalyze.test.ts yahoo.test.ts kraken.test.ts x.test.ts",
-    "test:offline": "node --test coinalyze-cache.test.ts yahoo-client.test.ts kraken-client.test.ts kraken-futures-client.test.ts futures-risk.test.ts x-sync.test.ts",
+    "test": "node --env-file-if-exists=.env --test coinalyze-cache.test.ts yahoo-client.test.ts kraken-client.test.ts kraken-futures-client.test.ts futures-risk.test.ts futures-pnl.test.ts liquidation-heatmap.test.ts x-sync.test.ts coinglass.test.ts coinalyze.test.ts yahoo.test.ts kraken.test.ts x.test.ts",
+    "test:offline": "node --test coinalyze-cache.test.ts yahoo-client.test.ts kraken-client.test.ts kraken-futures-client.test.ts futures-risk.test.ts futures-pnl.test.ts liquidation-heatmap.test.ts x-sync.test.ts",
     "test:coinglass": "node --env-file-if-exists=.env --test coinglass.test.ts",
     "test:coinalyze": "node --env-file-if-exists=.env --test coinalyze.test.ts",
     "test:yahoo": "node --env-file-if-exists=.env --test yahoo.test.ts",

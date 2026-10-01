@@ -23,7 +23,11 @@ import {
 import { Brain } from "./brain.ts";
 import { coinalyzeJobs, startCollector, yahooJobs, type CollectorJob } from "./collector.ts";
 import { HistoryStore } from "./history-store.ts";
+import { estimateLiquidationHeatmap, type HeatmapBar } from "./liquidation-heatmap.ts";
 import { KRAKEN_OHLC_INTERVALS, KrakenClient } from "./kraken-client.ts";
+import { KrakenFuturesClient } from "./kraken-futures-client.ts";
+import { report as pnlReport, syncFills } from "./futures-pnl.ts";
+import { TradeStore } from "./trade-store.ts";
 import { createLogger } from "./logger.ts";
 import { XClient } from "./x-client.ts";
 import { accountsOverview, recentRawPosts, syncX, type SyncOptions } from "./x-sync.ts";
@@ -55,6 +59,15 @@ const coinglass = process.env.COINGLASS_API_KEY ? new CoinglassClient() : undefi
 const coinalyze = process.env.COINALYZE_API_KEY ? new CoinalyzeClient({ store }) : undefined;
 const yahoo = enabled("YAHOO_ENABLED") ? new YahooClient({ store }) : undefined;
 const kraken = enabled("KRAKEN_ENABLED") ? new KrakenClient({ cacheTtlMs: 5_000 }) : undefined;
+// Read-only keys (KRAKEN_FUTURES_RO_*), kept apart from any future trading keys. tradingEnabled stays off and
+// no trading tool is exposed.
+const krakenFutures = enabled("KRAKEN_FUTURES_ENABLED")
+  ? new KrakenFuturesClient({
+      apiKey: process.env.KRAKEN_FUTURES_RO_API_KEY ?? "",
+      apiSecret: process.env.KRAKEN_FUTURES_RO_API_SECRET ?? "",
+    })
+  : undefined;
+const tradeStore = new TradeStore(CACHE_DB_PATH);
 const x = process.env.X_BEARER_TOKEN ? new XClient() : undefined;
 const brain = new Brain();
 
@@ -330,6 +343,83 @@ function registerCoinalyze(server: McpServer, client: CoinalyzeClient) {
         return client.ohlcvHistory({ symbols, ...range(r) });
       }),
   );
+
+  server.registerTool(
+    "coinalyze_liquidation_heatmap_estimate",
+    {
+      description:
+        "[Coinalyze] ESTIMATED liquidation heatmap: where long positions (below the price) and short positions " +
+        "(above it) would be liquidated, in USD per price bucket. Exchanges publish no such data, so this is a model " +
+        "built from price bars, open interest and the long/short ratio: new open interest is split long/short and " +
+        "spread over assumed leverage tiers, cohorts the price has traded through are removed, and the total follows " +
+        "the real OI. Treat it as a rough map of clusters, not as measured data. Use a long window (e.g. 4hour × 500+) " +
+        "so OI opened before the window washes out. Price comes from the first symbol; OI is summed over all symbols " +
+        "(e.g. BTC across exchanges).",
+      inputSchema: {
+        symbols: czSymbols.describe(
+          'Perpetuals of ONE asset, e.g. ["BTCUSDT_PERP.A","BTCUSD_PERP.0"]. The first symbol gives the price. ' +
+            "Each symbol costs 2 API calls (OI + long/short), the first 1 more.",
+        ),
+        interval: z.enum(czIntervals).default("4hour"),
+        limit: z.number().int().min(50).max(2000).default(500).describe("Number of intervals of history to simulate"),
+        bucket_pct: z.number().min(0.05).max(5).default(0.5).describe("Bucket width, % of the current price"),
+        range_pct: z.number().min(1).max(50).default(20).describe("Show liquidation prices within ± this % of the price"),
+        leverage_tiers: z
+          .array(z.object({ leverage: z.number().gt(1).max(200), weight: z.number().positive() }))
+          .min(1)
+          .max(10)
+          .optional()
+          .describe("Assumed leverage mix of new positions. Default: 5x 15%, 10x 30%, 25x 30%, 50x 15%, 100x 10%"),
+        maintenance_margin_pct: z.number().min(0).max(5).default(0.5),
+      },
+    },
+    (args) =>
+      toResult("coinalyze_liquidation_heatmap_estimate", args, async () => {
+        const { from, to } = timeRange(INTERVAL_SECONDS[args.interval], { limit: args.limit });
+        const p = { symbols: args.symbols, interval: args.interval, from, to };
+        const [prices, oi, ratios] = await Promise.all([
+          client.ohlcvHistory({ ...p, symbols: [args.symbols[0]!] }),
+          client.openInterestHistory({ ...p, convertToUsd: true }),
+          client.longShortRatioHistory(p),
+        ]);
+
+        const oiByT = new Map<number, number>();
+        for (const s of oi) for (const pt of s.history) oiByT.set(pt.t, (oiByT.get(pt.t) ?? 0) + Number(pt.c));
+        // Mean long share across symbols, carried forward over missing intervals.
+        const shareAcc = new Map<number, { sum: number; n: number }>();
+        for (const s of ratios) {
+          for (const pt of s.history) {
+            const total = Number(pt.l) + Number(pt.s);
+            if (!(total > 0)) continue;
+            const a = shareAcc.get(pt.t) ?? { sum: 0, n: 0 };
+            a.sum += Number(pt.l) / total;
+            a.n++;
+            shareAcc.set(pt.t, a);
+          }
+        }
+
+        let share = 0.5;
+        const bars: HeatmapBar[] = [];
+        for (const b of prices[0]?.history ?? []) {
+          const a = shareAcc.get(b.t);
+          if (a) share = a.sum / a.n;
+          const openInterest = oiByT.get(b.t);
+          if (openInterest === undefined) continue;
+          bars.push({ t: b.t, h: Number(b.h), l: Number(b.l), c: Number(b.c), oi: openInterest, longShare: share });
+        }
+
+        return {
+          symbols: args.symbols,
+          interval: args.interval,
+          ...estimateLiquidationHeatmap(bars, {
+            bucketPct: args.bucket_pct,
+            rangePct: args.range_pct,
+            maintenanceMargin: args.maintenance_margin_pct / 100,
+            ...(args.leverage_tiers ? { tiers: args.leverage_tiers } : {}),
+          }),
+        };
+      }),
+  );
 }
 
 // --- Yahoo Finance ---
@@ -460,6 +550,86 @@ function registerKraken(server: McpServer, client: KrakenClient) {
   }
 }
 
+// --- Kraken Futures (read-only; the client is created without trading) ---
+
+function registerKrakenFutures(server: McpServer, client: KrakenFuturesClient, trades: TradeStore) {
+  const iso = z.string().datetime({ offset: true }).optional();
+  const toMs = (v: string | undefined) => (v ? Date.parse(v) : undefined);
+  const timeParams = {
+    symbol: z.string().optional().describe('Futures symbol, e.g. "PF_XBTUSD"'),
+    from: iso.describe("Only from this time, ISO 8601, e.g. 2026-09-01T00:00:00Z"),
+    to: iso.describe("Only up to this time, ISO 8601"),
+  };
+  const filterOf = (a: { symbol?: string | undefined; from?: string | undefined; to?: string | undefined }) => ({
+    ...(a.symbol ? { symbol: a.symbol } : {}),
+    ...(a.from ? { from: toMs(a.from) } : {}),
+    ...(a.to ? { to: toMs(a.to) } : {}),
+  });
+  const isoTime = (ms: number) => new Date(ms).toISOString();
+
+  server.registerTool(
+    "kraken_futures_positions",
+    {
+      description:
+        "[Kraken Futures] Currently open positions (symbol, side, size in contracts, average entry price, unrealized " +
+        "PnL and funding) plus margin account state (read-only).",
+    },
+    () =>
+      toResult("kraken_futures_positions", {}, async () => {
+        const [positions, account] = await Promise.all([
+          client.openPositions(),
+          client.flexAccount().catch((e: unknown) => ({ error: String(e) })),
+        ]);
+        return { positions, account };
+      }),
+  );
+
+  server.registerTool(
+    "kraken_futures_open_orders",
+    { description: "[Kraken Futures] Resting orders: limit, stop and take-profit (read-only)." },
+    () => toResult("kraken_futures_open_orders", {}, () => client.openOrders()),
+  );
+
+  server.registerTool(
+    "kraken_futures_fills",
+    {
+      description:
+        "[Kraken Futures] Trade history: executed fills, newest first. Syncs new fills from Kraken into the local " +
+        "database first, so it also works past the API's 100-fill window.",
+      inputSchema: { ...timeParams, limit: z.number().int().min(1).max(1000).default(100) },
+    },
+    (args) =>
+      toResult("kraken_futures_fills", args, async () => {
+        const sync = await syncFills(client, trades);
+        const fills = trades.fills(filterOf(args), args.limit).map((f) => ({ ...f, time: isoTime(f.ts) }));
+        return { sync, fills };
+      }),
+  );
+
+  server.registerTool(
+    "kraken_futures_pnl",
+    {
+      description:
+        "[Kraken Futures] Realized profit/loss statistics from the trade history: totals, win rate, profit factor, " +
+        "average win/loss, best/worst trade, max drawdown, hold time, per symbol and per UTC day, plus the most recent " +
+        "closed trades. A trade is a position from flat to flat. Figures are gross of fees and funding. Syncs fills first.",
+      inputSchema: { ...timeParams, recent_trades: z.number().int().min(0).max(200).default(20) },
+    },
+    (args) =>
+      toResult("kraken_futures_pnl", args, async () => {
+        const sync = await syncFills(client, trades);
+        const closed = trades.trades(filterOf(args));
+        return {
+          sync,
+          ...pnlReport(closed),
+          recentTrades: closed.slice(-args.recent_trades).reverse().map((t) => ({
+            ...t, openedAt: isoTime(t.openedAt), closedAt: isoTime(t.closedAt),
+          })),
+        };
+      }),
+  );
+}
+
 // --- X ---
 
 function registerX(server: McpServer, client: XClient) {
@@ -568,6 +738,7 @@ function buildServer(): McpServer {
   if (coinalyze) registerCoinalyze(server, coinalyze);
   if (yahoo) registerYahoo(server, yahoo);
   if (kraken) registerKraken(server, kraken);
+  if (krakenFutures?.hasCredentials) registerKrakenFutures(server, krakenFutures, tradeStore);
   if (x) registerX(server, x);
   registerBrain(server);
   return server;
@@ -636,6 +807,7 @@ http.listen(PORT, HOST, () => {
     coinalyze && "coinalyze",
     yahoo && "yahoo",
     kraken && (kraken.hasCredentials ? "kraken(+account)" : "kraken"),
+    krakenFutures?.hasCredentials && "kraken-futures(read-only)",
     x && "x",
   ].filter(Boolean).join(",");
   log.info("MCP server listening", { url: `http://${HOST}:${PORT}/mcp`, providers });
