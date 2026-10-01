@@ -12,7 +12,7 @@
 // internal names (e.g. XXBTZUSD), which is why ticker() returns the key as `pair`.
 
 import { createHash, createHmac } from "node:crypto";
-import { RequestQueue, TtlCache, isTransient, sleep, withRetry } from "./http-utils.ts";
+import { CounterLimiter, RequestQueue, TtlCache, isTransient, withRetry } from "./http-utils.ts";
 import { createLogger } from "./logger.ts";
 
 const log = createLogger("kraken");
@@ -113,44 +113,6 @@ export interface KrakenClientOptions {
   counterDecayPerSec?: number; // counter decay (Starter 0.33, Intermediate 0.5, Pro 1)
 }
 
-// Emulates Kraken's private API counter: every call adds its cost, the counter decays over time,
-// and a call may only start when it would not push the counter over the maximum.
-class CounterLimiter {
-  private readonly max: number;
-  private readonly decayPerSec: number;
-  private counter = 0;
-  private updatedAt = Date.now();
-  private queue: Promise<void> = Promise.resolve();
-
-  constructor(max: number, decayPerSec: number) {
-    this.max = max;
-    this.decayPerSec = decayPerSec;
-  }
-
-  run<T>(cost: number, fn: () => Promise<T>): Promise<T> {
-    const run = this.queue.then(async () => {
-      this.decay();
-      const excess = this.counter + cost - this.max;
-      if (excess > 0) {
-        const waitMs = Math.ceil((excess / this.decayPerSec) * 1000);
-        log.debug("private rate limit, waiting", { waitMs, counter: this.counter.toFixed(2) });
-        await sleep(waitMs);
-        this.decay();
-      }
-      this.counter += cost;
-      return fn();
-    });
-    this.queue = run.then(() => undefined, () => undefined);
-    return run;
-  }
-
-  private decay() {
-    const now = Date.now();
-    this.counter = Math.max(0, this.counter - ((now - this.updatedAt) / 1000) * this.decayPerSec);
-    this.updatedAt = now;
-  }
-}
-
 // API-Sign = base64(HMAC-SHA512(base64decode(secret), path + SHA256(nonce + postData)))
 export function krakenSignature(path: string, nonce: string, postData: string, secretBase64: string): string {
   const hash = createHash("sha256").update(nonce + postData).digest();
@@ -181,7 +143,7 @@ export class KrakenClient {
     this.maxRetries = opts.maxRetries ?? 3;
     this.cacheTtlMs = opts.cacheTtlMs ?? 0;
     this.publicQueue = new RequestQueue(log, opts.publicMsPerCall ?? 1000);
-    this.privateLimiter = new CounterLimiter(opts.counterMax ?? 15, opts.counterDecayPerSec ?? 0.33);
+    this.privateLimiter = new CounterLimiter(log, opts.counterMax ?? 15, opts.counterDecayPerSec ?? 0.33);
   }
 
   get hasCredentials(): boolean {

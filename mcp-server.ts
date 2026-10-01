@@ -1,7 +1,8 @@
 // mcp-server.ts  (Node >= 23.6: `node mcp-server.ts`)
 // MCP server (Streamable HTTP) exposing market data as tools for Claude:
 // Coinalyze and Coinglass (crypto derivatives, need API keys), Yahoo Finance (indices, currencies,
-// stocks – no key) and Kraken (spot market data – no key; read-only account tools with a key).
+// stocks – no key), Kraken (spot market data – no key; read-only account tools with a key), X (posts of
+// curated accounts archived into the "second brain") and the second brain itself (BRAIN_DIR).
 // Trading endpoints of Kraken are deliberately NOT exposed as tools.
 
 import { timingSafeEqual } from "node:crypto";
@@ -19,10 +20,13 @@ import {
   type CoinalyzeInterval,
   type SymbolHistory,
 } from "./coinalyze-client.ts";
+import { Brain } from "./brain.ts";
 import { coinalyzeJobs, startCollector, yahooJobs, type CollectorJob } from "./collector.ts";
 import { HistoryStore } from "./history-store.ts";
 import { KRAKEN_OHLC_INTERVALS, KrakenClient } from "./kraken-client.ts";
 import { createLogger } from "./logger.ts";
+import { XClient } from "./x-client.ts";
+import { accountsOverview, recentRawPosts, syncX, type SyncOptions } from "./x-sync.ts";
 import { YAHOO_INTERVAL_SECONDS, YahooClient, type YahooInterval } from "./yahoo-client.ts";
 
 const log = createLogger("server");
@@ -51,6 +55,21 @@ const coinglass = process.env.COINGLASS_API_KEY ? new CoinglassClient() : undefi
 const coinalyze = process.env.COINALYZE_API_KEY ? new CoinalyzeClient({ store }) : undefined;
 const yahoo = enabled("YAHOO_ENABLED") ? new YahooClient({ store }) : undefined;
 const kraken = enabled("KRAKEN_ENABLED") ? new KrakenClient({ cacheTtlMs: 5_000 }) : undefined;
+const x = process.env.X_BEARER_TOKEN ? new XClient() : undefined;
+const brain = new Brain();
+
+const optionalNumber = (v: string | undefined) => (v ? Number(v) : undefined);
+
+// X reads are paid: the daily budget defaults to $1, the total budget is off unless set.
+const xSyncOptions: SyncOptions = {
+  backfillHours: Number(process.env.X_BACKFILL_HOURS ?? 24),
+  maxPostsPerQuery: Number(process.env.X_MAX_POSTS_PER_QUERY ?? 200),
+  requireVerified: enabled("X_REQUIRE_VERIFIED"),
+  budget: {
+    dailyUsd: Number(process.env.X_DAILY_BUDGET_USD ?? 1),
+    totalUsd: optionalNumber(process.env.X_TOTAL_BUDGET_USD),
+  },
+};
 
 // Runs a tool, logs the outcome and turns errors into `isError` results instead of throwing.
 async function toResult(tool: string, args: unknown, fn: () => Promise<unknown>): Promise<CallToolResult> {
@@ -441,12 +460,116 @@ function registerKraken(server: McpServer, client: KrakenClient) {
   }
 }
 
+// --- X ---
+
+function registerX(server: McpServer, client: XClient) {
+  server.registerTool(
+    "x_sync",
+    {
+      description:
+        "[X] Fetches new posts of the curated accounts in x-accounts.json of the brain (Middle East news, officials, " +
+        "OSINT, market squawks) and saves each one to raw/x/ in the brain. Only posts newer than the previous sync are " +
+        "read (X reads are paid) and the run stops at the configured daily/total budget. Returns the new raw " +
+        "files and the estimated spend; read the posts with x_recent or brain_read.",
+    },
+    () => toResult("x_sync", {}, () => syncX(client, brain, xSyncOptions)),
+  );
+
+  server.registerTool(
+    "x_accounts",
+    {
+      description:
+        "[X] The curated account list (enabled or not, category, notes) with each account's X profile " +
+        "(found, verification type, followers) and the estimated API spend. Profiles are cached for a week; " +
+        "a refresh costs $0.01 per account.",
+    },
+    () => toResult("x_accounts", {}, () => accountsOverview(client, brain, xSyncOptions.budget)),
+  );
+}
+
+// --- Second brain (no API calls) ---
+
+function registerBrain(server: McpServer) {
+  const hours = (h: number) => new Date(Date.now() - h * 3_600_000);
+
+  server.registerTool(
+    "x_recent",
+    {
+      description:
+        "[Brain] Archived X posts from raw/x/ in the brain, newest first (local files, no API calls). " +
+        "Run x_sync first to pull new posts.",
+      inputSchema: {
+        hours: z.number().positive().max(24 * 365).default(24).describe("How far back to look"),
+        author: z.string().optional().describe('Username, e.g. "Reuters"'),
+        contains: z.string().optional().describe("Case-insensitive text filter"),
+        limit: z.number().int().min(1).max(500).default(100),
+      },
+    },
+    (args) =>
+      toResult("x_recent", args, () =>
+        recentRawPosts(brain, { since: hours(args.hours), author: args.author, contains: args.contains, limit: args.limit }),
+      ),
+  );
+
+  server.registerTool(
+    "brain_list",
+    {
+      description:
+        "[Brain] Lists files of the second brain (knowledge base): raw/ (sources), wiki/ (linked pages), " +
+        "output/ (reports). Start a session by reading CLAUDE.md with brain_read – it defines the workflow.",
+      inputSchema: {
+        dir: z.string().default("").describe('E.g. "wiki", "wiki/events", "raw/x/2026-10-01"'),
+        recursive: z.boolean().default(false),
+      },
+    },
+    (args) => toResult("brain_list", args, () => brain.list(args.dir, args.recursive)),
+  );
+
+  server.registerTool(
+    "brain_read",
+    {
+      description: '[Brain] Reads a file of the second brain, e.g. "CLAUDE.md", "wiki/index.md".',
+      inputSchema: { path: z.string() },
+    },
+    (args) => toResult("brain_read", args, () => brain.read(args.path)),
+  );
+
+  server.registerTool(
+    "brain_search",
+    {
+      description: "[Brain] Case-insensitive search (all words on one line) in the .md files of a folder.",
+      inputSchema: {
+        query: z.string().min(1),
+        dir: z.string().default("wiki").describe('"wiki", "output", "raw/x" or a subfolder'),
+        limit: z.number().int().min(1).max(500).default(50),
+      },
+    },
+    (args) => toResult("brain_search", args, () => brain.search(args.query, args.dir, args.limit)),
+  );
+
+  server.registerTool(
+    "brain_write",
+    {
+      description:
+        "[Brain] Creates or replaces a Markdown page in wiki/ or output/ (raw/ is read-only). Follow the page " +
+        "format in CLAUDE.md and keep wiki/index.md and wiki/log.md up to date.",
+      inputSchema: {
+        path: z.string().describe('E.g. "wiki/places/strait-of-hormuz.md"'),
+        content: z.string().describe("Full new file content"),
+      },
+    },
+    (args) => toResult("brain_write", { path: args.path }, () => brain.write(args.path, args.content)),
+  );
+}
+
 function buildServer(): McpServer {
   const server = new McpServer({ name: "krypto-kal", version: "1.0.0" });
   if (coinglass) registerCoinglass(server, coinglass);
   if (coinalyze) registerCoinalyze(server, coinalyze);
   if (yahoo) registerYahoo(server, yahoo);
   if (kraken) registerKraken(server, kraken);
+  if (x) registerX(server, x);
+  registerBrain(server);
   return server;
 }
 
@@ -513,8 +636,14 @@ http.listen(PORT, HOST, () => {
     coinalyze && "coinalyze",
     yahoo && "yahoo",
     kraken && (kraken.hasCredentials ? "kraken(+account)" : "kraken"),
+    x && "x",
   ].filter(Boolean).join(",");
   log.info("MCP server listening", { url: `http://${HOST}:${PORT}/mcp`, providers });
   log.info("history cache", { path: CACHE_DB_PATH });
+  log.info("second brain", { path: brain.root });
   if (jobs.length > 0) startCollector(jobs, Number(process.env.COLLECT_EVERY_MINUTES ?? 60));
+  // X reads are paid, so the background sync is opt-in and has its own schedule.
+  if (x && process.env.X_COLLECT?.toLowerCase() === "true") {
+    startCollector([{ name: "x sync", run: () => syncX(x, brain, xSyncOptions) }], Number(process.env.X_SYNC_EVERY_MINUTES ?? 30));
+  }
 });

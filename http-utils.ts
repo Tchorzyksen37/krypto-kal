@@ -36,6 +36,47 @@ export class RequestQueue {
   }
 }
 
+// Emulates a cost-based API counter (Kraken spot private calls, Kraken Futures): every call adds its
+// cost, the counter decays over time, and a call may only start when it would not push the counter
+// over the maximum. Calls start in the order they were queued.
+export class CounterLimiter {
+  private readonly log: Logger;
+  private readonly max: number;
+  private readonly decayPerSec: number;
+  private counter = 0;
+  private updatedAt = Date.now();
+  private queue: Promise<void> = Promise.resolve();
+
+  constructor(log: Logger, max: number, decayPerSec: number) {
+    this.log = log;
+    this.max = max;
+    this.decayPerSec = decayPerSec;
+  }
+
+  run<T>(cost: number, fn: () => Promise<T>): Promise<T> {
+    const run = this.queue.then(async () => {
+      this.decay();
+      const excess = this.counter + cost - this.max;
+      if (excess > 0) {
+        const waitMs = Math.ceil((excess / this.decayPerSec) * 1000);
+        this.log.debug("rate limit counter full, waiting", { waitMs, counter: this.counter.toFixed(2) });
+        await sleep(waitMs);
+        this.decay();
+      }
+      this.counter += cost;
+      return fn();
+    });
+    this.queue = run.then(() => undefined, () => undefined);
+    return run;
+  }
+
+  private decay() {
+    const now = Date.now();
+    this.counter = Math.max(0, this.counter - ((now - this.updatedAt) / 1000) * this.decayPerSec);
+    this.updatedAt = now;
+  }
+}
+
 // Errors thrown by the clients carry `kind` and optionally `status`.
 export interface ClassifiedError {
   kind: string;
