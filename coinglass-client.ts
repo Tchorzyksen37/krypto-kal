@@ -1,4 +1,10 @@
-// coinglass-client.ts  (Node >= 18, brak zależności)
+// coinglass-client.ts  (Node >= 18, no dependencies)
+// Client for Coinglass Open API v4. The current account plan has no API access ("Upgrade plan").
+
+import { RequestQueue, TtlCache, withRetry } from "./http-utils.ts";
+import { createLogger } from "./logger.ts";
+
+const log = createLogger("coinglass");
 
 const BASE_URL = "https://open-api-v4.coinglass.com";
 
@@ -24,12 +30,12 @@ export class CoinglassError extends Error {
 }
 
 interface Envelope<T> {
-  code: string; // "0" = sukces
+  code: string; // "0" = success
   msg: string;
   data: T;
 }
 
-// Założone kształty – zweryfikuj na realnej odpowiedzi z Twojego planu.
+// Assumed shapes – verify against a real response once the plan allows it.
 export interface OhlcPoint {
   time: number; // ms epoch
   open: string | number;
@@ -45,11 +51,11 @@ export interface LiquidationPoint {
 }
 
 export interface ClientOptions {
-  apiKey?: string; // domyślnie process.env.COINGLASS_API_KEY
+  apiKey?: string; // defaults to process.env.COINGLASS_API_KEY
   baseUrl?: string;
   timeoutMs?: number;
   maxRetries?: number;
-  minIntervalMs?: number; // odstęp między requestami (prosty throttle)
+  minIntervalMs?: number; // spacing between requests (simple throttle)
   cacheTtlMs?: number;
 }
 
@@ -58,29 +64,26 @@ export class CoinglassClient {
   private readonly baseUrl: string;
   private readonly timeoutMs: number;
   private readonly maxRetries: number;
-  private readonly minIntervalMs: number;
   private readonly cacheTtlMs: number;
-
-  private cache = new Map<string, { at: number; value: unknown }>();
-  private queue: Promise<void> = Promise.resolve();
-  private lastRequestAt = 0;
+  private readonly queue: RequestQueue;
+  private readonly cache = new TtlCache();
 
   constructor(opts: ClientOptions = {}) {
     const key = opts.apiKey ?? process.env.COINGLASS_API_KEY;
-    if (!key) throw new Error("Brak COINGLASS_API_KEY");
+    if (!key) throw new Error("COINGLASS_API_KEY is not set");
     this.apiKey = key;
     this.baseUrl = opts.baseUrl ?? BASE_URL;
     this.timeoutMs = opts.timeoutMs ?? 10_000;
     this.maxRetries = opts.maxRetries ?? 3;
-    this.minIntervalMs = opts.minIntervalMs ?? 800;
     this.cacheTtlMs = opts.cacheTtlMs ?? 20_000;
+    this.queue = new RequestQueue(log, opts.minIntervalMs ?? 800);
   }
 
-  // --- publiczne metody ---
+  // --- public methods ---
 
   fundingRateHistory(p: {
-    exchange: string; // np. "Binance"
-    symbol: string; // para, np. "BTCUSDT"
+    exchange: string; // e.g. "Binance"
+    symbol: string; // pair, e.g. "BTCUSDT"
     interval: Interval;
     limit?: number;
   }) {
@@ -109,7 +112,7 @@ export class CoinglassClient {
     return this.get<LiquidationPoint[]>("/api/futures/liquidation/history", p);
   }
 
-  // --- rdzeń ---
+  // --- core ---
 
   private async get<T>(
     path: string,
@@ -119,17 +122,24 @@ export class CoinglassClient {
     for (const [k, v] of Object.entries(params)) {
       if (v !== undefined) url.searchParams.set(k, String(v));
     }
-    const cacheKey = url.toString();
+    const hit = this.cache.get<T>(url.toString());
+    if (hit !== undefined) {
+      log.debug("memory cache hit", { path });
+      return hit;
+    }
 
-    const hit = this.cache.get(cacheKey);
-    if (hit && Date.now() - hit.at < this.cacheTtlMs) return hit.value as T;
-
-    const value = await this.withRetry(() => this.throttled(() => this.request<T>(url)));
-    this.cache.set(cacheKey, { at: Date.now(), value });
+    const value = await withRetry(() => this.queue.run(1, () => this.request<T>(url)), {
+      maxRetries: this.maxRetries,
+      log,
+      label: path,
+    });
+    this.cache.set(url.toString(), value, this.cacheTtlMs);
     return value;
   }
 
   private async request<T>(url: URL): Promise<T> {
+    const path = url.pathname;
+    const started = Date.now();
     let res: Response;
     try {
       res = await fetch(url, {
@@ -137,10 +147,12 @@ export class CoinglassClient {
         signal: AbortSignal.timeout(this.timeoutMs),
       });
     } catch (e) {
-      throw new CoinglassError(`Błąd sieci/timeout: ${(e as Error).message}`, "network");
+      log.warn("api request failed", { path, ms: Date.now() - started, error: e });
+      throw new CoinglassError(`Network error/timeout: ${(e as Error).message}`, "network");
     }
 
     if (!res.ok) {
+      log.warn("api request failed", { path, status: res.status, ms: Date.now() - started });
       throw new CoinglassError(`HTTP ${res.status}`, "http", res.status);
     }
 
@@ -148,45 +160,15 @@ export class CoinglassClient {
     try {
       body = (await res.json()) as Envelope<T>;
     } catch {
-      throw new CoinglassError("Niepoprawny JSON w odpowiedzi", "parse");
+      throw new CoinglassError("Invalid JSON in response", "parse");
     }
 
-    // Coinglass potrafi zwrócić HTTP 200 z błędem w envelope
+    // Coinglass can return HTTP 200 with an error inside the envelope.
     if (String(body.code) !== "0") {
-      throw new CoinglassError(body.msg || "Błąd API", "api", res.status, String(body.code));
+      log.warn("api error", { path, code: body.code, error: body.msg, ms: Date.now() - started });
+      throw new CoinglassError(body.msg || "API error", "api", res.status, String(body.code));
     }
+    log.info("api request", { path, status: res.status, ms: Date.now() - started });
     return body.data;
   }
-
-  // Serializuje requesty i pilnuje minimalnego odstępu (rate limit zależy od planu).
-  private throttled<T>(fn: () => Promise<T>): Promise<T> {
-    const run = this.queue.then(async () => {
-      const wait = this.lastRequestAt + this.minIntervalMs - Date.now();
-      if (wait > 0) await sleep(wait);
-      this.lastRequestAt = Date.now();
-      return fn();
-    });
-    this.queue = run.then(() => undefined, () => undefined);
-    return run;
-  }
-
-  private async withRetry<T>(fn: () => Promise<T>): Promise<T> {
-    let attempt = 0;
-    for (;;) {
-      try {
-        return await fn();
-      } catch (e) {
-        const err = e as CoinglassError;
-        const retryable =
-          err.kind === "network" ||
-          (err.kind === "http" && (err.status === 429 || (err.status ?? 0) >= 500));
-        if (!retryable || attempt >= this.maxRetries) throw e;
-        const backoff = 2 ** attempt * 1000 + Math.random() * 250;
-        await sleep(backoff);
-        attempt++;
-      }
-    }
-  }
 }
-
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));

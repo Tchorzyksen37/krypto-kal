@@ -23,7 +23,7 @@
 
     // Stricter Typechecking Options
     "noUncheckedIndexedAccess": true,
-    // exactOptionalPropertyTypes wyłączone – typy @modelcontextprotocol/sdk go nie wspierają
+    // exactOptionalPropertyTypes is off – the @modelcontextprotocol/sdk types don't support it
 
     // Style Options
     // "noImplicitReturns": true,

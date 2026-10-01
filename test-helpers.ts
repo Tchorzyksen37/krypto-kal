@@ -1,5 +1,5 @@
-// test-helpers.ts – wspólne narzędzia testów end-to-end: uruchamia mcp-server.ts na wolnym porcie
-// i łączy się jak Claude (klient MCP + Bearer token).
+// test-helpers.ts – shared helpers for end-to-end tests: starts mcp-server.ts on a free port
+// and connects the way Claude does (MCP client + Bearer token).
 
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
@@ -23,35 +23,37 @@ function freePort(): Promise<number> {
   });
 }
 
-function startServer(port: number): Promise<ChildProcess> {
+function startServer(port: number, env: Record<string, string>): Promise<ChildProcess> {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, ["mcp-server.ts"], {
-      env: { ...process.env, PORT: String(port) },
+      env: { ...process.env, ...env, PORT: String(port) },
       stdio: ["ignore", "pipe", "pipe"],
     });
-    let stderr = "";
-    child.stderr.on("data", (d) => (stderr += d));
+    let output = "";
+    child.stderr.on("data", (d) => (output += d));
     child.stdout.on("data", (d) => {
-      if (String(d).includes("MCP server:")) resolve(child);
+      output += d;
+      if (output.includes("MCP server listening")) resolve(child);
     });
-    child.on("exit", (code) => reject(new Error(`Serwer zakończył się (kod ${code}):\n${stderr}`)));
+    child.on("exit", (code) => reject(new Error(`Server exited (code ${code}):\n${output}`)));
   });
 }
 
-// Rejestruje before/after w bieżącym describe; kontekst jest wypełniony po `before`.
-export function useMcpServer(): McpContext {
+// Registers before/after in the current describe; the context is filled in by `before`.
+// `env` overrides the server's environment (e.g. CACHE_DB_PATH).
+export function useMcpServer(env: Record<string, string> = {}): McpContext {
   const ctx = {} as McpContext;
   let server: ChildProcess | undefined;
 
   before(async () => {
     const token = process.env.MCP_AUTH_TOKEN;
-    assert.ok(token, "Brak MCP_AUTH_TOKEN w .env");
+    assert.ok(token, "MCP_AUTH_TOKEN is not set in .env");
 
     const port = await freePort();
     ctx.url = `http://127.0.0.1:${port}/mcp`;
-    server = await startServer(port);
+    server = await startServer(port, env);
 
-    ctx.client = new Client({ name: "sanity-test", version: "1.0.0" });
+    ctx.client = new Client({ name: "e2e-test", version: "1.0.0" });
     await ctx.client.connect(
       new StreamableHTTPClientTransport(new URL(ctx.url), {
         requestInit: { headers: { Authorization: `Bearer ${token}` } },
@@ -67,7 +69,7 @@ export function useMcpServer(): McpContext {
   return ctx;
 }
 
-// Wspólne testy serwera: autoryzacja i obecność narzędzi danego dostawcy.
+// Shared server tests: authorization and presence of the provider's tools.
 export function serverTests(ctx: McpContext, tools: string[]) {
   const listTools = (headers: Record<string, string>) =>
     fetch(ctx.url, {
@@ -80,38 +82,38 @@ export function serverTests(ctx: McpContext, tools: string[]) {
       body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
     });
 
-  test("bez tokenu -> 401", async () => {
+  test("no token -> 401", async () => {
     assert.equal((await listTools({})).status, 401);
   });
 
-  test("zły token -> 401", async () => {
-    assert.equal((await listTools({ Authorization: "Bearer zly-token" })).status, 401);
+  test("wrong token -> 401", async () => {
+    assert.equal((await listTools({ Authorization: "Bearer wrong-token" })).status, 401);
   });
 
-  test("tools/list zawiera wszystkie narzędzia dostawcy", async () => {
+  test("tools/list contains all provider tools", async () => {
     const names = new Set((await ctx.client.listTools()).tools.map((t) => t.name));
-    for (const t of tools) assert.ok(names.has(t), `Brak narzędzia ${t}`);
+    for (const t of tools) assert.ok(names.has(t), `Missing tool ${t}`);
   });
 }
 
-// Woła narzędzie, sprawdza że nie ma błędu i zwraca sparsowany JSON.
+// Calls a tool, asserts it did not fail and returns the parsed JSON.
 export async function call(ctx: McpContext, name: string, args: Record<string, unknown> = {}): Promise<unknown> {
   const res = await ctx.client.callTool({ name, arguments: args });
   const text = (res.content as { type: string; text: string }[])[0]?.text ?? "";
-  assert.notEqual(res.isError, true, `Narzędzie ${name} zwróciło błąd: ${text}`);
+  assert.notEqual(res.isError, true, `Tool ${name} returned an error: ${text}`);
   return JSON.parse(text);
 }
 
 const isNumeric = (v: unknown) =>
   (typeof v === "number" || typeof v === "string") && v !== "" && Number.isFinite(Number(v));
 
-// Sprawdza, że `points` to niepusta tablica, a każdy punkt ma numeryczne `timeField` i `fields`.
+// Asserts `points` is a non-empty array and every point has numeric `timeField` and `fields`.
 export function assertPoints(points: unknown, fields: string[], timeField: string) {
-  assert.ok(Array.isArray(points), `Oczekiwano tablicy, otrzymano: ${JSON.stringify(points).slice(0, 200)}`);
-  assert.ok(points.length > 0, "Pusta tablica danych");
+  assert.ok(Array.isArray(points), `Expected an array, got: ${JSON.stringify(points).slice(0, 200)}`);
+  assert.ok(points.length > 0, "Empty data array");
   for (const p of points as Record<string, unknown>[]) {
     for (const f of [timeField, ...fields]) {
-      assert.ok(isNumeric(p[f]), `Brak/niepoprawne pole ${f}: ${JSON.stringify(p)}`);
+      assert.ok(isNumeric(p[f]), `Missing/invalid field ${f}: ${JSON.stringify(p)}`);
     }
   }
 }

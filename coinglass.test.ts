@@ -1,11 +1,11 @@
-// coinglass.test.ts – test end-to-end narzędzi Coinglass na prawdziwym API.
-// Uruchom: npm run test:coinglass  (wymaga MCP_AUTH_TOKEN i COINGLASS_API_KEY w .env)
+// coinglass.test.ts – end-to-end test of the Coinglass tools against the real API.
+// Run: npm run test:coinglass  (needs MCP_AUTH_TOKEN and COINGLASS_API_KEY in .env)
 
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { assertPoints, call, serverTests, useMcpServer } from "./test-helpers.ts";
 
-// Oczekiwane pola w każdym punkcie danych.
+// Expected fields in every data point.
 const TOOLS: Record<string, string[]> = {
   coinglass_funding_rate_history: ["open", "high", "low", "close"],
   coinglass_open_interest_history: ["open", "high", "low", "close"],
@@ -13,17 +13,17 @@ const TOOLS: Record<string, string[]> = {
 };
 const ARGS = { exchange: "Binance", symbol: "BTCUSDT", interval: "4h", limit: 3 };
 
-describe("Coinglass", { skip: !process.env.COINGLASS_API_KEY && "brak COINGLASS_API_KEY" }, () => {
+describe("Coinglass", { skip: !process.env.COINGLASS_API_KEY && "COINGLASS_API_KEY not set" }, () => {
   const ctx = useMcpServer();
 
-  describe("serwer MCP", () => serverTests(ctx, Object.keys(TOOLS)));
+  describe("MCP server", () => serverTests(ctx, Object.keys(TOOLS)));
 
-  describe("endpointy", () => {
+  describe("endpoints", () => {
     for (const [name, fields] of Object.entries(TOOLS)) {
       test(name, async () => {
         const data = await call(ctx, name, ARGS);
         assertPoints(data, fields, "time");
-        assert.ok((data as unknown[]).length <= ARGS.limit, "Więcej punktów niż limit");
+        assert.ok((data as unknown[]).length <= ARGS.limit, "More points than the limit");
       });
     }
   });

@@ -1,12 +1,13 @@
-// coinalyze.test.ts – test end-to-end narzędzi Coinalyze na prawdziwym API.
-// Uruchom: npm run test:coinalyze  (wymaga MCP_AUTH_TOKEN i COINALYZE_API_KEY w .env)
-// Zużywa ok. 13 z 40 wywołań/min limitu Coinalyze.
+// coinalyze.test.ts – end-to-end test of the Coinalyze tools against the real API.
+// Run: npm run test:coinalyze  (needs MCP_AUTH_TOKEN and COINALYZE_API_KEY in .env)
+// Uses about 13 of the 40 calls/min Coinalyze limit. The history cache is in-memory
+// so every run really hits the API.
 
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { assertPoints, call, serverTests, useMcpServer } from "./test-helpers.ts";
 
-// Narzędzia historyczne i pola w punktach `history`.
+// History tools and the fields of their `history` points.
 const HISTORY_TOOLS: Record<string, string[]> = {
   coinalyze_open_interest_history: ["o", "h", "l", "c"],
   coinalyze_funding_rate_history: ["o", "h", "l", "c"],
@@ -16,21 +17,21 @@ const HISTORY_TOOLS: Record<string, string[]> = {
 };
 const TOOLS = ["coinalyze_exchanges", "coinalyze_future_markets", "coinalyze_current", ...Object.keys(HISTORY_TOOLS)];
 
-describe("Coinalyze", { skip: !process.env.COINALYZE_API_KEY && "brak COINALYZE_API_KEY" }, () => {
-  const ctx = useMcpServer();
+describe("Coinalyze", { skip: !process.env.COINALYZE_API_KEY && "COINALYZE_API_KEY not set" }, () => {
+  const ctx = useMcpServer({ CACHE_DB_PATH: ":memory:" });
 
-  describe("serwer MCP", () => serverTests(ctx, TOOLS));
+  describe("MCP server", () => serverTests(ctx, TOOLS));
 
-  // Testy wykonują się po kolei; dwa pierwsze wyszukują symbole do pozostałych.
-  describe("endpointy", () => {
-    const symbols: string[] = []; // [Binance BTCUSDT perp, BTC perp z innej giełdy]
+  // Tests run in order; the first two look up the symbols used by the rest.
+  describe("endpoints", () => {
+    const symbols: string[] = []; // [Binance BTCUSDT perp, BTC perp on another exchange]
     let binanceCode = "";
 
     test("coinalyze_exchanges", async () => {
       const data = (await call(ctx, "coinalyze_exchanges")) as { name: string; code: string }[];
-      assert.ok(Array.isArray(data) && data.length > 0, "Pusta lista giełd");
+      assert.ok(Array.isArray(data) && data.length > 0, "Empty exchange list");
       binanceCode = data.find((e) => /binance/i.test(e.name))?.code ?? "";
-      assert.ok(binanceCode, `Brak Binance na liście: ${JSON.stringify(data)}`);
+      assert.ok(binanceCode, `Binance not in the list: ${JSON.stringify(data)}`);
     });
 
     test("coinalyze_future_markets", async () => {
@@ -39,10 +40,10 @@ describe("Coinalyze", { skip: !process.env.COINALYZE_API_KEY && "brak COINALYZE_
         exchange: string;
         symbol_on_exchange: string;
       }[];
-      assert.ok(Array.isArray(data) && data.length > 0, "Brak rynków BTC");
+      assert.ok(Array.isArray(data) && data.length > 0, "No BTC markets");
       const binance = data.find((m) => m.exchange === binanceCode && m.symbol_on_exchange === "BTCUSDT");
       const other = data.find((m) => m.exchange !== binanceCode);
-      assert.ok(binance && other, "Nie znaleziono BTCUSDT na Binance lub BTC na innej giełdzie");
+      assert.ok(binance && other, "BTCUSDT on Binance or BTC on another exchange not found");
       symbols.push(binance.symbol, other.symbol);
     });
 
@@ -59,7 +60,7 @@ describe("Coinalyze", { skip: !process.env.COINALYZE_API_KEY && "brak COINALYZE_
           symbol: string;
           history: unknown;
         }[];
-        assert.ok(Array.isArray(data) && data.length === 1, `Oczekiwano 1 serii: ${JSON.stringify(data).slice(0, 200)}`);
+        assert.ok(Array.isArray(data) && data.length === 1, `Expected 1 series: ${JSON.stringify(data).slice(0, 200)}`);
         assertPoints(data[0]!.history, fields, "t");
       });
     }
