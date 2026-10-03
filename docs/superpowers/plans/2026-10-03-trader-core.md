@@ -102,7 +102,7 @@ Failure modes the spec implies but does not spell out. Each has a test in the ta
   `effectivePolicy(history: Policy[], n: number): Policy | null` (history newest first).
 
 - [ ] **Step 1: Write failing tests:** rejects malformed JSON shapes, `bias` outside [-1, 1], `risk_budget_pct` above
-  `max_risk_per_trade_pct` (rejected, not clamped), unknown `menu_id`, a menu older than `stale_data_max_age_sec`,
+  `max_risk_per_trade_pct` (rejected, not clamped), unknown `menu_id`, a menu older than `max_menu_age_min`,
   `symbol` mismatch, a past `valid_until`; clamps `valid_until` to `max_policy_ttl_min`; null `scenario` is valid but
   yields no entry; missing target or invalidation in a scenario fails; long with invalidation at or above the entry
   zone fails; `entry_zone.from` above `to` fails; targets not ordered away from entry fail; `horizon_hours` above
@@ -119,17 +119,18 @@ Failure modes the spec implies but does not spell out. Each has a test in the ta
 **Interfaces:**
 - Consumes: `BotConfig`, `ResolvedScenario`.
 - Produces: `interface Contract { tickSize: number; sizeStep: number; minSize: number }`;
-  `computeSize(i: { capital: number; riskPct: number; convictionMult: number; entry: number; stop: number; contract: Contract }): { size: number } | { reject: "size_below_min" | "zero_stop_distance" }`;
-  `estimateLiquidation(i: { side: "long" | "short"; entry: number; leverage: number; mmr: number }): number`;
-  `validateTrade(i: { scenario: ResolvedScenario; entry: number; size: number; atr: number; config: BotConfig; contract: Contract }): { ok: true; ladder: { price: number; size: number }[]; stop: number } | { ok: false; reason: string }`.
+  `floorTo(x, step)`, `ceilTo(x, step)`, `convictionMultiplier(conviction, cap)`, `estimateLiquidation({ side, entry, leverage, mmr })`;
+  `computeSize(i): { size, riskUsd, riskPct, convictionMult } | { reject: "size_below_min" | "zero_stop_distance" | "invalid_input" }`;
+  `splitLadder(prices, size, contract): { price, size }[]`;
+  `planTrade(i: TradeInput): TradePlan` with `TradePlan = { ok: true; size; riskUsd; riskPct; stop; ladder; leverage; rewardRisk } | { ok: false; reason: TradeReject }`.
+  `planTrade` is what the engine calls; it rounds, sizes and validates in one pass (see spec section 5).
 
-- [ ] **Step 1: Write failing tests:** spec formula `size = capital x min(risk, max) x convMult / |entry - stop|`
-  with `convMult` clamped to `[0.5, conviction_multiplier_cap]`; size rounds down to `sizeStep`, below `minSize` gives
-  `size_below_min`; stop equal to entry gives `zero_stop_distance`; R:R below `min_reward_risk` fails; TP not beyond
-  fees plus expected funding fails; stop closer than `sl_min_atr_multiple` x ATR fails; liquidation distance below
-  `liq_distance_min_multiple` x stop distance fails and the stop is never moved; ATR 0, NaN or negative price fails
-  with a reason; tick rounding that moves the stop across the entry fails; a size too small for 3 rungs collapses to
-  fewer rungs whose sizes sum to the position.
+- [ ] **Step 1: Write failing tests** in `bot/sizing.test.ts`: the cap applies after the conviction multiplier;
+  leverage caps the size for tight stops; size rounds down to `sizeStep`; `size_below_min`; `zero_stop_distance`;
+  `invalid_input` for NaN, zero or negative inputs (never a throw, never a NaN field); stop rounds away from the
+  entry and targets toward it, and a target that lands on the entry is dropped; R:R, noise floor and costs (fees
+  plus funding, receipts not credited) each reject with their own reason; liquidation reduces the size and never
+  moves the stop; the ladder collapses to fewer rungs and its sizes sum to the position.
 - [ ] **Step 2: Run** `node --test bot/sizing.test.ts`. Expected: FAIL.
 - [ ] **Step 3: Implement.** Liquidation estimate: `entry x (1 -/+ (1/leverage - mmr))` for long/short.
 - [ ] **Step 4: Run.** Expected: PASS. **Step 5: Commit** `bot: add sizing and trade validation`.
@@ -139,15 +140,20 @@ Failure modes the spec implies but does not spell out. Each has a test in the ta
 **Files:** Create `bot/bot-store.ts`, `bot/bot-store.test.ts`.
 
 **Interfaces:**
-- Produces: `class BotStore { constructor(path: string) }` (same `mkdirSync` + WAL pattern as `HistoryStore`) with:
-  `putMenu(m: LevelMenu): void`, `getMenu(id: string): LevelMenu | undefined`,
-  `putPolicy(p: Policy, createdAtMs: number): void`, `latestPolicies(n: number): Policy[]`,
-  `getKv(key: string): string | undefined`, `setKv(key: string, value: string): void`,
-  `addCounter(day: string, name: string, by: number): void`, `getCounter(day: string, name: string): number`,
-  `appendJournal(e: JournalEntry): void` (throws on write failure), `addIncident(i: Incident): void`,
-  `listIncidents(sinceMs: number): Incident[]`.
+- Produces: `expandHome(path: string): string` (expands a leading `~`);
+  `class BotStore { constructor(path: string); close(): void }` (`:memory:` or a file; `~` expanded; same
+  `mkdirSync` + WAL pattern as `HistoryStore`) with:
+  `transaction<T>(fn: () => T): T` (public, reentrant: only the outermost call commits or rolls back),
+  `putMenu(m: LevelMenu): void` (throws on a duplicate id), `getMenu(id: string): LevelMenu | undefined`,
+  `putPolicy(p: Policy, createdAtMs: number): number` (returns the store-assigned id, never chosen by the LLM),
+  `getPolicy(id: number): StoredPolicy | undefined`, `latestPolicies(n: number): StoredPolicy[]` (newest first by
+  `createdAtMs`, then id), `getKv(key: string): string | undefined`, `setKv(key: string, value: string): void`,
+  `addCounter(day: string, name: string, by: number): void`, `getCounter(day: string, name: string): number` (0 if unset),
+  `appendJournal(e: JournalEntry): void` (throws on write failure), `listJournal(sinceMs: number, kind?: string): JournalEntry[]`,
+  `addIncident(i: Incident): void`, `listIncidents(sinceMs: number): Incident[]`.
+  `interface StoredPolicy { id: number; createdAtMs: number; policy: Policy }`;
   `interface Incident { tMs: number; kind: string; detail: string }`;
-  `interface JournalEntry { tMs: number; configHash: string; kind: string; snapshot: unknown; policyId?: string; decision: string; reason: string }`.
+  `interface JournalEntry { tMs: number; configHash: string; kind: string; snapshot: unknown; policyId?: number; decision: string; reason: string }`.
 
 - [ ] **Step 1: Write failing tests** (`:memory:`): round-trips for menus, policies (newest first), kv, counters;
   `addCounter` accumulates; a journal row keeps its config hash; `appendJournal` on a closed database throws.

@@ -144,9 +144,21 @@ interface Policy {
 - **Tighten instantly, loosen slowly.** Tightening (smaller `risk_budget_pct`, lower conviction or |bias|, fewer
   `allowed_directions`, shorter `valid_until`) applies at once. Loosening takes the most conservative value over the
   last `loosen_confirm_cycles` cycles. The effective policy is computed per field.
-- **Sizing.** `size = capital x min(risk_budget_pct, max_risk_per_trade_pct) x conviction_mult / stop_distance`, with
-  `conviction_mult` clamped to `[0.5, conviction_multiplier_cap]`. A size that rounds below the contract minimum is
-  no entry, and the journal records `size_below_min`.
+- **Sizing.** `conviction_mult = 0.5 + conviction x (conviction_multiplier_cap - 0.5)` (linear, so 0.5 to the cap).
+  `risk_pct = min(risk_budget_pct x conviction_mult, max_risk_per_trade_pct)`: the hard cap applies **after** the
+  multiplier. `size = capital x risk_pct / 100 / stop_distance`, then capped so that notional <= capital x
+  `max_leverage`, and rounded down to the size step. A size below the contract minimum is no entry
+  (`size_below_min`).
+- **Price rounding** (never in the bot's favour): the stop rounds away from the entry, targets round toward it. A
+  target that no longer lies beyond the entry, or does not clear round-trip fees plus expected funding, is dropped;
+  with no target left there is no entry. Funding receipts are never credited.
+- **TP ladder.** The position is split equally over the targets in whole size steps, the remainder going to the
+  nearest rung. If a rung would fall below the minimum size, the ladder collapses to the nearest fewer targets.
+  R:R is the size-weighted average reward over the stop distance.
+- **Liquidation.** Liquidation depends on the isolated-margin leverage, not on the size. The leverage used is the
+  largest one that keeps `liquidation distance >= liq_distance_min_multiple x stop distance`, capped at
+  `max_leverage`. The size is then reduced so the position fits that leverage. The stop never moves. If the reduced
+  size is below the minimum, there is no entry.
 
 ## 6. Config (hard limits)
 
@@ -182,6 +194,7 @@ entry_timeout_sec: 300
 protect_timeout_sec: 5
 max_policy_ttl_min: 60
 stale_data_max_age_sec: 120
+max_menu_age_min: 15       # a policy may reference a level menu at most this old (covers LLM latency)
 loosen_confirm_cycles: 2
 max_hold_hours: 48
 watchdog_interval_sec: 5
