@@ -308,18 +308,24 @@ Failure modes the spec implies but does not spell out. Each has a test in the ta
 
 ### Task 11: Watchdog
 
-**Files:** Create `bot/watchdog.ts`, `bot/watchdog.test.ts`.
+**Files:** Create `bot/watchdog.ts`, `bot/watchdog.test.ts`. Modify `bot/trader.ts` (export `filledTargets`).
 
 **Interfaces:**
-- Produces: `type ProtectionIssue = { kind: "no_sl" | "wrong_sl_size" | "no_tp" | "wrong_tp_size" | "orphan_reduce_only"; detail: string }`;
-  `checkProtection(position: FuturesPosition | null, orders: FuturesOpenOrder[], config: BotConfig): ProtectionIssue[]`;
-  `watchdogTick(d: TraderDeps): Promise<ProtectionIssue[]>` (repairs a missing SL with the deterministic
-  `cliOrdId`, or closes at market when repair fails; never opens a position).
+- Produces: `IssueKind` (`no_sl`, `wrong_sl_size`, `no_tp`, `wrong_tp_size`, `orphan_reduce_only`, `unexplained_position`,
+  `position_on_wrong_side`, `cannot_verify`); `ProtectionIssue { kind, detail }`;
+  `ProtectionInput { position, orders, trade, filledRoles, config }`; `checkProtection(i): ProtectionIssue[]` (pure);
+  `watchdogTick(d: TraderDeps): Promise<ProtectionIssue[]>`.
+- Rules: it only reads the engine record and keeps its own state under its own key; it waits `2 x protect_timeout_sec` after first seeing a
+  problem; everything it places is reduce-only; it never touches a position without a trade record or an order the bot did not create; a
+  missing stop is re-placed once (at the last trailed stop) and then the position is closed at market; a missing or short target is
+  re-placed but never closes anything; repair ids start at sequence 100 (closes at 1000) and only count up; what it cannot read it reports as
+  `cannot_verify` while a pending repair keeps its clock.
 
-- [ ] **Step 1: Write failing tests:** each issue kind is reported for a crafted position and order set; a clean set
-  reports none; a missing SL is repaired with the same `cliOrdId` the engine would use, so engine and watchdog
-  repairing together yield one order; an exchange read failure records a "cannot verify" incident instead of passing;
-  the watchdog never places an opening order.
+- [ ] **Step 1: Write failing tests:** each issue kind from crafted positions and orders; a clean set reports none; a property that no issues
+  means a stop of the right size exists; the grace period; the stop re-placed at the trailed value; a failed repair closes; leftover targets
+  cancelled and foreign orders untouched; a missing target re-placed at its own rung and never closing; a wrong stop size edited; orphans after
+  a close; engine and watchdog repairing together leave one stop in either order; nothing done right after a fill while the engine protects; an
+  unexplained position never touched; an unreadable exchange; the engine record never written; one incident per distinct problem.
 - [ ] **Step 2: Run** `node --test bot/watchdog.test.ts`. Expected: FAIL.
 - [ ] **Step 3: Implement.** **Step 4: Run.** Expected: PASS. **Step 5: Commit** `bot: add watchdog`.
 

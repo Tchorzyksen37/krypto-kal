@@ -297,7 +297,13 @@ Rules:
 
 **Watchdog**
 - Engine hangs: the watchdog repairs a missing SL and nothing else.
-- Watchdog and engine repair the same stop: same `cliOrdId`, so one order.
+- Watchdog and engine repair the same stop: the watchdog waits `2 x protect_timeout_sec` before acting, so the engine
+  goes first, and its repair orders use ids from sequence number 100 up (the engine uses small ones). A shared id would
+  need the watchdog to write the engine's record, which two processes must not do, and would let a later engine repair
+  reuse a finished order's id and place nothing. In the worst race two reduce-only stops exist briefly; the second finds
+  nothing to reduce, and leftovers are cancelled when the position closes.
+- The watchdog never writes the engine's record, never opens a position, and never touches a position it has no trade
+  record for (it reports it).
 - Exchange API down: record "cannot verify" as an incident, do not assume fine.
 - Rate-limit budget nearly spent: watchdog reads have priority.
 

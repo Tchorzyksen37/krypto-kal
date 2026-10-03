@@ -105,7 +105,7 @@ async function snapshotFrom(d: TraderDeps, rec: EngineRecord): Promise<Snapshot>
 }
 
 // The target rungs of a trade that have filled, from the fills (an order that is gone from the book could also be cancelled).
-function filledTargets(fills: { cliOrdId?: string | null }[], policyId: number): OrderRole[] {
+export function filledTargets(fills: { cliOrdId?: string | null }[], policyId: number): OrderRole[] {
   const roles = new Set<OrderRole>();
   for (const f of fills) {
     const id = f.cliOrdId ? parseCliOrdId(f.cliOrdId) : undefined;
