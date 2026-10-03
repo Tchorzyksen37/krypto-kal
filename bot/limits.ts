@@ -37,6 +37,19 @@ export function recordPlacedOrder(
   });
 }
 
+// The pure core of the gate: the counters are passed in, so the engine can call it without touching the store.
+export interface EntryLimitsCheck {
+  config: BotConfig;
+  nowMs: number;
+  lastClockMs: number; // the newest time seen so far; a clock that went backwards blocks entries
+  entriesToday: number;
+  ordersToday: number;
+  openRiskPct: number; // risk already open, % of trading capital
+  newRiskPct: number; // risk this entry would add, % of trading capital
+  openPositions: number;
+  ordersNeeded: number; // every order the entry will place: the entry, the stop and each target
+}
+
 export interface EntryCheck {
   store: BotStore;
   config: BotConfig;
@@ -58,21 +71,30 @@ export type EntryLimit =
   | "max_risk_per_trade"
   | "max_total_open_risk";
 
-// Whether a new entry may start. The order budget is checked against the whole bundle (entry + stop + targets):
-// the protective orders must never be the ones a limit blocks.
+// Whether a new entry may start, reading today's counters from the store.
 export function entryAllowed(i: EntryCheck): { ok: true } | { ok: false; reason: EntryLimit } {
-  const { config, store } = i;
+  const day = Number.isFinite(i.nowMs) ? tradingDay(i.nowMs, i.config.day_reset_utc_hour) : "";
+  return checkEntryLimits({
+    config: i.config, nowMs: i.nowMs, lastClockMs: i.lastClockMs, openRiskPct: i.openRiskPct, newRiskPct: i.newRiskPct,
+    openPositions: i.openPositions, ordersNeeded: i.ordersNeeded,
+    entriesToday: day ? i.store.getCounter(day, "entries") : 0, ordersToday: day ? i.store.getCounter(day, "orders") : 0,
+  });
+}
+
+// The order budget is checked against the whole bundle (entry + stop + targets): the protective orders must never
+// be the ones a limit blocks.
+export function checkEntryLimits(i: EntryLimitsCheck): { ok: true } | { ok: false; reason: EntryLimit } {
+  const { config } = i;
   const bad = (reason: EntryLimit) => ({ ok: false as const, reason });
   const numbersOk =
     Number.isFinite(i.nowMs) && Number.isFinite(i.lastClockMs) && Number.isFinite(i.openRiskPct) && i.openRiskPct >= 0 &&
     Number.isFinite(i.newRiskPct) && i.newRiskPct > 0 && Number.isInteger(i.openPositions) && i.openPositions >= 0 &&
-    Number.isInteger(i.ordersNeeded) && i.ordersNeeded >= 0;
+    Number.isInteger(i.ordersNeeded) && i.ordersNeeded >= 0 && Number.isFinite(i.entriesToday) && Number.isFinite(i.ordersToday);
   if (!numbersOk) return bad("invalid_input");
   if (i.nowMs < i.lastClockMs) return bad("clock_went_backwards");
 
-  const day = tradingDay(i.nowMs, config.day_reset_utc_hour);
-  if (store.getCounter(day, "entries") >= config.max_entries_per_day) return bad("max_entries_per_day");
-  if (store.getCounter(day, "orders") + i.ordersNeeded > config.max_orders_per_day) return bad("max_orders_per_day");
+  if (i.entriesToday >= config.max_entries_per_day) return bad("max_entries_per_day");
+  if (i.ordersToday + i.ordersNeeded > config.max_orders_per_day) return bad("max_orders_per_day");
   if (i.openPositions >= config.max_open_positions) return bad("max_open_positions");
   if (i.openPositions >= config.max_positions_per_asset) return bad("max_positions_per_asset");
   if (i.newRiskPct > config.max_risk_per_trade_pct + EPS) return bad("max_risk_per_trade");

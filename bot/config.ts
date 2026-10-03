@@ -37,12 +37,15 @@ export const ConfigSchema = z
     atr: z.strictObject({ resolution: z.enum(KRAKEN_FUTURES_RESOLUTIONS), period: posInt }),
     fees_bps: z.strictObject({ maker: z.number(), taker: z.number() }), // maker may be a rebate (negative)
     slippage_cap_bps: z.number().nonnegative(),
+    entry_confirm_sec: z.number().nonnegative(), // price must stay in the entry zone this long before an entry
     entry_timeout_sec: z.number().positive(),
     protect_timeout_sec: z.number().positive(),
     max_policy_ttl_min: z.number().positive(),
     stale_data_max_age_sec: z.number().positive(),
     max_menu_age_min: z.number().positive(), // a policy may reference a level menu at most this old (covers LLM latency)
     loosen_confirm_cycles: posInt,
+    trail_atr_multiple: z.number().positive(), // the trailing stop follows the last price at this many ATR
+    trail_start_r: z.number().nonnegative(), // trailing starts once the trade is this many R in profit
     max_hold_hours: z.number().positive(),
     watchdog_interval_sec: z.number().positive(),
     db_path: z.string().min(1), // "~" is expanded by the code that opens the database
@@ -78,12 +81,15 @@ const DEFAULTS: BotConfig = {
   atr: { resolution: "1h", period: 14 },
   fees_bps: { maker: 2, taker: 5 },
   slippage_cap_bps: 10,
+  entry_confirm_sec: 30,
   entry_timeout_sec: 300,
   protect_timeout_sec: 5,
   max_policy_ttl_min: 60,
   stale_data_max_age_sec: 120,
   max_menu_age_min: 15,
   loosen_confirm_cycles: 2,
+  trail_atr_multiple: 2,
+  trail_start_r: 1,
   max_hold_hours: 48,
   watchdog_interval_sec: 5,
   db_path: "~/.krypto-kal/bot.db",

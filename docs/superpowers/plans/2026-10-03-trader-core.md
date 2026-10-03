@@ -234,24 +234,28 @@ Failure modes the spec implies but does not spell out. Each has a test in the ta
 
 ### Task 8: Engine decision function (state machine)
 
-**Files:** Create `bot/engine.ts`, `bot/engine.test.ts`.
+**Files:** Create `bot/engine.ts`, `bot/engine.test.ts`. Modify `bot/limits.ts` (pure `checkEntryLimits`), `bot/config.ts`
+(`entry_confirm_sec`, `trail_atr_multiple`, `trail_start_r`).
 
 **Interfaces:**
-- Consumes: Tasks 1-3, 7.
-- Produces: `type EngineState = "FLAT" | "ENTERING" | "PROTECTING" | "OPEN" | "REDUCING" | "COOLDOWN" | "HALTED"`;
-  `interface Snapshot { nowMs: number; state: EngineState; stateSinceMs: number; position: FuturesPosition | null; openOrders: FuturesOpenOrder[]; price: PriceEvent | null; priceAgeSec: number; atr: number | null; effective: Policy | null; scenario: ResolvedScenario | null; reconciled: boolean; foreignExposure: boolean; limits: ReturnType<typeof entryAllowed>; dailyLossBreached: boolean; liquidated: boolean; lastClockMs: number }`;
-  `type Action = { type: "place"; req: OrderRequest; reason: string } | { type: "cancel"; cliOrdId: string; reason: string } | { type: "edit"; cliOrdId: string; stopPrice: number; reason: string } | { type: "transition"; to: EngineState; reason: string } | { type: "halt"; reason: string; manualAck: boolean } | { type: "skip"; reason: string }`;
-  `decide(s: Snapshot, config: BotConfig): Action[]` (pure, no I/O).
+- Consumes: Tasks 1-3, 5, 7.
+- Produces: `EngineState`; `TradeRecord` (policyId, direction, entryCliOrdId, entryPrice, plan { size, stop, ladder, leverage },
+  horizonEndMs, protectSeq, lastStop?); `PolicyView { id, policy (effective), scenario }`; `Snapshot` (the trader fills it:
+  clock, state and its start, halt, trade, position, open orders, price and its age, ATR, policy, time in zone, reconciled,
+  foreign exposure, daily-loss and liquidation flags, cooldown end, last trade PnL, daily counters, open risk, contract,
+  funding); `Action` = place | cancel | edit (stopPrice and/or size) | transition (with the new trade record or a cooldown end)
+  | halt (manual acknowledgement or until a time) | skip; `reduceOnlyReason(s, config)`; `decide(s, config): Action[]` (pure,
+  never empty, at least a `skip` with a reason).
+- Id rules the trader relies on: repairs use a fresh `protectSeq` (bumped on a missing stop) and close orders use an attempt
+  number derived from elapsed time, so a retry reuses the id but a finished order is never "re-placed".
 
-- [ ] **Step 1: Write failing tests:** one test per row of the spec section 4 table, asserting the returned actions:
-  FLAT -> ENTERING places a limit entry only when all conditions hold, and each failing condition yields a `skip`
-  with its own reason; stale data (`priceAgeSec` above the limit) or an expired policy blocks entry but leaves
-  stops alone (reduce-only); a trailing edit that would widen a stop is never emitted; opposite bias with a position
-  goes to REDUCING, never straight to ENTERING; a backwards clock (`nowMs < lastClockMs`) yields only `skip`;
-  `foreignExposure` blocks entry; `liquidated` yields `halt` with `manualAck: true`; `dailyLossBreached` yields
-  `halt` with `manualAck: false`; time-stop fires at `horizon_hours`; COOLDOWN -> FLAT only after the timer.
+- [ ] **Step 1: Write failing tests:** one block per row of the spec section 4 table; each FLAT precondition has its own skip
+  reason; reduce-only mode blocks entries but never closes a position, and an expired policy is not authoritative;
+  protection is confirmed by read-back, sized to the filled quantity, and closes at market on timeout; the stop is only
+  ever tightened (mutation-checked property over random snapshots); leftovers are cancelled before COOLDOWN and the
+  bot never cancels an order it did not create; manual halts never clear by themselves; a backwards clock yields only a skip.
 - [ ] **Step 2: Run** `node --test bot/engine.test.ts`. Expected: FAIL.
-- [ ] **Step 3: Implement** `decide` as pure functions per state. **Step 4: Run.** Expected: PASS.
+- [ ] **Step 3: Implement** `decide` as one pure function per state. **Step 4: Run.** Expected: PASS.
 - [ ] **Step 5: Commit** `bot: add pure engine decision function`.
 
 ### Task 9: Trader cycle and protection flow

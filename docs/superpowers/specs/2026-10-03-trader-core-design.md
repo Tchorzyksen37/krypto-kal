@@ -190,12 +190,15 @@ maintenance_margin_rate: 0.005     # placeholder, used for the liquidation price
 atr: { resolution: 1h, period: 14 }
 fees_bps: { maker: 2, taker: 5 }   # placeholders, fee tier not checked
 slippage_cap_bps: 10
+entry_confirm_sec: 30      # price must stay in the entry zone this long (the mechanical confirmation)
 entry_timeout_sec: 300
 protect_timeout_sec: 5
 max_policy_ttl_min: 60
 stale_data_max_age_sec: 120
 max_menu_age_min: 15       # a policy may reference a level menu at most this old (covers LLM latency)
 loosen_confirm_cycles: 2
+trail_atr_multiple: 2      # the trailing stop follows the last price at this many ATR (tighten only)
+trail_start_r: 1           # trailing starts once the trade is this many R in profit
 max_hold_hours: 48
 watchdog_interval_sec: 5
 db_path: ~/.krypto-kal/bot.db      # outside OneDrive
