@@ -45,15 +45,20 @@ and opens positions by hand. Design and rationale: `docs/superpowers/plans/2026-
    invalidates the call, and 0-3 bets (max one per symbol): `symbol, side, entry, stop_loss, take_profit,
    ttl_minutes (5..60), entry style (limit default), probability, rationale, cites`. Stops must sit outside
    1h-ATR noise; take-profit must clear round-trip fees; reward:risk >= 1.2.
-7. **Write** the JSON to `BRAIN/output/speculation/data/YYYY-MM-DD/HH00Z.json` (HH = the window start hour,
-   schema in `speculation-types.ts`).
-8. **Validate and render:** `node speculation-check.ts <json>` then `node speculation-render.ts <json>`.
-   The scripts drop invalid bets (with reasons), assign bet ids, write the Markdown report, the day index and
-   `dashboard.html`. On a script error, fix the JSON once and rerun. On a second failure, publish the
-   KNOWN / UNKNOWN summary with a "generation failed" banner instead of skipping the hour.
+7. **Write the report** as Markdown to `BRAIN/output/speculation/YYYY-MM-DD/HH00Z.md` (HH = window start
+   hour), in this order: frontmatter, disclaimer callout, regime and scenarios (table with probability and a
+   unicode bar), catalysts (time-ordered table), risks (with what invalidates the call), KNOWN / UNKNOWN /
+   POSSIBLE digest (ESTIMATE labels visible, "why this symbol" for screened picks), then **Best bets** last.
+   Also write `HH00Z.meta.json` next to it: symbols (futures contract, last price, 1h ATR, why) and the bet
+   list. The JSON holds only what code needs; everything the user reads is in the `.md`.
+8. **Validate:** `node speculation-check.ts <meta.json>`. It drops invalid bets (reason printed in the note),
+   assigns bet ids and rewrites the Best bets block of the `.md` itself, so do not hand-format that block.
+   On a script error, fix the files once and rerun. On a second failure, keep the KNOWN / UNKNOWN summary
+   and add a "generation failed" banner instead of skipping the hour.
 9. **Reply** in three lines: top bet (or "no bet") with levels, close-by time, report path.
 
-## Output contract
+## Bets
 
-The best-bets block is the **last** section of the report. Its columns: symbol, side, entry, SL, TP, TTL (as a
-clock time), probability, R:R. Do not hand-write the report; the renderer owns the format.
+Entries are **limit**: the user waits for the touch. Each bet has an entry deadline (default 30 min) after
+which it is void; TTL counts from the touch. Per bet: `symbol, side, entry, stop_loss, take_profit,
+ttl_minutes (5..60), probability, rationale`. Max one bet per symbol, max 3 in total.
