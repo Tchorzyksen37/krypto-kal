@@ -174,6 +174,7 @@ cooldown_after_loss_min: 120
 min_reward_risk: 1.5
 sl_min_atr_multiple: 1.0
 liq_distance_min_multiple: 3
+maintenance_margin_rate: 0.005     # placeholder, used for the liquidation price estimate
 atr: { resolution: 1h, period: 14 }
 fees_bps: { maker: 2, taker: 5 }   # placeholders, fee tier not checked
 slippage_cap_bps: 10
@@ -264,7 +265,9 @@ Rules:
 
 **Reconciliation and restart**
 - Restart with a position and no SL: incident, protect or close, then HALTED for acknowledgement.
-- Orders the bot does not recognise: cancel and journal.
+- Orders or positions on `config.symbol` that the bot did not create (no `bot-` `cliOrdId` prefix), for example the
+  user's manual trades: nothing is cancelled. Entries are blocked, an incident is recorded and an alert is raised.
+  Recommended: run the bot on a dedicated sub-account.
 - Local state says OPEN but the exchange is flat: rebuild from fills, book PnL once.
 - Exchange history window shorter than the day: take the higher of persisted and rebuilt counters.
 - Entries stay blocked until reconciliation has run once with a clean result.
@@ -346,8 +349,8 @@ and require the test to fail.
 
 ## 12. Open items
 
-- Validation approach for policy and config: hand-written validator or a library. Decide in the plan.
-- Real Kraken fee tier (the fee numbers above are placeholders).
+- Validation approach for policy and config: `zod` (already a dependency, `^4.6.5`).
+- Real Kraken fee tier and maintenance margin rate (both are placeholders above).
 - Contract minimum size and tick size for `PF_XBTUSD`, read from `instruments()` at implementation time.
 - Level menu contents and the exact mechanical confirmation condition: specified in the analyst and engine plans.
 - Hardware and model choice for Ollama ingest: belongs to sub-project 3.

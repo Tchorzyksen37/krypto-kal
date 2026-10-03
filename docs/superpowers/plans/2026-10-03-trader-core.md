@@ -1,0 +1,357 @@
+# Trader Core Implementation Plan
+
+> **For the implementer:** the user writes the implementation code. The assistant writes test skeletons on request
+> and reviews each task against this plan and the spec. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Build the Kraken Futures bot's trader core: policy and config validation, sizing, a pure state machine, a
+`DryRunExecutor`, reconciliation, a watchdog, a journal and a report. No real order can be placed.
+
+**Architecture:** Pure decision logic (`decide`) is separated from I/O (`runCycle`). Engine and watchdog talk only to
+the `Executor` interface. Three processes (analyst, trader, watchdog) share one SQLite file. This plan covers the
+trader and the watchdog. The analyst is sub-project 2, so policies enter through a fixture CLI.
+
+**Tech Stack:** TypeScript on Node >= 23.6 (types stripped), `node:test`, `node:sqlite`, `zod` ^4.6.5 (already a dependency).
+
+**Spec:** `docs/superpowers/specs/2026-10-03-trader-core-design.md`
+
+## Global Constraints
+
+- Node >= 23.6 runs `.ts` directly: no `enum`, no `namespace`, no constructor parameter properties (`erasableSyntaxOnly`).
+- Relative imports use the `.ts` extension; type-only imports use `import type` (`verbatimModuleSyntax`).
+- All code, comments, logs and error messages are in English. Loggers come from `createLogger(scope)` in `logger.ts`.
+- All new code lives in `bot/`. Tests are `bot/*.test.ts`, offline, using `node:test` and `node:assert/strict`.
+- Iteration 1 cannot place real orders: `LiveExecutor` throws `NotImplemented` in its constructor; the trader process
+  uses only `KRAKEN_FUTURES_RO_API_KEY` / `KRAKEN_FUTURES_RO_API_SECRET`.
+- Every order carries a `cliOrdId` of the form `bot-<policy_id>-<role>-<seq>`, at most 100 characters.
+- Time comes from the injected `Clock`. `Date.now()` is allowed only inside `SystemClock`.
+- Default DB path `~/.krypto-kal/bot.db` (outside OneDrive). Tests use `:memory:`.
+- Config values and defaults are exactly those in spec section 6. Reduce and close are always allowed; limits block
+  entries only.
+- Ambiguity in the dry-run fill model resolves against the bot (spec section 7).
+
+## Review Focus
+
+Failure modes the spec implies but does not spell out. Each has a test in the task that owns the code.
+
+1. **Clock steps backwards** (NTP fix, resume from sleep). Cooldowns and TTLs must not extend or crash; the cycle
+   treats it as stale data. Task 1 (`FakeClock.set`) and Task 8.
+2. **Foreign orders or positions on the symbol** (the user's manual trades). Nothing is cancelled; entries are
+   blocked and an incident is recorded. Task 10.
+3. **Degenerate levels:** entry zone with `from` above `to`, targets not ordered away from entry, a target on the
+   wrong side, stop equal to entry. Rejected at validation, never sized. Task 2 and Task 3.
+4. **Bad market numbers:** ATR of zero or NaN, a candle gap, a zero or negative price. No entry and a journal reason;
+   never a division by zero in sizing. Task 3.
+5. **Rounding breaks the ladder:** tick rounding moves a stop across the entry, or the filled quantity is too small
+   to split into the requested TP rungs. Collapse to fewer rungs; if the stop crosses the entry, no entry. Task 3 and Task 9.
+
+---
+
+## File Structure
+
+| File | Responsibility |
+|---|---|
+| `bot/clock.ts` | `Clock`, `SystemClock`, `FakeClock` |
+| `bot/config.ts` | Config schema, defaults, loader, hash |
+| `bot/policy.ts` | Policy schema, level menu, validation, effective policy |
+| `bot/sizing.ts` | Position sizing, pre-trade validation, liquidation estimate |
+| `bot/bot-store.ts` | SQLite tables, key-value state, counters, journal, incidents |
+| `bot/executor.ts` | `Executor`, `MarketData`, order types, `makeCliOrdId` |
+| `bot/dry-run-executor.ts` | Simulated exchange: fills, fees, funding, replay, fault injection |
+| `bot/limits.ts` | Day boundary, counters, cooldowns, limit gate, halt conditions |
+| `bot/engine.ts` | Pure `decide(snapshot, config) => Action[]` |
+| `bot/trader.ts` | `runCycle`: read, decide, execute, confirm by read-back, journal |
+| `bot/reconcile.ts` | Startup reconciliation |
+| `bot/watchdog.ts` | `checkProtection`, `watchdogTick` |
+| `bot/live-executor.ts`, `bot/approving-executor.ts` | Stub and approval decorator |
+| `bot/report.ts`, `bot/cli.ts` | Report, fixture policy insert, halt acknowledgement, launcher |
+| `bot/sim.ts` | Random-scenario driver and invariant checker used by property tests |
+
+## Tasks
+
+### Task 1: Clock, config, test wiring
+
+**Files:** Create `bot/clock.ts`, `bot/config.ts`, `bot/config.test.ts`. Modify `package.json`.
+
+**Interfaces:**
+- Produces: `interface Clock { now(): number }` (epoch ms); `class SystemClock implements Clock`;
+  `class FakeClock implements Clock { constructor(startMs: number); advance(ms: number): void; set(ms: number): void }`;
+  `const ConfigSchema` (zod); `type BotConfig = z.infer<typeof ConfigSchema>`; `defaultConfig(): BotConfig`;
+  `loadConfig(path: string): { config: BotConfig; hash: string }`.
+
+- [ ] **Step 1: Write failing tests** in `bot/config.test.ts`: `defaultConfig()` equals the spec section 6 values;
+  `mode: "live"` with `live_enabled: false` fails to load; an unknown key fails (strict schema);
+  `max_risk_per_trade_pct <= 0` fails; the hash is stable for equal content and differs after any value changes;
+  `FakeClock.set` can move time backwards.
+- [ ] **Step 2: Run** `node --test bot/config.test.ts`. Expected: FAIL (module not found).
+- [ ] **Step 3: Implement** the signatures above. YAML is not needed: the config file is JSON.
+- [ ] **Step 4:** Add `"test:bot": "node --test bot/*.test.ts"` and append `bot/*.test.ts` to `test:offline` and `test`.
+  Check that the glob expands under `npm run test:bot` on Windows. Run it. Expected: PASS.
+- [ ] **Step 5: Commit** `bot: add clock and config`.
+
+### Task 2: Policy, level menu, effective policy
+
+**Files:** Create `bot/policy.ts`, `bot/policy.test.ts`.
+
+**Interfaces:**
+- Consumes: `BotConfig` (Task 1).
+- Produces: `type LevelId = string`; `interface Level { id: LevelId; price: number; kind: string }`;
+  `interface LevelMenu { id: string; symbol: string; createdAtMs: number; levels: Level[] }`;
+  `const PolicySchema`; `type Policy = z.infer<typeof PolicySchema>`;
+  `interface ResolvedScenario { direction: "long" | "short"; entryLow: number; entryHigh: number; targets: number[]; stop: number; horizonHours: number }`;
+  `validatePolicy(raw: unknown, ctx: { config: BotConfig; getMenu(id: string): LevelMenu | undefined; nowMs: number }): { ok: true; policy: Policy; scenario: ResolvedScenario | null } | { ok: false; reason: string }`;
+  `effectivePolicy(history: Policy[], n: number): Policy | null` (history newest first).
+
+- [ ] **Step 1: Write failing tests:** rejects malformed JSON shapes, `bias` outside [-1, 1], `risk_budget_pct` above
+  `max_risk_per_trade_pct` (rejected, not clamped), unknown `menu_id`, a menu older than `stale_data_max_age_sec`,
+  `symbol` mismatch, a past `valid_until`; clamps `valid_until` to `max_policy_ttl_min`; null `scenario` is valid but
+  yields no entry; missing target or invalidation in a scenario fails; long with invalidation at or above the entry
+  zone fails; `entry_zone.from` above `to` fails; targets not ordered away from entry fail; `horizon_hours` above
+  `max_hold_hours` fails. `effectivePolicy`: tightening (lower risk, conviction, |bias|, fewer directions, earlier
+  `valid_until`) takes effect with n = 1 of history; loosening takes the most conservative value over the last n.
+- [ ] **Step 2: Run** `node --test bot/policy.test.ts`. Expected: FAIL.
+- [ ] **Step 3: Implement** as above; `effectivePolicy` works per field.
+- [ ] **Step 4: Run.** Expected: PASS. **Step 5: Commit** `bot: add policy validation`.
+
+### Task 3: Sizing and pre-trade validation
+
+**Files:** Create `bot/sizing.ts`, `bot/sizing.test.ts`.
+
+**Interfaces:**
+- Consumes: `BotConfig`, `ResolvedScenario`.
+- Produces: `interface Contract { tickSize: number; sizeStep: number; minSize: number }`;
+  `computeSize(i: { capital: number; riskPct: number; convictionMult: number; entry: number; stop: number; contract: Contract }): { size: number } | { reject: "size_below_min" | "zero_stop_distance" }`;
+  `estimateLiquidation(i: { side: "long" | "short"; entry: number; leverage: number; mmr: number }): number`;
+  `validateTrade(i: { scenario: ResolvedScenario; entry: number; size: number; atr: number; config: BotConfig; contract: Contract }): { ok: true; ladder: { price: number; size: number }[]; stop: number } | { ok: false; reason: string }`.
+
+- [ ] **Step 1: Write failing tests:** spec formula `size = capital x min(risk, max) x convMult / |entry - stop|`
+  with `convMult` clamped to `[0.5, conviction_multiplier_cap]`; size rounds down to `sizeStep`, below `minSize` gives
+  `size_below_min`; stop equal to entry gives `zero_stop_distance`; R:R below `min_reward_risk` fails; TP not beyond
+  fees plus expected funding fails; stop closer than `sl_min_atr_multiple` x ATR fails; liquidation distance below
+  `liq_distance_min_multiple` x stop distance fails and the stop is never moved; ATR 0, NaN or negative price fails
+  with a reason; tick rounding that moves the stop across the entry fails; a size too small for 3 rungs collapses to
+  fewer rungs whose sizes sum to the position.
+- [ ] **Step 2: Run** `node --test bot/sizing.test.ts`. Expected: FAIL.
+- [ ] **Step 3: Implement.** Liquidation estimate: `entry x (1 -/+ (1/leverage - mmr))` for long/short.
+- [ ] **Step 4: Run.** Expected: PASS. **Step 5: Commit** `bot: add sizing and trade validation`.
+
+### Task 4: Store and journal
+
+**Files:** Create `bot/bot-store.ts`, `bot/bot-store.test.ts`.
+
+**Interfaces:**
+- Produces: `class BotStore { constructor(path: string) }` (same `mkdirSync` + WAL pattern as `HistoryStore`) with:
+  `putMenu(m: LevelMenu): void`, `getMenu(id: string): LevelMenu | undefined`,
+  `putPolicy(p: Policy, createdAtMs: number): void`, `latestPolicies(n: number): Policy[]`,
+  `getKv(key: string): string | undefined`, `setKv(key: string, value: string): void`,
+  `addCounter(day: string, name: string, by: number): void`, `getCounter(day: string, name: string): number`,
+  `appendJournal(e: JournalEntry): void` (throws on write failure), `addIncident(i: Incident): void`,
+  `listIncidents(sinceMs: number): Incident[]`.
+  `interface Incident { tMs: number; kind: string; detail: string }`;
+  `interface JournalEntry { tMs: number; configHash: string; kind: string; snapshot: unknown; policyId?: string; decision: string; reason: string }`.
+
+- [ ] **Step 1: Write failing tests** (`:memory:`): round-trips for menus, policies (newest first), kv, counters;
+  `addCounter` accumulates; a journal row keeps its config hash; `appendJournal` on a closed database throws.
+- [ ] **Step 2: Run** `node --test bot/bot-store.test.ts`. Expected: FAIL.
+- [ ] **Step 3: Implement.** JSON columns for snapshots. **Step 4: Run.** Expected: PASS.
+- [ ] **Step 5: Commit** `bot: add store and journal`.
+
+### Task 5: Executor interface and DryRunExecutor core
+
+**Files:** Create `bot/executor.ts`, `bot/dry-run-executor.ts`, `bot/dry-run-executor.test.ts`.
+
+**Interfaces:**
+- Consumes: `BotStore`, `Clock`, `BotConfig`; types `FuturesPosition`, `FuturesOpenOrder`, `FuturesFill` from
+  `kraken-futures-client.ts` (via `import type`).
+- Produces: `type OrderRole = "entry" | "sl" | "tp1" | "tp2" | "tp3" | "close"`;
+  `makeCliOrdId(policyId: string, role: OrderRole, seq: number): string`;
+  `interface OrderRequest { symbol: string; side: "buy" | "sell"; orderType: "lmt" | "mkt" | "stp" | "take_profit"; size: number; limitPrice?: number; stopPrice?: number; reduceOnly: boolean; triggerSignal?: "mark" | "last"; cliOrdId: string; processBefore?: string }`;
+  `type RejectKind = "insufficient_margin" | "reduce_only_violation" | "would_cross" | "rate_limited" | "unknown"`;
+  `type OrderAck = { ok: true; orderId: string } | { ok: false; kind: RejectKind; message: string }`;
+  `interface Executor` exactly as in spec section 7 (`placeOrder`, `editOrder`, `cancelOrder`, `cancelAll`,
+  `getPositions`, `getOpenOrders`, `getFills`, `getAccount`) plus `readonly kind`;
+  `interface MarketData { ticker(): Promise<PriceEvent>; candles(resolution: string, n: number): Promise<FuturesCandle[]>; fundingRates(): Promise<{ t: number; rate: number }[]>; clock: Clock }`;
+  `interface PriceEvent { t: number; mark: number; last: number; bid: number; ask: number }`;
+  `class DryRunExecutor implements Executor { constructor(o: { store: BotStore; clock: Clock; config: BotConfig }); onPrice(e: PriceEvent): void }`.
+
+- [ ] **Step 1: Write failing tests:** a limit buy fills only when `last` trades through the limit, not on a touch;
+  a stop-market triggers on the configured signal and fills at trigger plus slippage against the bot; maker fee on
+  limits and taker fee on market and stop; a repeated `cliOrdId` returns the existing order and creates no second one;
+  `reduceOnly` with no position rejects with `reduce_only_violation`; a reduce-only order is capped at the position
+  size; `makeCliOrdId` is deterministic, starts with `bot-` and stays within 100 characters; state survives creating
+  a new executor on the same store; `onPrice` with a time earlier than the last one is ignored.
+- [ ] **Step 2: Run** `node --test bot/dry-run-executor.test.ts`. Expected: FAIL.
+- [ ] **Step 3: Implement.** Persist orders, positions and fills in the store (add `sim_*` tables to `BotStore`), one
+  transaction per event. Position average price by average-cost netting, as in `futures-pnl.ts`.
+- [ ] **Step 4: Run.** Expected: PASS. **Step 5: Commit** `bot: add executor interface and dry-run core`.
+
+### Task 6: DryRunExecutor funding, replay, fault injection, contract
+
+**Files:** Modify `bot/dry-run-executor.ts`. Create `bot/dry-run-replay.test.ts`.
+
+**Interfaces:**
+- Produces: `DryRunExecutor.accrueFunding(rates: { t: number; rate: number }[]): void`;
+  `DryRunExecutor.replay(candles: FuturesCandle[]): void`;
+  `DryRunExecutor.inject(f: { dropAck?: number; rejectNext?: RejectKind; partialFill?: number; delayMs?: number }): void`.
+
+- [ ] **Step 1: Write failing tests:** funding accrues once per interval and not twice for the same timestamp;
+  replay over candles fires a stop that a candle low crossed; when one candle crosses both SL and TP the SL fires
+  first; replay never fires an order placed after the candle; `dropAck: 1` makes the next `placeOrder` throw after
+  the order was recorded (a later `getOpenOrders` shows it); `partialFill` fills the given fraction and leaves the
+  rest open; output objects have exactly the keys of the `FuturesPosition`, `FuturesOpenOrder` and `FuturesFill`
+  interfaces.
+- [ ] **Step 2: Run** `node --test bot/dry-run-replay.test.ts`. Expected: FAIL.
+- [ ] **Step 3: Implement.** **Step 4: Run all dry-run tests.** Expected: PASS.
+- [ ] **Step 5: Commit** `bot: add dry-run funding, replay and fault injection`.
+
+### Task 7: Limits, counters, cooldowns
+
+**Files:** Create `bot/limits.ts`, `bot/limits.test.ts`.
+
+**Interfaces:**
+- Consumes: `BotStore`, `BotConfig`, `Clock`.
+- Produces: `tradingDay(nowMs: number, resetHourUtc: number): string`;
+  `entryAllowed(i: { store: BotStore; config: BotConfig; nowMs: number; openRiskPct: number; newRiskPct: number; openPositions: number }): { ok: true } | { ok: false; reason: string }`;
+  `recordPlacedOrder(store: BotStore, config: BotConfig, nowMs: number): void`;
+  `cooldownUntil(i: { closedAtMs: number; lossy: boolean; config: BotConfig }): number`;
+  `dailyLossBreached(i: { realized: number; unrealized: number; config: BotConfig }): boolean`;
+  `rebuildCounters(store: BotStore, config: BotConfig, nowMs: number, history: { placedAtMs: number; isEntry: boolean }[]): void`
+  (the higher of persisted and rebuilt wins).
+
+- [ ] **Step 1: Write failing tests:** the day boundary honours `day_reset_utc_hour` (23:59 vs 00:01 UTC);
+  `max_entries_per_day`, `max_orders_per_day`, `max_open_positions`, `max_total_open_risk_pct` each block an entry;
+  placed orders count even when never filled; cooldown is longer after a loss; daily loss counts realized plus
+  unrealized; `rebuildCounters` never lowers a persisted counter; a clock set backwards makes `entryAllowed` return
+  `{ ok: false }` instead of throwing or extending the cooldown.
+- [ ] **Step 2: Run** `node --test bot/limits.test.ts`. Expected: FAIL.
+- [ ] **Step 3: Implement.** **Step 4: Run.** Expected: PASS. **Step 5: Commit** `bot: add limits and counters`.
+
+### Task 8: Engine decision function (state machine)
+
+**Files:** Create `bot/engine.ts`, `bot/engine.test.ts`.
+
+**Interfaces:**
+- Consumes: Tasks 1-3, 7.
+- Produces: `type EngineState = "FLAT" | "ENTERING" | "PROTECTING" | "OPEN" | "REDUCING" | "COOLDOWN" | "HALTED"`;
+  `interface Snapshot { nowMs: number; state: EngineState; stateSinceMs: number; position: FuturesPosition | null; openOrders: FuturesOpenOrder[]; price: PriceEvent | null; priceAgeSec: number; atr: number | null; effective: Policy | null; scenario: ResolvedScenario | null; reconciled: boolean; foreignExposure: boolean; limits: ReturnType<typeof entryAllowed>; dailyLossBreached: boolean; liquidated: boolean; lastClockMs: number }`;
+  `type Action = { type: "place"; req: OrderRequest; reason: string } | { type: "cancel"; cliOrdId: string; reason: string } | { type: "edit"; cliOrdId: string; stopPrice: number; reason: string } | { type: "transition"; to: EngineState; reason: string } | { type: "halt"; reason: string; manualAck: boolean } | { type: "skip"; reason: string }`;
+  `decide(s: Snapshot, config: BotConfig): Action[]` (pure, no I/O).
+
+- [ ] **Step 1: Write failing tests:** one test per row of the spec section 4 table, asserting the returned actions:
+  FLAT -> ENTERING places a limit entry only when all conditions hold, and each failing condition yields a `skip`
+  with its own reason; stale data (`priceAgeSec` above the limit) or an expired policy blocks entry but leaves
+  stops alone (reduce-only); a trailing edit that would widen a stop is never emitted; opposite bias with a position
+  goes to REDUCING, never straight to ENTERING; a backwards clock (`nowMs < lastClockMs`) yields only `skip`;
+  `foreignExposure` blocks entry; `liquidated` yields `halt` with `manualAck: true`; `dailyLossBreached` yields
+  `halt` with `manualAck: false`; time-stop fires at `horizon_hours`; COOLDOWN -> FLAT only after the timer.
+- [ ] **Step 2: Run** `node --test bot/engine.test.ts`. Expected: FAIL.
+- [ ] **Step 3: Implement** `decide` as pure functions per state. **Step 4: Run.** Expected: PASS.
+- [ ] **Step 5: Commit** `bot: add pure engine decision function`.
+
+### Task 9: Trader cycle and protection flow
+
+**Files:** Create `bot/trader.ts`, `bot/trader.test.ts`.
+
+**Interfaces:**
+- Consumes: Tasks 4-8.
+- Produces: `interface TraderDeps { executor: Executor; market: MarketData; store: BotStore; clock: Clock; config: BotConfig; configHash: string }`;
+  `buildSnapshot(d: TraderDeps): Promise<Snapshot>`; `runCycle(d: TraderDeps): Promise<Action[]>`.
+  `MarketData` is declared in `bot/executor.ts` (spec section 7).
+
+- [ ] **Step 1: Write failing scenario tests** (scenarios 1-5, 10, 12 of spec section 10, driven by `FakeClock` and
+  `DryRunExecutor`): SL rejected leads to a market close within `protect_timeout_sec`; partial entry fill cancels the
+  remainder and protects only the filled size (re-read after the cancel); a TP rung fill resizes the SL to the
+  remaining quantity before anything else; an SL fill cancels leftover TP orders before COOLDOWN; PROTECTING -> OPEN
+  only after read-back of both protective orders, never on the ack alone; a retry after a dropped ack reuses the
+  same `cliOrdId`; every cycle appends one journal row, also for skipped entries; `appendJournal` failure blocks new
+  entries but still manages the open position.
+- [ ] **Step 2: Run** `node --test bot/trader.test.ts`. Expected: FAIL.
+- [ ] **Step 3: Implement** `runCycle`: snapshot, `decide`, execute actions in order, confirm by read-back, journal.
+- [ ] **Step 4: Run.** Expected: PASS. **Step 5: Commit** `bot: add trader cycle and protection flow`.
+
+### Task 10: Reconciliation
+
+**Files:** Create `bot/reconcile.ts`, `bot/reconcile.test.ts`.
+
+**Interfaces:**
+- Produces: `reconcile(d: TraderDeps, sinceMs: number): Promise<{ clean: boolean; incidents: Incident[] }>`
+  (rebuilds state from positions, orders and fills; calls `rebuildCounters`; replays candles through
+  `DryRunExecutor.replay` from the last tick; sets the persisted `reconciled` flag only when clean).
+
+- [ ] **Step 1: Write failing tests** (scenarios 6 and 7): restart with a position and no SL is an incident, the
+  position is protected or closed, state is HALTED with `manualAck`; restart where a simulated stop fired during
+  downtime books PnL exactly once; a position or order on the symbol without the `bot-` prefix blocks entries, is
+  never cancelled, and records an incident; counters rebuilt from history never go below the persisted ones; entries
+  stay blocked until a clean reconcile.
+- [ ] **Step 2: Run** `node --test bot/reconcile.test.ts`. Expected: FAIL.
+- [ ] **Step 3: Implement.** **Step 4: Run.** Expected: PASS. **Step 5: Commit** `bot: add reconciliation`.
+
+### Task 11: Watchdog
+
+**Files:** Create `bot/watchdog.ts`, `bot/watchdog.test.ts`.
+
+**Interfaces:**
+- Produces: `type ProtectionIssue = { kind: "no_sl" | "wrong_sl_size" | "no_tp" | "wrong_tp_size" | "orphan_reduce_only"; detail: string }`;
+  `checkProtection(position: FuturesPosition | null, orders: FuturesOpenOrder[], config: BotConfig): ProtectionIssue[]`;
+  `watchdogTick(d: TraderDeps): Promise<ProtectionIssue[]>` (repairs a missing SL with the deterministic
+  `cliOrdId`, or closes at market when repair fails; never opens a position).
+
+- [ ] **Step 1: Write failing tests:** each issue kind is reported for a crafted position and order set; a clean set
+  reports none; a missing SL is repaired with the same `cliOrdId` the engine would use, so engine and watchdog
+  repairing together yield one order; an exchange read failure records a "cannot verify" incident instead of passing;
+  the watchdog never places an opening order.
+- [ ] **Step 2: Run** `node --test bot/watchdog.test.ts`. Expected: FAIL.
+- [ ] **Step 3: Implement.** **Step 4: Run.** Expected: PASS. **Step 5: Commit** `bot: add watchdog`.
+
+### Task 12: Property tests and tripwire
+
+**Files:** Create `bot/sim.ts`, `bot/invariants.test.ts`.
+
+**Interfaces:**
+- Produces: `runRandomScenario(seed: number, steps: number, opts?: { breakProtectTimeout?: boolean }): void`
+  (throws with seed and step on the first invariant violation); `checkInvariants(w: World): string[]`.
+
+- [ ] **Step 1: Write the tests:** P1-P8 from spec section 10, each as a seeded loop over at least 200 seeds with
+  random fills, partial fills, rejects, dropped and delayed acks, restarts, clock jumps (also backwards) and hostile
+  policies. Tripwire: `runRandomScenario(seed, steps, { breakProtectTimeout: true })` must throw for at least one
+  seed, so a passing P1 means something.
+- [ ] **Step 2: Run** `node --test bot/invariants.test.ts`. Expected: FAIL (no `sim.ts`).
+- [ ] **Step 3: Implement `sim.ts`** by composing Tasks 5-11. Print the failing seed on any violation.
+- [ ] **Step 4: Run.** Expected: PASS, including the tripwire. **Step 5: Commit** `bot: add property tests`.
+
+### Task 13: Live stub and approval decorator
+
+**Files:** Create `bot/live-executor.ts`, `bot/approving-executor.ts`, `bot/guards.test.ts`.
+
+**Interfaces:**
+- Produces: `class LiveExecutor implements Executor` whose constructor always throws `Error("LiveExecutor is not implemented in iteration 1")`;
+  `class ApprovingExecutor implements Executor { constructor(inner: Executor, ask: (summary: string) => Promise<boolean>) }`.
+
+- [ ] **Step 1: Write failing tests:** constructing `LiveExecutor` always throws, even with `live_enabled: true`;
+  `ApprovingExecutor` forwards an approved `placeOrder`, returns `{ ok: false, kind: "unknown" }` on a denied one,
+  shows the reason text, and never gates `cancelOrder`, `cancelAll` or reads; the trader entry point refuses to start
+  when `mode: "live"`; a source scan finds no use of `tradingEnabled: true` anywhere in `bot/`.
+- [ ] **Step 2: Run** `node --test bot/guards.test.ts`. Expected: FAIL.
+- [ ] **Step 3: Implement.** **Step 4: Run.** Expected: PASS. **Step 5: Commit** `bot: add live stub and approval decorator`.
+
+### Task 14: Report, CLI, launcher
+
+**Files:** Create `bot/report.ts`, `bot/cli.ts`, `bot/report.test.ts`. Modify `package.json` (add `"bot"`).
+
+**Interfaces:**
+- Produces: `buildReport(store: BotStore, sinceMs: number): { policyAccuracy: ...; rejectedByReason: Record<string, number>; netPnl: number; incidents: number; calibration: { tercile: "low" | "mid" | "high"; avgR: number; n: number }[] }`;
+  CLI commands `node bot/cli.ts policy add <file>` (validates then stores a fixture policy and menu),
+  `report`, `ack-halt`, `run` (starts trader and watchdog as separate child processes).
+
+- [ ] **Step 1: Write failing tests:** the report counts rejected entries per reason; net PnL includes fees,
+  funding and slippage; calibration buckets by conviction tercile and reports `n` per bucket; `policy add` rejects
+  an invalid fixture and stores a valid one; `ack-halt` clears only a manual-acknowledgement halt, never the
+  daily-loss halt before its reset hour.
+- [ ] **Step 2: Run** `node --test bot/report.test.ts`. Expected: FAIL.
+- [ ] **Step 3: Implement.** **Step 4: Run** `npm run test:bot` and `npm run typecheck`. Expected: PASS, no errors.
+- [ ] **Step 5: Commit** `bot: add report, CLI and launcher`.
+
+## Self-review notes
+
+- Spec sections 4, 5, 6, 7, 8, 9, 10 map to Tasks 8, 2-3, 1, 5-6 and 13, 8-11, 14, 12. Section 11 (exit criteria) is
+  operational, not code. Section 2's assumptions are for stage 2 and are not tested here.
+- The foreign-order rule and `maintenance_margin_rate` were added to the spec while writing this plan.
