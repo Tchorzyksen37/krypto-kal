@@ -25,6 +25,10 @@ improvise a different layout: the format below is the contract.
 5. Never invent. If a post does not say it, do not write it. If you are unsure, use `unverified`.
 6. Do not run `node x-sync.ts`: that file is a library and does nothing when run.
 7. Do not ask the user questions during a normal run. Make the default choice and note it in the log.
+8. **Never create helper or scratch files in the repo or in `BRAIN`** (no `all_raw.txt`, `ingested_raw.txt`, lists of
+   file names, notes). The repo is under git and the brain is a synced Obsidian vault; neither is a work area. Do set
+   arithmetic in memory (step 2 shows how). If you really need a scratch file, put it in the OS temp directory
+   (`$env:TEMP` in PowerShell, `$TEMP` or `/tmp` in bash) under `krypto-kal-ingest/`, and delete it before you report.
 
 ## 1. Sync (optional)
 
@@ -36,12 +40,23 @@ improvise a different layout: the format below is the contract.
 
 A raw post is "ingested" when its file name appears in the `sources:` line of some wiki page.
 
-1. List the raw files: `ls BRAIN/raw/x/*/` (or Glob `raw/x/**/*.md`).
-2. For each file name, search the wiki for it (Grep the file name, without the folder, in `BRAIN/wiki/`).
-   Faster: Grep `-l` for `raw/x/` in `BRAIN/wiki/` once, collect the names that appear, subtract.
-3. The files with no match are the **new sources**. Count them.
-4. If there are none, say "nothing new to ingest" and stop (still offer a briefing, step 6).
-5. If there are more than 40, ingest the 40 oldest and tell the user how many remain.
+1. Subtract the two sets **in memory, with no files** (hard rule 8). Raw file names look like `<user>-<id>.md`, and the
+   wiki names them in links and `sources:` lines, so one pattern finds every ingested name. In PowerShell, with
+   `$BRAIN` set to the brain root, this prints the new sources oldest first (the date folder sorts chronologically):
+
+   ```powershell
+   $done = Get-ChildItem "$BRAIN\wiki" -Recurse -Filter *.md |
+     Select-String -Pattern '[A-Za-z0-9_]+-\d+\.md' -AllMatches | ForEach-Object { $_.Matches.Value } | Sort-Object -Unique
+   $new = @(Get-ChildItem "$BRAIN\raw\x" -Recurse -Filter *.md | Sort-Object FullName | Where-Object { $_.Name -notin $done })
+   "new sources: $($new.Count)"
+   $new | Select-Object -First 40 | ForEach-Object { $_.FullName }
+   ```
+
+   In bash, the count is `comm -23 <(ls -1 "$BRAIN"/raw/x/*/ | grep '\.md$' | sort -u) <(grep -rhoE '[A-Za-z0-9_]+-[0-9]+\.md' "$BRAIN/wiki" | sort -u) | wc -l`.
+   (Or Glob `raw/x/**/*.md` and Grep the wiki, if you prefer the tools to the shell.)
+2. The files that are not named anywhere in the wiki are the **new sources**. Count them.
+3. If there are none, say "nothing new to ingest" and stop (still offer a briefing, step 6).
+4. If there are more than 40, ingest the 40 oldest and tell the user how many remain.
 
 ## 3. Read and classify
 
