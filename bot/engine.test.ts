@@ -41,7 +41,7 @@ const base = (over: Partial<Snapshot> = {}): Snapshot => ({
   position: null, openOrders: [], price: px(99250, NOW), priceAgeSec: 1, atr: 800,
   policy: { id: ID, policy: policy(), scenario: longScenario }, inZoneSinceMs: NOW - 60_000,
   reconciled: true, foreignExposure: false, dailyLossBreached: false, liquidated: false, cooldownUntilMs: null,
-  lastTradePnl: null, counters: { entriesToday: 0, ordersToday: 0 }, openRiskPct: 0, contract, fundingBpsPerHour: 0,
+  lastTradePnl: null, filledRoles: [], counters: { entriesToday: 0, ordersToday: 0 }, openRiskPct: 0, contract, fundingBpsPerHour: 0,
   ...over,
 });
 const shortPolicy = { id: ID, policy: policy({ bias: -0.6, allowed_directions: ["short"] }), scenario: shortScenario };
@@ -325,6 +325,22 @@ describe("PROTECTING", () => {
     const t = trade({ protectSeq: 1, lastStop: 99400 });
     const a = decide(protecting({ trade: t, openOrders: [tpOrder(1, 102000), tpOrder(2, 104000)] }), config);
     assert.deepEqual(places(a), [slReq(0.004, 99400, 1)]);
+  });
+
+  test("a rung that already filled is not placed again: the remaining position is split over the rungs left", () => {
+    // tp1 filled earlier; 0.002 is left and the stop has to be re-protected
+    const a = decide(protecting({ position: position({ size: 0.002 }), filledRoles: ["tp1"], openOrders: [] }), config);
+    assert.deepEqual(places(a), [slReq(0.002), tpReq(2, 104000, 0.002)]);
+  });
+
+  test("with the remaining rung already working, nothing but the stop is needed", () => {
+    const a = decide(protecting({ position: position({ size: 0.002 }), filledRoles: ["tp1"], openOrders: [slOrder(0.002), tpOrder(2, 104000, 0.002)] }), config);
+    assert.deepEqual(a, [{ type: "transition", to: "OPEN", reason: "protected" }]);
+  });
+
+  test("when every rung has filled, only the stop is protected", () => {
+    const a = decide(protecting({ position: position({ size: 0.001 }), filledRoles: ["tp1", "tp2"], openOrders: [] }), config);
+    assert.deepEqual(places(a), [slReq(0.001)]);
   });
 
   test("a short protects with buy orders", () => {

@@ -260,24 +260,29 @@ Failure modes the spec implies but does not spell out. Each has a test in the ta
 
 ### Task 9: Trader cycle and protection flow
 
-**Files:** Create `bot/trader.ts`, `bot/trader.test.ts`.
+**Files:** Create `bot/trader.ts`, `bot/trader.test.ts`, `bot/indicators.ts` (ATR), `bot/engine-state.ts` (the persisted record),
+`bot/indicators.test.ts`. Modify `bot/engine.ts` (`filledRoles`), `bot/policy.ts` (export `resolveScenario`), `bot/executor.ts`
+(`MarketData.contract()`).
 
 **Interfaces:**
 - Consumes: Tasks 4-8.
-- Produces: `interface TraderDeps { executor: Executor; market: MarketData; store: BotStore; clock: Clock; config: BotConfig; configHash: string }`;
-  `buildSnapshot(d: TraderDeps): Promise<Snapshot>`; `runCycle(d: TraderDeps): Promise<Action[]>`.
-  `MarketData` is declared in `bot/executor.ts` (spec section 7).
+- Produces: `TraderDeps { executor, market, store, clock, config, configHash }`; `buildSnapshot(d): Promise<Snapshot>` (throws when the
+  exchange or the stored record cannot be read); `runCycle(d): Promise<Action[]>`; `JOURNAL_HEARTBEAT_MS`;
+  `atr(candles, period, resolution, nowMs): number | null`; `EngineRecord` with `loadEngineRecord` / `saveEngineRecord` (one JSON value in the store).
+- Rules: an unreadable exchange or record means no decisions (an incident and a `snapshot_unavailable` skip); an entry is placed only
+  after the new state is saved, everything else in the order the engine returns; a lost ack or a rejection is an incident, not an abort; a failed
+  journal write blocks new entries but never protection; the journal gets a row on any action, on a change of state or reason, and as a heartbeat.
 
-- [ ] **Step 1: Write failing scenario tests** (scenarios 1-5, 10, 12 of spec section 10, driven by `FakeClock` and
-  `DryRunExecutor`): SL rejected leads to a market close within `protect_timeout_sec`; partial entry fill cancels the
-  remainder and protects only the filled size (re-read after the cancel); a TP rung fill resizes the SL to the
-  remaining quantity before anything else; an SL fill cancels leftover TP orders before COOLDOWN; PROTECTING -> OPEN
-  only after read-back of both protective orders, never on the ack alone; a retry after a dropped ack reuses the
-  same `cliOrdId`; every cycle appends one journal row, also for skipped entries; `appendJournal` failure blocks new
-  entries but still manages the open position.
+- [ ] **Step 1: Write failing tests** against the real `DryRunExecutor` and store with a fake market: the snapshot reads everything;
+  entry placement and counters; a lost ack leaves one order; protection is confirmed by read-back (a lying ack keeps the bot out of OPEN and
+  ends in a close); a stop refused for good closes within the timeout; a lost ack on the stop is retried with the same id; a partial fill is
+  cancelled then protected at the filled size; a filled target shrinks the stop, then the stop trails and `lastStop` is saved; a missing
+  stop is re-placed under a new id at `lastStop` without the filled rung; a stop hit leaves no orphans before the cooldown; the time-stop; journal
+  dedupe, heartbeat and failure; an unreadable exchange, a corrupt record, a backwards clock, the daily-loss halt and its clearing, a
+  liquidation halt, foreign orders; and the ordering of state saves against order placement.
 - [ ] **Step 2: Run** `node --test bot/trader.test.ts`. Expected: FAIL.
-- [ ] **Step 3: Implement** `runCycle`: snapshot, `decide`, execute actions in order, confirm by read-back, journal.
-- [ ] **Step 4: Run.** Expected: PASS. **Step 5: Commit** `bot: add trader cycle and protection flow`.
+- [ ] **Step 3: Implement** `buildSnapshot`, `runCycle` and the helpers. **Step 4: Run.** Expected: PASS.
+- [ ] **Step 5: Commit** `bot: add trader cycle and protection flow`.
 
 ### Task 10: Reconciliation
 

@@ -102,7 +102,7 @@ export function validatePolicy(raw: unknown, ctx: PolicyContext): PolicyResult {
 }
 
 // Returns the resolved scenario, or the reason it is unusable.
-function resolveScenario(
+export function resolveScenario(
   s: NonNullable<Policy["scenario"]>,
   allowed: Policy["allowed_directions"],
   menu: LevelMenu,

@@ -5,6 +5,7 @@
 
 import type { FuturesCandle, FuturesFill, FuturesOpenOrder, FuturesPosition } from "../kraken-futures-client.ts";
 import type { Clock } from "./clock.ts";
+import type { Contract } from "./sizing.ts";
 
 export type { FuturesFill, FuturesOpenOrder, FuturesPosition };
 
@@ -87,6 +88,7 @@ export interface Executor {
 export interface MarketData {
   ticker(): Promise<PriceEvent>;
   candles(resolution: string, n: number): Promise<FuturesCandle[]>;
+  contract(): Promise<Contract>; // tick size, size step and minimum size of the traded symbol
   // t: epoch ms of the funding time; rate: fraction of the price per hour (the client's relativeFundingRate).
   // Positive means longs pay shorts (assumed from the usual perpetual convention, not verified for Kraken).
   fundingRates(): Promise<{ t: number; rate: number }[]>;

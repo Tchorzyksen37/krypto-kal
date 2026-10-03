@@ -59,6 +59,7 @@ export interface Snapshot {
   liquidated: boolean;
   cooldownUntilMs: number | null;
   lastTradePnl: number | null; // net PnL of the trade that just ended; null is treated as a loss
+  filledRoles: OrderRole[]; // target rungs of this trade that have already filled; they are never placed again
   counters: { entriesToday: number; ordersToday: number };
   openRiskPct: number;
   contract: Contract;
@@ -235,9 +236,12 @@ function protectionActions(s: Snapshot, trade: TradeRecord, config: BotConfig): 
     out.push({ type: "edit", cliOrdId: stop.cliOrdId, size: pos.size, reason: "resize_stop" });
   }
 
-  const rungs = splitLadder(trade.plan.ladder.map((r) => r.price), pos.size, s.contract);
+  // Rungs keep their original role (tp1, tp2, ...); the ones that already filled are left out.
+  const done = new Set(s.filledRoles);
+  const remaining = trade.plan.ladder.map((r, i) => ({ role: `tp${i + 1}` as OrderRole, price: r.price })).filter((r) => !done.has(r.role));
+  const rungs = splitLadder(remaining.map((r) => r.price), pos.size, s.contract);
   rungs.forEach((rung, i) => {
-    const role = `tp${i + 1}` as OrderRole;
+    const role = remaining[i]!.role;
     const existing = findRole(s, trade, role);
     if (!existing) {
       out.push(place({
