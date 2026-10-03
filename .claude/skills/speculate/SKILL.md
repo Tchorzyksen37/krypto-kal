@@ -25,8 +25,10 @@ and opens positions by hand. Design and rationale: `docs/superpowers/plans/2026-
 1. **Clock.** Note now (UTC and local), the target window `[next full hour, +60 min)`, the session
    (Asia / Europe / US / overlap) and minutes left to the window.
 2. **Watch list.** Core: BTC, ETH, XRP. Add up to `SPECULATION_SCREEN_EXTRA` (3) screened symbols using
-   `speculation_context` / the screen output (liquidity filters, then volatility expansion, OI change,
-   funding and long/short extremes). Record the reason for each non-core pick.
+   the screen script: write the candidates (fields of `Candidate` in `speculation/screen.ts`) to a scratch
+   JSON file and run `node speculation/screen.ts <candidates.json>`. It applies the liquidity filters, then
+   ranks by volatility expansion, OI change, funding and long/short extremes. Record the reason (`why`) for
+   each non-core pick.
 3. **KNOWN**, per symbol: `coinalyze_current`; 5m and 1h OI, funding, predicted funding, long/short ratio,
    liquidations; `kraken_ohlc` 1m / 5m / 1h; `kraken_order_book` (imbalance, spread). Global: `yahoo_quote`
    for ES, NQ, DXY, US10Y, oil; `x_recent` for the last 6 h; `brain_search` / `brain_read` of the wiki
@@ -51,7 +53,7 @@ and opens positions by hand. Design and rationale: `docs/superpowers/plans/2026-
    POSSIBLE digest (ESTIMATE labels visible, "why this symbol" for screened picks), then **Best bets** last.
    Also write `HH00Z.meta.json` next to it: symbols (futures contract, last price, 1h ATR, why) and the bet
    list. The JSON holds only what code needs; everything the user reads is in the `.md`.
-8. **Validate:** `node speculation-check.ts <meta.json>`. It drops invalid bets (reason printed in the note),
+8. **Validate:** `node speculation/check.ts <meta.json>`. It drops invalid bets (reason printed in the note),
    assigns bet ids and rewrites the Best bets block of the `.md` itself, so do not hand-format that block.
    On a script error, fix the files once and rerun. On a second failure, keep the KNOWN / UNKNOWN summary
    and add a "generation failed" banner instead of skipping the hour.

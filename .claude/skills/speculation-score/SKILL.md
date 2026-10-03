@@ -22,7 +22,7 @@ all data comes from the Kraken Futures API through the MCP tools.
 1. **Pull data.** `kraken_futures_fills` and `kraken_futures_pnl` (they sync new fills into the local DB, so
    history goes past the API's 100-fill window), `kraken_ohlc` 1m candles for each bet window, and
    `BRAIN/output/speculation/bets-log.json`.
-2. **Score:** `node speculation-score.ts <day>`. It matches fills to bets automatically (same contract and
+2. **Score:** `node speculation/score.ts <day>`. It matches fills to bets automatically (same contract and
    side, fill time inside the bet window plus TTL, price within the match tolerance, closest wins, one fill
    per bet), then computes:
    - taken or skipped; entry slippage; exit reason (TP, SL, manual close near TTL, other); net R after fees;

@@ -1,6 +1,6 @@
 # Speculation mode: hourly "probable next hour" report
 
-Status: **plan + skill definitions only, no runtime code yet.** Branch `claude/vigilant-hawking-iay551`.
+Status: **core code implemented in `speculation/` (check, screen, score + 51 offline tests); not yet done: the optional `speculation_context` MCP tool, a dry run against the real tools, and the scheduled task.** Branch `claude/vigilant-hawking-iay551`.
 Revision 3: decisions from the user folded in: Claude Code routine, supervised use, XRP + screened symbols,
 English, `output/speculation/`; **scoring data comes from the Kraken Futures API (no manual upload)**; matching
 is automatic; limit entries; **the report is Markdown, JSON is only a small metadata sidecar**; no HTML dashboard
@@ -54,11 +54,11 @@ arithmetic) is deterministic code, so the model cannot get arithmetic wrong.
 |---|---|---|
 | `.claude/skills/speculate/SKILL.md` | skill | Hourly procedure: screen symbols, gather Known, write the report `.md` and its `.meta.json`, run the checker. |
 | `.claude/skills/speculation-score/SKILL.md` | skill | Daily: pull fills from the API, match to bets, score, write the scorecard. |
-| `speculation-types.ts` | code | Types of the metadata sidecar and the bets log. |
-| `speculation-screen.ts` | pure | Symbol screening: universe + metrics in, ranked candidates out (section 5). |
-| `speculation-check.ts` | pure + CLI | `node speculation-check.ts <report.meta.json>`: validates bets, drops bad ones with reasons, recomputes R:R and clock times, assigns ids, appends to the bets log, and **rewrites the report's final "Best bets" section** from the validated bets so that block is always exact. |
-| `speculation-score.ts` | pure + CLI | `resolveBet(bet, candles)`, matching, hit rate, mean R, calibration (section 9). |
-| `speculation-*.test.ts` | tests | Offline, in `test:offline`: validation rules (plus a randomized check that no surviving bet violates ordering/deviation caps, like `futures-risk.test.ts`), report patching, matching, `resolveBet` edge cases. |
+| `speculation/types.ts` | code | Types of the metadata sidecar and the bets log. |
+| `speculation/screen.ts` | pure | Symbol screening: universe + metrics in, ranked candidates out (section 5). |
+| `speculation/check.ts` | pure + CLI | `node speculation/check.ts <report.meta.json>`: validates bets, drops bad ones with reasons, recomputes R:R and clock times, assigns ids, appends to the bets log, and **rewrites the report's final "Best bets" section** from the validated bets so that block is always exact. |
+| `speculation/score.ts` | pure + CLI | `resolveBet(bet, candles)`, matching, hit rate, mean R, calibration (section 9). |
+| `speculation/*.test.ts` | tests | Offline, in `test:offline`: validation rules (plus a randomized check that no surviving bet violates ordering/deviation caps, like `futures-risk.test.ts`), report patching, matching, `resolveBet` edge cases. |
 | `mcp-server.ts` (small change) | wiring | Optional read-only tool `speculation_context` returning the Known layer in one call (cuts ~12 tool calls per run). |
 
 Vault layout:
@@ -90,7 +90,7 @@ Full definition in `.claude/skills/speculate/SKILL.md`. Procedure:
 5. **Speculate and write the report.** The skill states the task in the "most probable continuation" framing
    (section 6) and writes `HH00Z.md` in the section order of section 7, plus `HH00Z.meta.json` (symbols, last
    prices, 1h ATR, and the bet list).
-6. **Validate**: `node speculation-check.ts <meta.json>`. It drops invalid bets (reason shown in the note),
+6. **Validate**: `node speculation/check.ts <meta.json>`. It drops invalid bets (reason shown in the note),
    assigns ids and rewrites the "Best bets" block in the `.md`. If every bet is dropped the note says "no bet".
    On a script error the skill fixes the files once; on a second failure it keeps the Known/Unknown summary
    and adds a visible "generation failed" banner (the hour is never silently skipped).
@@ -102,7 +102,7 @@ labelled; the skill writes only under `output/speculation/`; chat in English.
 ## 5. Symbol universe
 
 Core: `BTC`, `ETH`, `XRP` (always analysed). The user also wants "any other symbols that give good chances":
-`speculation-screen.ts` ranks Kraken Futures linear perps (`PF_*`) that also have a Coinalyze market, keeps
+`speculation/screen.ts` ranks Kraken Futures linear perps (`PF_*`) that also have a Coinalyze market, keeps
 the top 3 non-core by a **setup score**, and the skill analyses those in the same depth.
 
 Filters first (a symbol that fails any is excluded, because a bet nobody can fill is worthless):
@@ -143,7 +143,7 @@ Sidecar `HH00Z.meta.json` (small; everything readable lives in the `.md`):
 }
 ```
 
-`speculation-check.ts` enforces (violating bets are dropped; reason printed in the note):
+`speculation/check.ts` enforces (violating bets are dropped; reason printed in the note):
 
 - `long`: `stop_loss < entry < take_profit`; `short`: reversed.
 - Entry within `SPECULATION_MAX_ENTRY_DEVIATION` (0.5%) of the symbol's `last`.
@@ -165,7 +165,7 @@ Sidecar `HH00Z.meta.json` (small; everything readable lives in the `.md`):
 6. **Known / Unknown / Possible** digest; ESTIMATE labels visible; "why this symbol" for screened picks.
 7. **Best bets for the next 1 h** (last block, generated by the checker): one callout per bet plus a summary
    table, then the dropped bets and why.
-8. Footer: rolling 7-day scorecard line (N always shown).
+8. The rolling 7-day scorecard (N always shown) goes in a section before Best bets, so Best bets stays last.
 
 Example of the closing block:
 
@@ -193,7 +193,7 @@ The skill `speculation-score` runs once a day (or on request). Inputs are all ma
 `kraken_futures_fills` and `kraken_futures_pnl` (which sync fills into the local DB past the API's 100-fill
 window), `kraken_ohlc` 1 m candles, and `bets-log.json`.
 
-1. **Match fills to bets automatically** (`speculation-score.ts`, pure): same futures symbol and side, fill time
+1. **Match fills to bets automatically** (`speculation/score.ts`, pure): same futures symbol and side, fill time
    inside `[window start, window end + TTL]`, price within `SPECULATION_MATCH_TOLERANCE` (0.3%) of the bet
    entry; the closest fill by (time, price) wins; each fill matches at most one bet. Unmatched fills are listed
    as "not from a report" and excluded from bet statistics; ambiguous matches are flagged, never guessed.
@@ -225,11 +225,11 @@ the new files, these vars, the skill names and the routine setup.
 
 ## 12. Implementation steps (each ends green: `npm run typecheck` + `npm run test:offline`)
 
-1. `speculation-types.ts`, `speculation-check.ts` + tests (validation, report patching, randomized no-violation check).
-2. `speculation-screen.ts` + tests (filters, scoring, core symbols always kept).
+1. `speculation/types.ts`, `speculation/check.ts` + tests (validation, report patching, randomized no-violation check).
+2. `speculation/screen.ts` + tests (filters, scoring, core symbols always kept).
 3. `speculation_context` MCP tool (read-only) + offline test with fakes.
 4. `.claude/skills/speculate` finalised against the real tools; one manual dry run; read the note in Obsidian.
-5. `speculation-score.ts` (matching, `resolveBet`, calibration) + tests; then run the `speculation-score` skill
+5. `speculation/score.ts` (matching, `resolveBet`, calibration) + tests; then run the `speculation-score` skill
    on a day of real fills.
 6. Create the scheduled task (hourly, :52) on the user's machine; run 24 consecutive hours supervised.
 7. Update CLAUDE.md.
