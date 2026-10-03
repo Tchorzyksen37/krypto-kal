@@ -2,6 +2,14 @@
 // The report itself is Markdown; these types describe only the small machine-readable parts.
 
 export type Side = "long" | "short";
+export type Direction = "long" | "short" | "neutral";
+
+// The report's headline call: is the market leaning long or short over the session?
+export interface Bias {
+  direction: Direction;
+  probability?: number; // 0..1 chance the lean is right over the session (optional for neutral)
+  summary?: string; // one line
+}
 
 // One symbol of a report: written by the `speculate` skill into the meta sidecar.
 export interface MetaSymbol {
@@ -11,6 +19,7 @@ export interface MetaSymbol {
   atr_1h: number; // 1h ATR in price units
   spread_bps?: number; // optional, used for the round-trip cost floor
   why?: string; // "core" or "screen: <reason>"
+  bias?: Direction; // per-symbol lean
 }
 
 // A bet as the model proposes it (unvalidated).
@@ -27,6 +36,8 @@ export interface BetInput {
 
 // `HH00Z.meta.json`
 export interface ReportMeta {
+  session?: string; // SessionId from sessions.ts; sets the bet limits
+  bias?: Bias; // REQUIRED by the checker: every report states long, short or neutral
   generated: string; // ISO
   window: [string, string]; // ISO start, end of the 60-minute window
   symbols: MetaSymbol[];
@@ -38,7 +49,9 @@ export interface ReportMeta {
 
 // A bet that passed validation.
 export interface Bet extends BetInput {
-  id: string; // YYYYMMDD-HHZ-SYMBOL-n
+  id: string; // YYYYMMDD-HHMMZ-SYMBOL-n
+  session?: string;
+  vs_bias?: "with" | "against" | "neutral"; // the bet's side relative to the symbol's bias
   futures: string;
   rr: number; // reward:risk
   fill_from: string; // ISO, window start

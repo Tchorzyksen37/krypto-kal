@@ -238,6 +238,14 @@ describe("scoreLog and rendering", () => {
     assert.match(text, /\| XRP \| 1 \|/);
   });
 
+  test("scorecard splits results by session and by agreement with the report's bias", () => {
+    const a = logged({ ...long, id: "a", session: "night_asia", vs_bias: "with" }, { hypothetical: { status: "tp", netR: 1.9 } });
+    const b = logged({ ...long, id: "b", session: "us", vs_bias: "against" }, { hypothetical: { status: "sl", netR: -1.1 } });
+    const text = renderScorecard([a, b], T0 + 100 * 60);
+    assert.match(text, /### By session[\s\S]*\| night_asia \| 1 \| 100% \|[\s\S]*\| us \| 1 \| 0% \|/);
+    assert.match(text, /### By vs bias[\s\S]*\| against \| 1 \| 0% \|[\s\S]*\| with \| 1 \| 100% \|/);
+  });
+
   test("normalizes the raw tool shapes", () => {
     const f = normalizeFill({ fill_id: "f1", order_id: "o1", symbol: "PF_XRPUSD", side: "sell", size: 5, price: "2.4", fillTime: "2026-10-03T14:06:00.000Z" } as Record<string, unknown>);
     assert.deepEqual([f.id, f.orderId, f.ts, f.price], ["f1", "o1", MS(6), 2.4]);

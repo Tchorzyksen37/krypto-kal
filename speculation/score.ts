@@ -334,7 +334,13 @@ export function renderScorecard(log: LoggedBet[], nowSec: number): string {
   for (const c of calibration(log)) lines.push(`| ${c.range} | ${c.n} | ${pct(c.stated)} | ${pct(c.realized)} |`);
   lines.push("");
 
-  for (const [title, key] of [["Symbol", (b: LoggedBet) => b.symbol], ["Side", (b: LoggedBet) => b.side]] as const) {
+  const groups: [string, (b: LoggedBet) => string][] = [
+    ["Session", (b) => b.session ?? "(none)"],
+    ["Symbol", (b) => b.symbol],
+    ["Side", (b) => b.side],
+    ["Vs bias", (b) => b.vs_bias ?? "(none)"],
+  ];
+  for (const [title, key] of groups) {
     lines.push(`### By ${title.toLowerCase()}`, "", `| ${title} | Touched | Win rate | Mean net R |`, "|---|---|---|---|");
     for (const k of [...new Set(log.map(key))].sort()) {
       const s = summarize(log.filter((b) => key(b) === k));

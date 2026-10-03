@@ -1,6 +1,6 @@
 # Speculation mode: hourly "probable next hour" report
 
-Status: **core code implemented in `speculation/` (check, screen, score + 51 offline tests); not yet done: the optional `speculation_context` MCP tool, a dry run against the real tools, and the scheduled task.** Branch `claude/vigilant-hawking-iay551`.
+Status: **core code implemented in `speculation/` (check, screen, score, sessions, volume + 81 offline tests); see section 15 for the session-based design. Not yet done: the optional `speculation_context` MCP tool, a dry run against the real tools, and the scheduled tasks.**
 Revision 3: decisions from the user folded in: Claude Code routine, supervised use, XRP + screened symbols,
 English, `output/speculation/`; **scoring data comes from the Kraken Futures API (no manual upload)**; matching
 is automatic; limit entries; **the report is Markdown, JSON is only a small metadata sidecar**; no HTML dashboard
@@ -247,3 +247,44 @@ An LLM does not predict price. It writes a coherent, probability-flavoured story
 comes from structuring facts well and synthesising context quickly. The hypothetical-outcome scoring and the
 calibration table exist to find out whether that is worth anything. If calibration is flat after about two
 weeks of supervised use, the honest conclusion is to stop.
+
+## 15. Revision 4: sessions, regions, investor profiles and an explicit bias
+
+Decisions after the first implementation (these supersede the hourly wording above where they conflict):
+
+**Cadence: four session reports a day instead of hourly.** Local time Europe/Warsaw (UTC+2 in summer, UTC+1 from
+2026-10-25; the code converts with the IANA zone, so DST is handled). The routine fires 20 minutes before each window.
+
+| Report | Fires (local) | Window (local) | Window (UTC, summer) | Entry deadline | Max hold | Max bets | Min R:R |
+|---|---|---|---|---|---|---|---|
+| Europe open | 07:40 | 08:00-12:00 | 06:00-10:00 | 60 min | 180 min | 3 | 1.2 |
+| Europe/US overlap | 13:10 | 13:30-17:30 | 11:30-15:30 | 45 min | 180 min | 3 | 1.2 |
+| US | 17:10 | 17:30-22:00 | 15:30-20:00 | 60 min | 210 min | 3 | 1.2 |
+| Night (Asia) | 21:40 | 22:00-08:00 | 20:00-06:00 | 180 min | 360 min | 2 | 1.5 |
+
+12:00-13:30 local (European midday lull) is deliberately not reported. Defined in `speculation/sessions.ts`; `node speculation/sessions.ts`
+prints the session to report on (also for a manual mid-session run, whose bets then fill from the generation time). Stops must be wider for
+longer holds (minimum stop scales with the square root of the hold in hours). Bet ids carry the window start: `YYYYMMDD-HHMMZ-SYMBOL-n`.
+
+**Each session has its own specification** (heuristics, not facts; the scorecard tests whether they help): typical behaviour, what to watch,
+cautions, entry-deviation limit. Examples: Europe open sweeps the Asian range; the overlap has the highest volume plus US data (14:30 local)
+and the cash open (15:30 local); the US session carries FOMC (about 20:00 local) and the run into the 22:00 cash close; the night is thin,
+range-bound, stop-hunt prone, with Tokyo (about 02:00 local) and Hong Kong/China (about 03:30 local) opens inside it.
+
+**World regions that generate the volume.** Every session lists which regions dominate, are significant, fading or low (Europe, US, Asia).
+`speculation/volume.ts` adds a **measured** part: from 7+ days of 1h candles it computes the share of daily volume in each session window and its
+rank per hour. The report states whether the coming session is a high- or low-volume one.
+
+**Investor profiles.** A catalogue of seven participant types (Asian retail, leveraged perp traders, US institutions, European institutions,
+market makers/HFT, whales/OTC, systematic/bots), each with behaviour, data footprint and what it implies for entries and stops; each session
+weights them high/medium/low. Footprints our tools cannot measure (ETF flows, Korean premium, whale prints) are listed under UNKNOWN, not guessed.
+
+**Explicit direction.** Every report opens with a bias callout: LONG, SHORT or NEUTRAL with a probability, plus a lean per symbol. The checker
+refuses a report without it, mirrors it into the frontmatter (`bias:`), and marks any bet against the symbol's lean as counter-bias. The
+scorecard now also breaks results down by session and by with/against-bias.
+
+New files: `speculation/sessions.ts`, `speculation/volume.ts` (+ tests). Changed: `check.ts` (session limits, bias, HHMM ids), `score.ts`
+(per-session and per-bias tables), `types.ts`, the `speculate` skill.
+
+Routine setup (on the user's machine, once): four scheduled tasks, or one task at 07:40, 13:10, 17:10 and 21:40 Europe/Warsaw, each running the
+`speculate` skill. Weekends run too (crypto is 24/7); the skill treats US sessions as quiet then.

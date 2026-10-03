@@ -8,7 +8,8 @@ import { existsSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { Bet, BetInput, DroppedBet, LoggedBet, MetaSymbol, ReportMeta } from "./types.ts";
+import { sessionById } from "./sessions.ts";
+import type { Bet, BetInput, Bias, DroppedBet, LoggedBet, MetaSymbol, ReportMeta } from "./types.ts";
 
 export interface CheckOptions {
   maxBets: number;
@@ -63,7 +64,8 @@ function reasonToDrop(b: BetInput, s: MetaSymbol | undefined, o: CheckOptions): 
   if (dev > o.maxEntryDeviation) return `entry ${(dev * 100).toFixed(2)}% away from last price (max ${(o.maxEntryDeviation * 100).toFixed(2)}%)`;
   const risk = Math.abs(b.entry - b.stop_loss);
   const reward = Math.abs(b.take_profit - b.entry);
-  if (s.atr_1h > 0 && risk < o.minStopAtr * s.atr_1h) return `stop inside noise (${(risk / s.atr_1h).toFixed(2)} ATR < ${o.minStopAtr})`;
+  const minStop = o.minStopAtr * s.atr_1h * Math.sqrt(Math.max(1, b.ttl_minutes / 60)); // longer holds need wider stops
+  if (s.atr_1h > 0 && risk < minStop) return `stop inside noise (${(risk / s.atr_1h).toFixed(2)} ATR < ${(minStop / s.atr_1h).toFixed(2)})`;
   const costFrac = (2 * o.feeBps + (s.spread_bps ?? 0)) / 10_000;
   if (reward / b.entry < o.costMultiple * costFrac) return `take profit does not clear costs (needs ${(o.costMultiple * costFrac * 100).toFixed(3)}%)`;
   if (reward / risk < o.minRewardRisk) return `reward:risk ${(reward / risk).toFixed(2)} < ${o.minRewardRisk}`;
@@ -71,8 +73,17 @@ function reasonToDrop(b: BetInput, s: MetaSymbol | undefined, o: CheckOptions): 
   return undefined;
 }
 
+// Limits of the report's session (if any) sit between the defaults and explicit options.
+export function optionsFor(meta: ReportMeta, options: Partial<CheckOptions> = {}): CheckOptions {
+  const sd = meta.session ? sessionById(meta.session) : undefined;
+  const fromSession: Partial<CheckOptions> = sd
+    ? { maxBets: sd.maxBets, maxEntryDeviation: sd.maxEntryDeviation, minRewardRisk: sd.minRewardRisk, entryDeadlineMinutes: sd.entryDeadlineMinutes, maxTtl: sd.maxTtlMinutes }
+    : {};
+  return { ...DEFAULT_CHECK, ...fromSession, ...options };
+}
+
 export function validateBets(meta: ReportMeta, options: Partial<CheckOptions> = {}): CheckResult {
-  const o = { ...DEFAULT_CHECK, ...options };
+  const o = optionsFor(meta, options);
   const bySymbol = new Map(meta.symbols.map((s) => [s.symbol, s]));
   const dropped: DroppedBet[] = [];
   const ok: (BetInput & { rr: number; score: number })[] = [];
@@ -99,14 +110,19 @@ export function validateBets(meta: ReportMeta, options: Partial<CheckOptions> = 
     }
   }
 
-  const start = Date.parse(meta.window[0]);
-  const d = new Date(start);
-  const prefix = `${d.getUTCFullYear()}${pad(d.getUTCMonth() + 1)}${pad(d.getUTCDate())}-${pad(d.getUTCHours())}Z`;
+  const windowStart = Date.parse(meta.window[0]);
+  const d = new Date(windowStart);
+  const prefix = `${d.getUTCFullYear()}${pad(d.getUTCMonth() + 1)}${pad(d.getUTCDate())}-${pad(d.getUTCHours())}${pad(d.getUTCMinutes())}Z`;
+  // A manual run after the window opened can only be filled from the moment it was generated.
+  const start = Math.max(windowStart, Date.parse(meta.generated) || windowStart);
   const deadline = start + o.entryDeadlineMinutes * MIN;
   const bets: Bet[] = kept.map((b, i) => {
     const { score: _score, ...rest } = b;
+    const symBias = bySymbol.get(b.symbol)!.bias ?? "neutral";
     return {
       ...rest,
+      ...(meta.session ? { session: meta.session } : {}),
+      vs_bias: (symBias === "neutral" ? "neutral" : symBias === b.side ? "with" : "against") as Bet["vs_bias"],
       id: `${prefix}-${b.symbol}-${i + 1}`,
       futures: bySymbol.get(b.symbol)!.futures,
       rr: Math.round(b.rr * 100) / 100,
@@ -123,10 +139,12 @@ function stripExtras(b: BetInput & { rr?: number; score?: number }): BetInput {
   return rest;
 }
 
+const sessionLabel = (meta: ReportMeta) => (meta.session ? sessionById(meta.session)?.label : undefined) ?? "next 1h";
+
 export function renderBestBets(result: CheckResult, meta: ReportMeta): string {
-  const lines = ["## Best bets (next 1h)", ""];
+  const lines = [`## Best bets (${sessionLabel(meta)})`, ""];
   if (result.bets.length === 0) {
-    lines.push("> [!note] No bet this hour. Nothing passed validation, or nothing had an edge worth stating.", "");
+    lines.push("> [!note] No bet this session. Nothing passed validation, or nothing had an edge worth stating.", "");
   } else {
     lines.push(
       "| # | Symbol | Side | Entry (limit) | SL | TP | Fill by | Hold max | Latest close | P | R:R |",
@@ -141,6 +159,7 @@ export function renderBestBets(result: CheckResult, meta: ReportMeta): string {
     result.bets.forEach((b, i) => {
       lines.push(
         `> [!tip] ${i + 1}. ${b.symbol} ${b.side} · wait for ${fmtPrice(b.entry)} · SL ${fmtPrice(b.stop_loss)} · TP ${fmtPrice(b.take_profit)}`,
+        ...(b.vs_bias === "against" ? ["> [!warning] Counter-bias: this bet goes against the symbol's lean stated at the top of the report."] : []),
         `> If ${fmtPrice(b.entry)} is not touched by ${clock(Date.parse(b.entry_deadline))}, drop it. After the touch, close within ${b.ttl_minutes} min (latest ${clock(Date.parse(b.latest_close))}). Id \`${b.id}\`.`,
       );
       if (b.rationale) lines.push(`> Why: ${b.rationale.replace(/\r?\n/g, " ")}`);
@@ -154,6 +173,53 @@ export function renderBestBets(result: CheckResult, meta: ReportMeta): string {
   }
   lines.push(`_Speculation, not advice. Generated ${meta.generated}. The levels above were validated by code; the model's reasoning may still be wrong._`, "");
   return lines.join("\n");
+}
+
+// ---- bias: every report must say whether it leans long or short ----
+
+const DIRS = ["long", "short", "neutral"];
+
+export function biasError(meta: ReportMeta): string | undefined {
+  const b = meta.bias;
+  if (!b || !DIRS.includes(b.direction)) return 'report must state its bias: meta.bias.direction = "long" | "short" | "neutral"';
+  if (b.direction !== "neutral" && !(typeof b.probability === "number" && b.probability > 0 && b.probability <= 1)) return "a long/short bias needs a probability in (0, 1]";
+  for (const s of meta.symbols) if (s.bias !== undefined && !DIRS.includes(s.bias)) return `invalid bias for ${s.symbol}`;
+  return undefined;
+}
+
+const upper = (d: string) => d.toUpperCase();
+
+export function renderBias(meta: ReportMeta): string {
+  const b = meta.bias!;
+  const p = b.probability !== undefined ? ` (${Math.round(b.probability * 100)}%)` : "";
+  const head = b.direction === "neutral" ? "NEUTRAL, no directional edge" : `${upper(b.direction)}${p}`;
+  const per = meta.symbols.filter((s) => s.bias).map((s) => `${s.symbol} ${upper(s.bias!)}`).join(" · ");
+  return [`> [!abstract] Bias: ${head}${b.summary ? `. ${b.summary.replace(/\r?\n/g, " ")}` : ""}`, ...(per ? [`> Per symbol: ${per}`] : [])].join("\n");
+}
+
+const BIAS_START = "<!-- bias:start -->";
+const BIAS_END = "<!-- bias:end -->";
+
+// Puts the bias callout (between markers) after the first heading, or at the top, and mirrors it in the frontmatter.
+export function patchBias(md: string, meta: ReportMeta): string {
+  const block = `${BIAS_START}\n${renderBias(meta)}\n${BIAS_END}`;
+  let out = md;
+  const a = out.indexOf(BIAS_START);
+  const z = out.indexOf(BIAS_END);
+  if (a >= 0 && z > a) out = out.slice(0, a) + block + out.slice(z + BIAS_END.length);
+  else {
+    const h1 = /^# .*$/m.exec(out);
+    const fm = /^---\r?\n[\s\S]*?\r?\n---\r?\n/.exec(out);
+    const at = h1 ? h1.index + h1[0].length : fm ? fm[0].length : 0;
+    out = `${out.slice(0, at)}\n\n${block}\n${out.slice(at)}`;
+  }
+  const dir = meta.bias!.direction;
+  const fm = /^---\r?\n([\s\S]*?)\r?\n---/.exec(out);
+  if (fm) {
+    const body = /^bias:.*$/m.test(fm[1]!) ? fm[1]!.replace(/^bias:.*$/m, `bias: ${dir}`) : `${fm[1]}\nbias: ${dir}`;
+    out = out.replace(fm[0], `---\n${body}\n---`);
+  } else out = `---\ntype: speculation\nbias: ${dir}\n---\n\n${out}`;
+  return out;
 }
 
 // Replaces the "## Best bets" section (up to the next "## " heading or the end) or appends it.
@@ -190,6 +256,8 @@ export async function runCheck(metaPath: string, options: Partial<CheckOptions> 
   if (!Array.isArray(meta.symbols) || !Array.isArray(meta.bets) || !Array.isArray(meta.window)) {
     throw new Error("meta file needs symbols[], bets[] and window[]");
   }
+  const err = biasError(meta);
+  if (err) throw new Error(err);
   const result = validateBets(meta, options);
   meta.validated = result.bets;
   meta.dropped = result.dropped;
@@ -197,7 +265,7 @@ export async function runCheck(metaPath: string, options: Partial<CheckOptions> 
 
   const mdPath = join(dirname(metaPath), basename(metaPath).replace(/\.meta\.json$/, ".md"));
   const md = existsSync(mdPath) ? await readFile(mdPath, "utf8") : `# Speculation ${meta.window[0]}\n`;
-  await writeFile(mdPath, patchReport(md, renderBestBets(result, meta)), "utf8");
+  await writeFile(mdPath, patchReport(patchBias(md, meta), renderBestBets(result, meta)), "utf8");
 
   const logPath = join(dirname(dirname(metaPath)), "bets-log.json");
   const log: LoggedBet[] = existsSync(logPath) ? (JSON.parse(await readFile(logPath, "utf8")) as LoggedBet[]) : [];

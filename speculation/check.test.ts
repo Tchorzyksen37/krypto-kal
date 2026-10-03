@@ -6,14 +6,15 @@ import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, test } from "node:test";
-import { DEFAULT_CHECK, fmtPrice, patchReport, renderBestBets, runCheck, validateBets } from "./check.ts";
+import { DEFAULT_CHECK, biasError, fmtPrice, patchBias, patchReport, renderBestBets, renderBias, runCheck, validateBets } from "./check.ts";
 import type { BetInput, LoggedBet, ReportMeta } from "./types.ts";
 
 const meta = (bets: BetInput[], over: Partial<ReportMeta> = {}): ReportMeta => ({
   generated: "2026-10-03T13:52:00Z",
+  bias: { direction: "long", probability: 0.58, summary: "shorts crowded after the flush" },
   window: ["2026-10-03T14:00:00Z", "2026-10-03T15:00:00Z"],
   symbols: [
-    { symbol: "XRP", futures: "PF_XRPUSD", last: 2.4, atr_1h: 0.03, why: "core" },
+    { symbol: "XRP", futures: "PF_XRPUSD", last: 2.4, atr_1h: 0.03, why: "core", bias: "long" },
     { symbol: "BTC", futures: "PF_XBTUSD", last: 65000, atr_1h: 400, why: "core" },
     { symbol: "ETH", futures: "PF_ETHUSD", last: 3000, atr_1h: 20, why: "core" },
   ],
@@ -29,9 +30,10 @@ describe("validateBets", () => {
     const r = validateBets(meta([xrpLong]));
     assert.equal(r.dropped.length, 0);
     const b = r.bets[0]!;
-    assert.equal(b.id, "20261003-14Z-XRP-1");
+    assert.equal(b.id, "20261003-1400Z-XRP-1");
     assert.equal(b.futures, "PF_XRPUSD");
     assert.equal(b.rr, 2);
+    assert.equal(b.vs_bias, "with");
     assert.equal(b.fill_from, "2026-10-03T14:00:00.000Z");
     assert.equal(b.entry_deadline, "2026-10-03T14:30:00.000Z");
     assert.equal(b.latest_close, "2026-10-03T15:15:00.000Z");
@@ -116,6 +118,106 @@ describe("validateBets", () => {
   });
 });
 
+describe("sessions", () => {
+  const nightMeta = (bets: BetInput[]): ReportMeta =>
+    meta(bets, { session: "night_asia", window: ["2026-10-03T20:00:00Z", "2026-10-04T06:00:00Z"], generated: "2026-10-03T19:40:00Z" });
+
+  test("session limits replace the 1h defaults: longer ttl and entry deadline, ids carry minutes", () => {
+    const m = nightMeta([{ ...xrpLong, ttl_minutes: 240, take_profit: 2.47 }]);
+    const r = validateBets(m);
+    assert.equal(r.dropped.length, 0, JSON.stringify(r.dropped));
+    const b = r.bets[0]!;
+    assert.equal(b.id, "20261003-2000Z-XRP-1");
+    assert.equal(b.session, "night_asia");
+    assert.equal(b.entry_deadline, "2026-10-03T23:00:00.000Z"); // 180 min after the window opens
+    assert.equal(b.latest_close, "2026-10-04T03:00:00.000Z");
+    assert.match(renderBestBets(r, m), /^## Best bets \(Night \(Asia\)\)/);
+  });
+
+  test("the night session keeps at most 2 bets and wants reward:risk 1.5", () => {
+    const m = nightMeta([{ ...xrpLong, take_profit: 2.41 }]); // R:R 0.67
+    assert.match(validateBets(m).dropped[0]!.reason, /reward:risk .* < 1\.5/);
+    const btc: BetInput = { symbol: "BTC", side: "long", entry: 64950, stop_loss: 64300, take_profit: 66000, ttl_minutes: 120, probability: 0.4 };
+    const eth: BetInput = { symbol: "ETH", side: "long", entry: 2995, stop_loss: 2960, take_profit: 3060, ttl_minutes: 120, probability: 0.4 };
+    const r = validateBets(nightMeta([{ ...xrpLong, take_profit: 2.47, ttl_minutes: 120 }, btc, eth]));
+    assert.equal(r.bets.length, 2);
+    assert.match(r.dropped[0]!.reason, /limit of 2/);
+  });
+
+  test("a ttl above the session maximum is dropped", () => {
+    assert.match(validateBets(nightMeta([{ ...xrpLong, ttl_minutes: 400 }])).dropped[0]!.reason, /ttl 400/);
+  });
+
+  test("longer holds need wider stops", () => {
+    // 0.0054 risk is 0.18 ATR: fine for a 60-minute hold, inside the noise for a 240-minute hold (needs 0.30 ATR)
+    const tight = { ...xrpLong, stop_loss: 2.3846, take_profit: 2.4108 + 0.02, ttl_minutes: 60 };
+    assert.equal(validateBets(nightMeta([tight])).dropped.length, 0);
+    assert.match(validateBets(nightMeta([{ ...tight, ttl_minutes: 240 }])).dropped[0]!.reason, /stop inside noise/);
+  });
+
+  test("a manual run after the window opened fills from the generation time", () => {
+    const m = meta([xrpLong], { session: "eu_us_overlap", window: ["2026-10-03T11:30:00Z", "2026-10-03T15:30:00Z"], generated: "2026-10-03T13:00:00Z" });
+    const b = validateBets(m).bets[0]!;
+    assert.equal(b.id, "20261003-1130Z-XRP-1"); // id keeps the window start
+    assert.equal(b.fill_from, "2026-10-03T13:00:00.000Z");
+    assert.equal(b.entry_deadline, "2026-10-03T13:45:00.000Z"); // overlap session: 45 min
+  });
+});
+
+describe("bias", () => {
+  test("every report must state long, short or neutral", () => {
+    assert.match(biasError({ ...meta([]), bias: undefined })!, /must state its bias/);
+    assert.match(biasError({ ...meta([]), bias: { direction: "long" } })!, /needs a probability/);
+    assert.equal(biasError({ ...meta([]), bias: { direction: "neutral" } }), undefined);
+    assert.equal(biasError(meta([])), undefined);
+    assert.match(biasError(meta([], { symbols: [{ symbol: "X", futures: "F", last: 1, atr_1h: 1, bias: "up" as never }] }))!, /invalid bias for X/);
+  });
+
+  test("renders a clear callout with per-symbol leans", () => {
+    const text = renderBias(meta([], { bias: { direction: "short", probability: 0.61, summary: "US data risk" } }));
+    assert.match(text, /\[!abstract\] Bias: SHORT \(61%\)\. US data risk/);
+    assert.match(text, /Per symbol: XRP LONG/);
+    assert.match(renderBias(meta([], { bias: { direction: "neutral" } })), /NEUTRAL, no directional edge/);
+  });
+
+  test("patchBias inserts once under the title, updates in place and mirrors the frontmatter", () => {
+    const m = meta([]);
+    const once = patchBias("---\ntype: speculation\n---\n# Report\n\ntext\n", m);
+    assert.match(once, /^---\ntype: speculation\nbias: long\n---/);
+    assert.match(once, /# Report\n\n<!-- bias:start -->\n> \[!abstract\] Bias: LONG \(58%\)/);
+    const flipped = patchBias(once, { ...m, bias: { direction: "short", probability: 0.7 } });
+    assert.equal(flipped.match(/bias:start/g)!.length, 1);
+    assert.match(flipped, /^---\ntype: speculation\nbias: short\n---/);
+    assert.match(flipped, /Bias: SHORT \(70%\)/);
+    assert.ok(!flipped.includes("LONG (58%)"));
+  });
+
+  test("patchBias adds frontmatter when the note has none", () => {
+    assert.match(patchBias("plain text\n", meta([])), /^---\ntype: speculation\nbias: long\n---/);
+  });
+
+  test("a bet against the symbol's bias is flagged", () => {
+    const short: BetInput = { symbol: "XRP", side: "short", entry: 2.41, stop_loss: 2.44, take_profit: 2.35, ttl_minutes: 30, probability: 0.4 };
+    const m = meta([short]);
+    const r = validateBets(m);
+    assert.equal(r.bets[0]!.vs_bias, "against");
+    assert.match(renderBestBets(r, m), /Counter-bias/);
+  });
+
+  test("runCheck refuses a report without a bias and writes it into the note otherwise", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spec-bias-"));
+    const day = join(root, "2026-10-03");
+    await mkdir(day, { recursive: true });
+    const p = join(day, "1400Z.meta.json");
+    await writeFile(p, JSON.stringify({ ...meta([xrpLong]), bias: undefined }), "utf8");
+    await assert.rejects(() => runCheck(p), /must state its bias/);
+    await writeFile(p, JSON.stringify(meta([xrpLong])), "utf8");
+    await writeFile(join(day, "1400Z.md"), "# Report\n", "utf8");
+    await runCheck(p);
+    assert.match(await readFile(join(day, "1400Z.md"), "utf8"), /Bias: LONG \(58%\)/);
+  });
+});
+
 describe("rendering and patching", () => {
   test("fmtPrice scales digits with magnitude", () => {
     assert.equal(fmtPrice(65000.55), "65000.6");
@@ -134,7 +236,7 @@ describe("rendering and patching", () => {
     assert.match(text, /DOGE long: unknown symbol/);
 
     const none = meta([]);
-    assert.match(renderBestBets(validateBets(none), none), /No bet this hour/);
+    assert.match(renderBestBets(validateBets(none), none), /No bet this session/);
   });
 
   test("patchReport replaces only the Best bets section and keeps later sections", () => {
@@ -164,14 +266,14 @@ describe("runCheck (files)", () => {
     assert.equal(r.bets.length, 1);
     const md = await readFile(join(day, "1400Z.md"), "utf8");
     assert.match(md, /## Risks\n- a\n\n## Best bets \(next 1h\)/);
-    assert.match(md, /20261003-14Z-XRP-1/);
+    assert.match(md, /20261003-1400Z-XRP-1/);
     const saved = JSON.parse(await readFile(metaPath, "utf8")) as ReportMeta;
     assert.equal(saved.validated?.length, 1);
 
     await runCheck(metaPath); // rerun must not duplicate the log entry
     const log = JSON.parse(await readFile(join(root, "bets-log.json"), "utf8")) as LoggedBet[];
     assert.equal(log.length, 1);
-    assert.equal(log[0]!.id, "20261003-14Z-XRP-1");
+    assert.equal(log[0]!.id, "20261003-1400Z-XRP-1");
   });
 
   test("rejects a meta file without the required arrays", async () => {
