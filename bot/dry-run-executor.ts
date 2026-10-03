@@ -9,8 +9,13 @@
 //  - stops are checked before limits within one price tick;
 //  - a reduce-only order is capped at the position and cancelled if it fires with nothing to reduce, but it stays
 //    open after the position closed until it fires (the orphan hazard the engine must clean up).
-// Assumed, not verified against the exchange: trigger direction of stp / take_profit, and the orphan behaviour.
+// Funding is charged hourly to the position held at the funding time. Replay walks 1-minute candles through the
+// adverse extreme first, so a stop beats a target inside one candle. Faults (lost acks, rejections, partial fills,
+// delays) can be injected one-shot for tests.
+// Assumed, not verified against the exchange: trigger direction of stp / take_profit, the orphan behaviour, and that
+// a positive funding rate means longs pay shorts.
 
+import type { FuturesCandle } from "../kraken-futures-client.ts";
 import type { BotStore } from "./bot-store.ts";
 import type { Clock } from "./clock.ts";
 import type { BotConfig } from "./config.ts";
@@ -31,6 +36,8 @@ interface SimOrder {
 interface SimPosition {
   size: number; // signed: positive long, negative short
   avgPrice: number;
+  fundingPaid?: number; // charged to this position since it opened (a cost is positive)
+  openedAtMs?: number; // when this position (or its current direction) was opened
 }
 
 interface SimAccount {
@@ -43,6 +50,7 @@ interface SimMeta {
   nextOrderId: number;
   nextFillId: number;
   lastTickMs: number;
+  lastFundingMs?: number; // newest funding time already processed
   price: PriceEvent | null;
 }
 
@@ -54,6 +62,7 @@ const FILL = "sim_fill";
 const POSITION = "sim_position";
 const ACCOUNT = "sim_account";
 const META = "sim_meta";
+const HISTORY = "sim_position_history"; // [{ t, size }]: the signed position after each fill, for funding
 
 const EPS = 1e-12;
 const ok = (orderId: string): OrderAck => ({ ok: true, orderId });
@@ -64,6 +73,14 @@ export interface DryRunOptions {
   store: BotStore;
   clock: Clock;
   config: BotConfig;
+  sleep?: (ms: number) => void; // called for an injected delay; tests wire it to the fake clock
+}
+
+export interface Faults {
+  dropAck?: number; // the next n mutating calls take effect, then throw (the ack is lost)
+  rejectNext?: RejectKind; // the next placeOrder / editOrder is refused and has no effect
+  partialFill?: number; // the next fill executes only this fraction (0 < f < 1) of what it would have
+  delayMs?: number; // the next mutating call takes effect, then waits this long before returning
 }
 
 export class DryRunExecutor implements Executor {
@@ -71,64 +88,94 @@ export class DryRunExecutor implements Executor {
   private readonly store: BotStore;
   private readonly clock: Clock;
   private readonly config: BotConfig;
+  private readonly sleep: (ms: number) => void;
+  private faults: Faults = {}; // in memory on purpose: faults exist for tests
 
   constructor(o: DryRunOptions) {
     this.store = o.store;
     this.clock = o.clock;
     this.config = o.config;
+    this.sleep = o.sleep ?? (() => {});
+  }
+
+  // Arms one-shot faults (see Faults). New settings are added to what is already armed.
+  inject(f: Faults): void {
+    if (f.partialFill !== undefined && !(f.partialFill > 0 && f.partialFill < 1)) throw new RangeError("partialFill must be in (0, 1)");
+    if (f.dropAck !== undefined && !(Number.isInteger(f.dropAck) && f.dropAck >= 0)) throw new RangeError("dropAck must be a non-negative integer");
+    if (f.delayMs !== undefined && !(Number.isFinite(f.delayMs) && f.delayMs >= 0)) throw new RangeError("delayMs must be non-negative");
+    this.faults = { ...this.faults, ...f };
   }
 
   // Feeds one quote: stores it, then fires every resting order it triggers. Older quotes are ignored.
   onPrice(e: PriceEvent): void {
+    this.feed(e, false);
+  }
+
+  // Walks candles (oldest first) to find what would have fired while the bot was down. Each candle is visited
+  // open -> adverse extreme -> favourable extreme -> close, where adverse is the low for a long and the high for a
+  // short (a flat account is walked low first). So a stop beats a target inside one candle. Orders placed after a
+  // candle never fire in it. Candles older than the last quote and malformed candles are skipped.
+  // Candle t is in epoch SECONDS, as in the client. The whole replay is one transaction.
+  replay(candles: FuturesCandle[], intervalSec = 60): void {
+    this.store.transaction(() => {
+      for (const c of [...candles].sort((a, b) => a.t - b.t)) {
+        if (![c.o, c.h, c.l, c.c, c.t].every(finitePos) || c.h < c.l) continue;
+        const startMs = c.t * 1000;
+        const path = this.position().size < 0 ? [c.o, c.h, c.l, c.c] : [c.o, c.l, c.h, c.c];
+        path.forEach((p, k) => {
+          this.feed({ t: startMs + Math.floor((k * intervalSec * 1000) / 4), mark: p, last: p, bid: p, ask: p }, true);
+        });
+      }
+    });
+  }
+
+  // Charges hourly funding to the position held at each funding time. Rates are { t: epoch ms, rate: fraction of the
+  // price per hour, positive = longs pay }. A time is charged once; times in the future, while flat, or before the
+  // position opened cost nothing. The mark used is the latest one (an approximation within the hour).
+  accrueFunding(rates: { t: number; rate: number }[]): void {
     this.store.transaction(() => {
       const meta = this.loadMeta();
-      if (e.t < meta.lastTickMs) return;
-      meta.lastTickMs = e.t;
-      meta.price = e;
-      const rank = (o: SimOrder) => (o.req.orderType === "stp" ? 0 : o.req.orderType === "take_profit" ? 1 : 2);
-      const open = this.openOrders().sort((a, b) => rank(a) - rank(b) || a.receivedMs - b.receivedMs);
-      for (const order of open) {
-        const current = this.getOrder(order.req.cliOrdId);
-        if (current?.status === "open") this.match(meta, current, e, e.t, false);
+      const nowMs = this.clock.now();
+      const last = meta.lastFundingMs ?? 0;
+      const due = rates
+        .filter((r) => Number.isFinite(r.t) && Number.isFinite(r.rate) && r.t > last && r.t <= nowMs)
+        .sort((a, b) => a.t - b.t);
+      if (!due.length) return;
+
+      const history = this.store.getDoc<{ t: number; size: number }[]>(HISTORY, "hist") ?? [];
+      const pos = this.position();
+      const acct = this.account0();
+      const mark = meta.price?.mark ?? pos.avgPrice;
+      for (const r of due) {
+        // The position at funding time is the newest one that existed strictly before it (a position closed at the
+        // exact funding time still pays).
+        let size = 0;
+        for (const h of history) if (h.t < r.t) size = h.size;
+        const payment = size * mark * r.rate;
+        acct.funding += payment;
+        if (pos.size !== 0 && r.t > (pos.openedAtMs ?? 0)) pos.fundingPaid = (pos.fundingPaid ?? 0) + payment;
       }
+      meta.lastFundingMs = due[due.length - 1]!.t;
+      this.store.putDoc(ACCOUNT, "acct", nowMs, acct);
+      this.store.putDoc(POSITION, this.config.symbol, nowMs, pos);
       this.saveMeta(meta);
     });
   }
 
   async placeOrder(req: OrderRequest): Promise<OrderAck> {
-    return this.store.transaction(() => this.place(req));
+    const refusal = this.takeRejection();
+    if (refusal) return refusal;
+    const ack = this.store.transaction(() => this.place(req));
+    this.afterEffect();
+    return ack;
   }
 
   async editOrder(edit: OrderEdit): Promise<OrderAck> {
-    return this.store.transaction(() => {
-      const order = this.getOrder(edit.cliOrdId);
-      if (!order || order.status !== "open") return rejected("unknown", `no open order ${edit.cliOrdId}`);
-      const r = order.req;
-      const isStop = r.orderType === "stp" || r.orderType === "take_profit";
-      if (edit.stopPrice !== undefined && (!isStop || !finitePos(edit.stopPrice))) return rejected("unknown", "invalid stopPrice");
-      if (edit.limitPrice !== undefined && (isStop || r.orderType === "mkt" || !finitePos(edit.limitPrice))) {
-        return rejected("unknown", "invalid limitPrice");
-      }
-      if (edit.size !== undefined && (!finitePos(edit.size) || edit.size < order.filledSize)) return rejected("unknown", "invalid size");
-
-      const nowMs = this.clock.now();
-      const next: SimOrder = {
-        ...order,
-        updatedMs: nowMs,
-        req: {
-          ...r,
-          ...(edit.stopPrice !== undefined ? { stopPrice: edit.stopPrice } : {}),
-          ...(edit.limitPrice !== undefined ? { limitPrice: edit.limitPrice } : {}),
-          ...(edit.size !== undefined ? { size: edit.size } : {}),
-        },
-      };
-      this.saveOrder(next);
-      // A stop moved beyond the current price fires at once.
-      const meta = this.loadMeta();
-      if (meta.price) this.match(meta, next, meta.price, nowMs, false);
-      this.saveMeta(meta);
-      return ok(order.orderId);
-    });
+    const refusal = this.takeRejection();
+    if (refusal) return refusal;
+    const ack = this.store.transaction(() => this.edit(edit));
+    this.afterEffect();
+    return ack;
   }
 
   async cancelOrder(id: { cliOrdId: string } | { orderId: string }): Promise<void> {
@@ -136,6 +183,7 @@ export class DryRunExecutor implements Executor {
       const order = "cliOrdId" in id ? this.getOrder(id.cliOrdId) : this.openOrders().find((o) => o.orderId === id.orderId);
       if (order?.status === "open") this.saveOrder({ ...order, status: "cancelled", updatedMs: this.clock.now() });
     });
+    this.afterEffect();
   }
 
   async cancelAll(symbol: string): Promise<void> {
@@ -144,6 +192,7 @@ export class DryRunExecutor implements Executor {
         if (order.req.symbol === symbol) this.saveOrder({ ...order, status: "cancelled", updatedMs: this.clock.now() });
       }
     });
+    this.afterEffect();
   }
 
   async getPositions(): Promise<FuturesPosition[]> {
@@ -153,7 +202,7 @@ export class DryRunExecutor implements Executor {
       const mark = this.loadMeta().price?.mark ?? pos.avgPrice;
       return [{
         symbol: this.config.symbol, side: pos.size > 0 ? "long" : "short", size: Math.abs(pos.size), price: pos.avgPrice,
-        unrealizedPnl: pos.size * (mark - pos.avgPrice), unrealizedFunding: null, pnlCurrency: "USD",
+        unrealizedPnl: pos.size * (mark - pos.avgPrice), unrealizedFunding: -(pos.fundingPaid ?? 0), pnlCurrency: "USD",
       }];
     });
   }
@@ -168,6 +217,28 @@ export class DryRunExecutor implements Executor {
 
   async getAccount(): Promise<AccountState> {
     return this.store.transaction(() => this.account());
+  }
+
+  // ---- faults ------------------------------------------------------------------------------------------------
+
+  // The cost of a lost or slow ack: the call has already taken effect.
+  private afterEffect(): void {
+    if (this.faults.delayMs !== undefined) {
+      const ms = this.faults.delayMs;
+      this.faults.delayMs = undefined;
+      this.sleep(ms);
+    }
+    if ((this.faults.dropAck ?? 0) > 0) {
+      this.faults.dropAck = (this.faults.dropAck ?? 0) - 1;
+      throw new Error("injected fault: ack lost");
+    }
+  }
+
+  private takeRejection(): OrderAck | undefined {
+    const kind = this.faults.rejectNext;
+    if (!kind) return undefined;
+    this.faults.rejectNext = undefined;
+    return rejected(kind, "injected rejection");
   }
 
   // ---- placement ---------------------------------------------------------------------------------------------
@@ -208,6 +279,36 @@ export class DryRunExecutor implements Executor {
     return ok(order.orderId);
   }
 
+  private edit(edit: OrderEdit): OrderAck {
+    const order = this.getOrder(edit.cliOrdId);
+    if (!order || order.status !== "open") return rejected("unknown", `no open order ${edit.cliOrdId}`);
+    const r = order.req;
+    const isStop = r.orderType === "stp" || r.orderType === "take_profit";
+    if (edit.stopPrice !== undefined && (!isStop || !finitePos(edit.stopPrice))) return rejected("unknown", "invalid stopPrice");
+    if (edit.limitPrice !== undefined && (isStop || r.orderType === "mkt" || !finitePos(edit.limitPrice))) {
+      return rejected("unknown", "invalid limitPrice");
+    }
+    if (edit.size !== undefined && (!finitePos(edit.size) || edit.size < order.filledSize)) return rejected("unknown", "invalid size");
+
+    const nowMs = this.clock.now();
+    const next: SimOrder = {
+      ...order,
+      updatedMs: nowMs,
+      req: {
+        ...r,
+        ...(edit.stopPrice !== undefined ? { stopPrice: edit.stopPrice } : {}),
+        ...(edit.limitPrice !== undefined ? { limitPrice: edit.limitPrice } : {}),
+        ...(edit.size !== undefined ? { size: edit.size } : {}),
+      },
+    };
+    this.saveOrder(next);
+    // A stop moved beyond the current price fires at once.
+    const meta = this.loadMeta();
+    if (meta.price) this.match(meta, next, meta.price, nowMs, false);
+    this.saveMeta(meta);
+    return ok(order.orderId);
+  }
+
   // Returns the first problem with a request, or undefined.
   private validate(r: OrderRequest): string | undefined {
     if (r.symbol !== this.config.symbol) return `symbol ${r.symbol} is not ${this.config.symbol}`;
@@ -238,6 +339,23 @@ export class DryRunExecutor implements Executor {
 
   // ---- matching ----------------------------------------------------------------------------------------------
 
+  private feed(e: PriceEvent, replaying: boolean): void {
+    this.store.transaction(() => {
+      const meta = this.loadMeta();
+      if (e.t < meta.lastTickMs) return;
+      meta.lastTickMs = e.t;
+      meta.price = e;
+      const rank = (o: SimOrder) => (o.req.orderType === "stp" ? 0 : o.req.orderType === "take_profit" ? 1 : 2);
+      const open = this.openOrders().sort((a, b) => rank(a) - rank(b) || a.receivedMs - b.receivedMs);
+      for (const order of open) {
+        if (replaying && order.receivedMs > e.t) continue; // the order did not exist yet at this point of the replay
+        const current = this.getOrder(order.req.cliOrdId);
+        if (current?.status === "open") this.match(meta, current, e, e.t, false);
+      }
+      this.saveMeta(meta);
+    });
+  }
+
   // Fires `order` against quote `e` if it triggers. `onPlacement` lets a marketable limit take liquidity at once.
   private match(meta: SimMeta, order: SimOrder, e: PriceEvent, tMs: number, onPlacement: boolean): void {
     const r = order.req;
@@ -253,10 +371,10 @@ export class DryRunExecutor implements Executor {
       case "lmt":
       case "post": {
         const limit = r.limitPrice!;
-        if (buy ? limit >= e.ask : limit <= e.bid) {
-          if (onPlacement) price = buy ? e.ask : e.bid; // marketable: takes the quote
-        } else if (!onPlacement && (buy ? e.last < limit : e.last > limit)) {
-          price = limit; // traded through: filled as a resting (maker) order
+        if (onPlacement) {
+          if (buy ? limit >= e.ask : limit <= e.bid) price = buy ? e.ask : e.bid; // marketable: takes the quote
+        } else if (buy ? e.last < limit : e.last > limit) {
+          price = limit; // traded through (even by a gap): filled as a resting order, at the limit
           fillType = "maker";
         }
         break;
@@ -275,6 +393,7 @@ export class DryRunExecutor implements Executor {
     if (price === undefined) return;
 
     let qty = r.size - order.filledSize;
+    let finish = true; // the order is over after this fill
     if (r.reduceOnly) {
       const room = closable(this.position(), r.side);
       if (room <= 0) {
@@ -283,10 +402,18 @@ export class DryRunExecutor implements Executor {
       }
       qty = Math.min(qty, room);
     }
-    this.applyFill(meta, order, price, qty, fillType, tMs);
+    const fraction = this.faults.partialFill;
+    if (fraction !== undefined) {
+      this.faults.partialFill = undefined;
+      qty *= fraction;
+      finish = r.orderType === "mkt"; // a market order's remainder is dropped, a resting order's stays open
+    }
+    this.applyFill(meta, order, price, qty, fillType, tMs, finish);
   }
 
-  private applyFill(meta: SimMeta, order: SimOrder, price: number, qty: number, fillType: "maker" | "taker", tMs: number): void {
+  private applyFill(
+    meta: SimMeta, order: SimOrder, price: number, qty: number, fillType: "maker" | "taker", tMs: number, finish: boolean,
+  ): void {
     const r = order.req;
     const pos = this.position();
     const acct = this.account0();
@@ -307,6 +434,12 @@ export class DryRunExecutor implements Executor {
       size = 0;
       avg = 0;
     }
+    // A new position (opened, flipped or reopened) starts its own funding tally.
+    const fresh = pos.size === 0 || Math.sign(pos.size) !== Math.sign(size);
+    const fundingPaid = fresh ? 0 : (pos.fundingPaid ?? 0);
+    const openedAtMs = fresh ? tMs : (pos.openedAtMs ?? tMs);
+    const history = this.store.getDoc<{ t: number; size: number }[]>(HISTORY, "hist") ?? [];
+    this.store.putDoc(HISTORY, "hist", tMs, [...history, { t: tMs, size }].slice(-500));
 
     const bps = fillType === "maker" ? this.config.fees_bps.maker : this.config.fees_bps.taker;
     acct.realizedPnl += realized;
@@ -318,11 +451,11 @@ export class DryRunExecutor implements Executor {
       fillTime: new Date(tMs).toISOString(), fillType, realized_pnl: realized,
     };
     this.store.putDoc(FILL, fillId, tMs, fill);
-    this.store.putDoc(POSITION, this.config.symbol, tMs, { size, avgPrice: avg } satisfies SimPosition);
+    this.store.putDoc(POSITION, this.config.symbol, tMs, { size, avgPrice: avg, fundingPaid, openedAtMs } satisfies SimPosition);
     this.store.putDoc(ACCOUNT, "acct", tMs, acct);
 
     const filledSize = order.filledSize + qty;
-    const done = filledSize >= r.size - EPS || r.reduceOnly; // a capped reduce-only order is finished too
+    const done = finish || filledSize >= r.size - EPS;
     this.saveOrder({ ...order, filledSize, status: done ? "filled" : "open", updatedMs: tMs });
   }
 

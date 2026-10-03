@@ -7,50 +7,9 @@
 
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
-import { BotStore } from "./bot-store.ts";
-import { FakeClock } from "./clock.ts";
-import { type BotConfig, defaultConfig } from "./config.ts";
 import { DryRunExecutor } from "./dry-run-executor.ts";
-import { type OrderRequest, type PriceEvent, isBotOrder, makeCliOrdId, parseCliOrdId } from "./executor.ts";
-
-const T0 = Date.parse("2026-10-03T12:00:00Z");
-const config: BotConfig = { ...defaultConfig(), slippage_cap_bps: 0 }; // capital 1000, max_leverage 2, fees 2/5 bps
-
-const closeTo = (actual: number, expected: number, eps = 1e-9) =>
-  assert.ok(Math.abs(actual - expected) <= eps, `expected ${actual} to be within ${eps} of ${expected}`);
-
-const px = (p: number, t: number): PriceEvent => ({ t, mark: p, last: p, bid: p - 5, ask: p + 5 });
-
-function setup(cfg: BotConfig = config) {
-  const store = new BotStore(":memory:");
-  const clock = new FakeClock(T0);
-  const ex = new DryRunExecutor({ store, clock, config: cfg });
-  // Moves time on by one second and feeds a quote; `over` overrides single fields of the event.
-  const tick = (p: number, over: Partial<PriceEvent> = {}) => {
-    clock.advance(1000);
-    ex.onPrice({ ...px(p, clock.now()), ...over });
-  };
-  return { store, clock, ex, tick };
-}
-type World = ReturnType<typeof setup>;
-
-let seq = 0;
-const req = (over: Partial<OrderRequest> = {}): OrderRequest => ({
-  symbol: "PF_XBTUSD", side: "buy", orderType: "mkt", size: 0.01, reduceOnly: false, cliOrdId: `bot-1-entry-${seq++}`, ...over,
-});
-
-// Places an order that must be accepted and returns its exchange order id.
-async function place(w: World, over: Partial<OrderRequest> = {}): Promise<string> {
-  const r = await w.ex.placeOrder(req(over));
-  assert.ok(r.ok, r.ok ? "" : `rejected: ${r.kind} ${r.message}`);
-  return r.orderId;
-}
-
-// A long position of `size` bought at the ask of a quote around `p`.
-async function goLong(w: World, p = 100000, size = 0.01) {
-  w.tick(p);
-  await place(w, { side: "buy", orderType: "mkt", size });
-}
+import { type OrderRequest, isBotOrder, makeCliOrdId, parseCliOrdId } from "./executor.ts";
+import { T0, closeTo, config, goLong, place, px, req, setup } from "./sim-fixtures.ts";
 
 describe("cliOrdId helpers", () => {
   test("makeCliOrdId is deterministic, prefixed with bot-, and within 100 characters", () => {

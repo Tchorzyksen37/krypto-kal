@@ -87,6 +87,8 @@ export interface Executor {
 export interface MarketData {
   ticker(): Promise<PriceEvent>;
   candles(resolution: string, n: number): Promise<FuturesCandle[]>;
+  // t: epoch ms of the funding time; rate: fraction of the price per hour (the client's relativeFundingRate).
+  // Positive means longs pay shorts (assumed from the usual perpetual convention, not verified for Kraken).
   fundingRates(): Promise<{ t: number; rate: number }[]>;
   clock: Clock;
 }
