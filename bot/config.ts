@@ -5,6 +5,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { z } from "zod";
 import { KRAKEN_FUTURES_RESOLUTIONS } from "../kraken-futures-client.ts";
+import { formatIssues } from "./zod-issues.ts";
 
 const pct = z.number().positive().max(100);
 const posInt = z.number().int().positive();
@@ -40,6 +41,7 @@ export const ConfigSchema = z
     protect_timeout_sec: z.number().positive(),
     max_policy_ttl_min: z.number().positive(),
     stale_data_max_age_sec: z.number().positive(),
+    max_menu_age_min: z.number().positive(), // a policy may reference a level menu at most this old (covers LLM latency)
     loosen_confirm_cycles: posInt,
     max_hold_hours: z.number().positive(),
     watchdog_interval_sec: z.number().positive(),
@@ -80,6 +82,7 @@ const DEFAULTS: BotConfig = {
   protect_timeout_sec: 5,
   max_policy_ttl_min: 60,
   stale_data_max_age_sec: 120,
+  max_menu_age_min: 15,
   loosen_confirm_cycles: 2,
   max_hold_hours: 48,
   watchdog_interval_sec: 5,
@@ -130,9 +133,6 @@ export function loadConfig(path: string): { config: BotConfig; hash: string } {
   if (!isPlainObject(raw)) throw new Error(`Bot config ${path} must be a JSON object`);
 
   const parsed = ConfigSchema.safeParse(merge(DEFAULTS, raw));
-  if (!parsed.success) {
-    const issues = parsed.error.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`).join("; ");
-    throw new Error(`Invalid bot config ${path}: ${issues}`);
-  }
+  if (!parsed.success) throw new Error(`Invalid bot config ${path}: ${formatIssues(parsed.error)}`);
   return { config: parsed.data, hash: configHash(parsed.data) };
 }

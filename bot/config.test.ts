@@ -49,6 +49,7 @@ describe("defaultConfig", () => {
       protect_timeout_sec: 5,
       max_policy_ttl_min: 60,
       stale_data_max_age_sec: 120,
+      max_menu_age_min: 15,
       loosen_confirm_cycles: 2,
       max_hold_hours: 48,
       watchdog_interval_sec: 5,
