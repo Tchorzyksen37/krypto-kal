@@ -211,23 +211,24 @@ Failure modes the spec implies but does not spell out. Each has a test in the ta
 
 ### Task 7: Limits, counters, cooldowns
 
-**Files:** Create `bot/limits.ts`, `bot/limits.test.ts`.
+**Files:** Create `bot/limits.ts`, `bot/limits.test.ts`. Modify `bot/bot-store.ts` (`raiseCounter`).
 
 **Interfaces:**
-- Consumes: `BotStore`, `BotConfig`, `Clock`.
-- Produces: `tradingDay(nowMs: number, resetHourUtc: number): string`;
-  `entryAllowed(i: { store: BotStore; config: BotConfig; nowMs: number; openRiskPct: number; newRiskPct: number; openPositions: number }): { ok: true } | { ok: false; reason: string }`;
-  `recordPlacedOrder(store: BotStore, config: BotConfig, nowMs: number): void`;
-  `cooldownUntil(i: { closedAtMs: number; lossy: boolean; config: BotConfig }): number`;
-  `dailyLossBreached(i: { realized: number; unrealized: number; config: BotConfig }): boolean`;
-  `rebuildCounters(store: BotStore, config: BotConfig, nowMs: number, history: { placedAtMs: number; isEntry: boolean }[]): void`
-  (the higher of persisted and rebuilt wins).
+- Consumes: `BotStore`, `BotConfig`, `FuturesFill`.
+- Produces: `tradingDay(nowMs, resetHourUtc): string`; `dayStartMs(nowMs, resetHourUtc): number`;
+  `recordPlacedOrder(store, config, nowMs, o: { cliOrdId: string; isEntry: boolean }): boolean` (idempotent per cliOrdId);
+  `entryAllowed(i: EntryCheck): { ok: true } | { ok: false; reason: EntryLimit }` where `EntryCheck` carries
+  `store, config, nowMs, lastClockMs, openRiskPct, newRiskPct, openPositions, ordersNeeded` (the whole bundle: entry, stop, targets);
+  `cooldownUntil({ closedAtMs, lossy, config }): number`; `dailyLossBreached({ realized, unrealized, config }): boolean`;
+  `netRealizedSince(fills: FuturesFill[], sinceMs, config): number`;
+  `rebuildCounters(store, config, history: { placedAtMs: number; isEntry: boolean }[]): void` (a max, never an add).
 
-- [ ] **Step 1: Write failing tests:** the day boundary honours `day_reset_utc_hour` (23:59 vs 00:01 UTC);
-  `max_entries_per_day`, `max_orders_per_day`, `max_open_positions`, `max_total_open_risk_pct` each block an entry;
-  placed orders count even when never filled; cooldown is longer after a loss; daily loss counts realized plus
-  unrealized; `rebuildCounters` never lowers a persisted counter; a clock set backwards makes `entryAllowed` return
-  `{ ok: false }` instead of throwing or extending the cooldown.
+- [ ] **Step 1: Write failing tests:** the day boundary honours `day_reset_utc_hour`; each limit blocks an entry at its
+  boundary and not before; the order budget reserves room for the whole bundle so protective orders are never blocked;
+  placed orders count even when never filled and a retry is not counted twice; cooldown is longer after a loss; daily
+  loss counts realised plus unrealised after fees and fails safe on garbage; `rebuildCounters` never lowers a persisted
+  counter and is idempotent; a clock set backwards makes `entryAllowed` return `{ ok: false }`; a property test that an
+  allowed entry never breaks any cap.
 - [ ] **Step 2: Run** `node --test bot/limits.test.ts`. Expected: FAIL.
 - [ ] **Step 3: Implement.** **Step 4: Run.** Expected: PASS. **Step 5: Commit** `bot: add limits and counters`.
 

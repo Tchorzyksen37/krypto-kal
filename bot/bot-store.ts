@@ -159,6 +159,13 @@ export class BotStore {
       .run(day, name, by);
   }
 
+  // Raises a counter to at least `value` and never lowers it (rebuilding from exchange history must not undo counts).
+  raiseCounter(day: string, name: string, value: number): void {
+    this.db
+      .prepare("INSERT INTO counters (day, name, value) VALUES (?, ?, ?) ON CONFLICT (day, name) DO UPDATE SET value = max(value, excluded.value)")
+      .run(day, name, value);
+  }
+
   getCounter(day: string, name: string): number {
     const row = this.db.prepare("SELECT value FROM counters WHERE day = ? AND name = ?").get(day, name) as { value: number } | undefined;
     return row?.value ?? 0;

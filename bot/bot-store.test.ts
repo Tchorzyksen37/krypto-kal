@@ -127,6 +127,19 @@ describe("counters", () => {
   });
 });
 
+describe("raiseCounter", () => {
+  test("raises a counter to at least the value and never lowers it", () => {
+    const s = store();
+    s.addCounter("d", "n", 3);
+    s.raiseCounter("d", "n", 2);
+    assert.equal(s.getCounter("d", "n"), 3);
+    s.raiseCounter("d", "n", 5);
+    assert.equal(s.getCounter("d", "n"), 5);
+    s.raiseCounter("d", "fresh", 4); // creates it when missing
+    assert.equal(s.getCounter("d", "fresh"), 4);
+  });
+});
+
 describe("journal", () => {
   const entry = (over = {}) => ({
     tMs: 5_000, configHash: "abc123", kind: "cycle", snapshot: { state: "FLAT", price: { mark: 99000 } },
