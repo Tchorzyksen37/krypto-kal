@@ -85,6 +85,34 @@ describe("kv", () => {
   });
 });
 
+describe("docs", () => {
+  test("put/get round-trip; the same key replaces; an unknown key is undefined", () => {
+    const s = store();
+    s.putDoc("order", "a", 1_000, { n: 1 });
+    s.putDoc("order", "a", 2_000, { n: 2 });
+    assert.deepEqual(s.getDoc("order", "a"), { n: 2 });
+    assert.equal(s.getDoc("order", "zzz"), undefined);
+    assert.equal(s.getDoc("fill", "a"), undefined); // kinds are separate namespaces
+  });
+
+  test("listDocs returns one kind, oldest first, from a time on", () => {
+    const s = store();
+    s.putDoc("fill", "f2", 2_000, { id: 2 });
+    s.putDoc("fill", "f1", 1_000, { id: 1 });
+    s.putDoc("order", "o1", 1_500, { id: "o" });
+    assert.deepEqual(s.listDocs("fill"), [{ id: 1 }, { id: 2 }]);
+    assert.deepEqual(s.listDocs("fill", 1_500), [{ id: 2 }]);
+  });
+
+  test("deleteDoc removes one document and is a no-op for an unknown key", () => {
+    const s = store();
+    s.putDoc("order", "a", 1_000, { n: 1 });
+    s.deleteDoc("order", "a");
+    s.deleteDoc("order", "never-existed");
+    assert.equal(s.getDoc("order", "a"), undefined);
+  });
+});
+
 describe("counters", () => {
   test("default 0, accumulate, and are separate per day and name", () => {
     const s = store();

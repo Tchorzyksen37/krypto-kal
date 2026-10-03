@@ -65,6 +65,11 @@ export class BotStore {
         kind TEXT NOT NULL, policy_id INTEGER, decision TEXT NOT NULL, reason TEXT NOT NULL, snapshot TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS journal_time ON journal (t_ms, id);
+      CREATE TABLE IF NOT EXISTS docs (
+        kind TEXT NOT NULL, key TEXT NOT NULL, t_ms INTEGER NOT NULL, data TEXT NOT NULL,
+        PRIMARY KEY (kind, key)
+      ) WITHOUT ROWID;
+      CREATE INDEX IF NOT EXISTS docs_time ON docs (kind, t_ms);
       CREATE TABLE IF NOT EXISTS incidents (
         id INTEGER PRIMARY KEY AUTOINCREMENT, t_ms INTEGER NOT NULL, kind TEXT NOT NULL, detail TEXT NOT NULL
       );
@@ -123,6 +128,29 @@ export class BotStore {
 
   setKv(key: string, value: string): void {
     this.db.prepare("INSERT OR REPLACE INTO kv (key, value) VALUES (?, ?)").run(key, value);
+  }
+
+  // Generic JSON documents (the dry-run executor's simulated orders, fills, position and account live here).
+  // `kind` + `key` identify a document; `tMs` orders and filters listings. Writing the same key replaces it.
+  putDoc(kind: string, key: string, tMs: number, data: unknown): void {
+    this.db.prepare("INSERT OR REPLACE INTO docs (kind, key, t_ms, data) VALUES (?, ?, ?, ?)").run(kind, key, tMs, JSON.stringify(data));
+  }
+
+  getDoc<T>(kind: string, key: string): T | undefined {
+    const row = this.db.prepare("SELECT data FROM docs WHERE kind = ? AND key = ?").get(kind, key) as { data: string } | undefined;
+    return row ? (JSON.parse(row.data) as T) : undefined;
+  }
+
+  // Documents of a kind with t_ms >= sinceMs, oldest first.
+  listDocs<T>(kind: string, sinceMs = 0): T[] {
+    const rows = this.db
+      .prepare("SELECT data FROM docs WHERE kind = ? AND t_ms >= ? ORDER BY t_ms, key")
+      .all(kind, sinceMs) as unknown as { data: string }[];
+    return rows.map((r) => JSON.parse(r.data) as T);
+  }
+
+  deleteDoc(kind: string, key: string): void {
+    this.db.prepare("DELETE FROM docs WHERE kind = ? AND key = ?").run(kind, key);
   }
 
   addCounter(day: string, name: string, by: number): void {

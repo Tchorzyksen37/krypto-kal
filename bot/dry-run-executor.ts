@@ -1,0 +1,396 @@
+// dry-run-executor.ts – a simulated exchange behind the Executor interface. Orders, fills, the position and the
+// account live in the BotStore, never in memory: the trader and the watchdog are separate processes sharing one
+// SQLite file, so every call reads fresh state inside a transaction.
+//
+// The fill model is pessimistic on purpose (an ambiguity always goes against the bot):
+//  - a resting limit fills only when the LAST price trades through it (a touch is not a fill), at the limit, as maker;
+//  - market orders, marketable limits and triggered stops fill as taker; stops at the worse of the stop price and
+//    the current quote, plus slippage (a gap is not rounded in the bot's favour);
+//  - stops are checked before limits within one price tick;
+//  - a reduce-only order is capped at the position and cancelled if it fires with nothing to reduce, but it stays
+//    open after the position closed until it fires (the orphan hazard the engine must clean up).
+// Assumed, not verified against the exchange: trigger direction of stp / take_profit, and the orphan behaviour.
+
+import type { BotStore } from "./bot-store.ts";
+import type { Clock } from "./clock.ts";
+import type { BotConfig } from "./config.ts";
+import type {
+  AccountState, Executor, FuturesFill, FuturesOpenOrder, FuturesPosition, OrderAck, OrderEdit, OrderRequest,
+  PriceEvent, RejectKind,
+} from "./executor.ts";
+
+interface SimOrder {
+  orderId: string;
+  req: OrderRequest;
+  status: "open" | "filled" | "cancelled";
+  filledSize: number;
+  receivedMs: number;
+  updatedMs: number;
+}
+
+interface SimPosition {
+  size: number; // signed: positive long, negative short
+  avgPrice: number;
+}
+
+interface SimAccount {
+  realizedPnl: number;
+  fees: number;
+  funding: number;
+}
+
+interface SimMeta {
+  nextOrderId: number;
+  nextFillId: number;
+  lastTickMs: number;
+  price: PriceEvent | null;
+}
+
+// Document kinds in the store. Open and finished orders are separate so listing open orders stays cheap,
+// while a finished order still answers a retry with the same cliOrdId.
+const OPEN = "sim_order_open";
+const DONE = "sim_order_done";
+const FILL = "sim_fill";
+const POSITION = "sim_position";
+const ACCOUNT = "sim_account";
+const META = "sim_meta";
+
+const EPS = 1e-12;
+const ok = (orderId: string): OrderAck => ({ ok: true, orderId });
+const rejected = (kind: RejectKind, message: string): OrderAck => ({ ok: false, kind, message });
+const finitePos = (x: unknown): x is number => typeof x === "number" && Number.isFinite(x) && x > 0;
+
+export interface DryRunOptions {
+  store: BotStore;
+  clock: Clock;
+  config: BotConfig;
+}
+
+export class DryRunExecutor implements Executor {
+  readonly kind = "dry-run" as const;
+  private readonly store: BotStore;
+  private readonly clock: Clock;
+  private readonly config: BotConfig;
+
+  constructor(o: DryRunOptions) {
+    this.store = o.store;
+    this.clock = o.clock;
+    this.config = o.config;
+  }
+
+  // Feeds one quote: stores it, then fires every resting order it triggers. Older quotes are ignored.
+  onPrice(e: PriceEvent): void {
+    this.store.transaction(() => {
+      const meta = this.loadMeta();
+      if (e.t < meta.lastTickMs) return;
+      meta.lastTickMs = e.t;
+      meta.price = e;
+      const rank = (o: SimOrder) => (o.req.orderType === "stp" ? 0 : o.req.orderType === "take_profit" ? 1 : 2);
+      const open = this.openOrders().sort((a, b) => rank(a) - rank(b) || a.receivedMs - b.receivedMs);
+      for (const order of open) {
+        const current = this.getOrder(order.req.cliOrdId);
+        if (current?.status === "open") this.match(meta, current, e, e.t, false);
+      }
+      this.saveMeta(meta);
+    });
+  }
+
+  async placeOrder(req: OrderRequest): Promise<OrderAck> {
+    return this.store.transaction(() => this.place(req));
+  }
+
+  async editOrder(edit: OrderEdit): Promise<OrderAck> {
+    return this.store.transaction(() => {
+      const order = this.getOrder(edit.cliOrdId);
+      if (!order || order.status !== "open") return rejected("unknown", `no open order ${edit.cliOrdId}`);
+      const r = order.req;
+      const isStop = r.orderType === "stp" || r.orderType === "take_profit";
+      if (edit.stopPrice !== undefined && (!isStop || !finitePos(edit.stopPrice))) return rejected("unknown", "invalid stopPrice");
+      if (edit.limitPrice !== undefined && (isStop || r.orderType === "mkt" || !finitePos(edit.limitPrice))) {
+        return rejected("unknown", "invalid limitPrice");
+      }
+      if (edit.size !== undefined && (!finitePos(edit.size) || edit.size < order.filledSize)) return rejected("unknown", "invalid size");
+
+      const nowMs = this.clock.now();
+      const next: SimOrder = {
+        ...order,
+        updatedMs: nowMs,
+        req: {
+          ...r,
+          ...(edit.stopPrice !== undefined ? { stopPrice: edit.stopPrice } : {}),
+          ...(edit.limitPrice !== undefined ? { limitPrice: edit.limitPrice } : {}),
+          ...(edit.size !== undefined ? { size: edit.size } : {}),
+        },
+      };
+      this.saveOrder(next);
+      // A stop moved beyond the current price fires at once.
+      const meta = this.loadMeta();
+      if (meta.price) this.match(meta, next, meta.price, nowMs, false);
+      this.saveMeta(meta);
+      return ok(order.orderId);
+    });
+  }
+
+  async cancelOrder(id: { cliOrdId: string } | { orderId: string }): Promise<void> {
+    this.store.transaction(() => {
+      const order = "cliOrdId" in id ? this.getOrder(id.cliOrdId) : this.openOrders().find((o) => o.orderId === id.orderId);
+      if (order?.status === "open") this.saveOrder({ ...order, status: "cancelled", updatedMs: this.clock.now() });
+    });
+  }
+
+  async cancelAll(symbol: string): Promise<void> {
+    this.store.transaction(() => {
+      for (const order of this.openOrders()) {
+        if (order.req.symbol === symbol) this.saveOrder({ ...order, status: "cancelled", updatedMs: this.clock.now() });
+      }
+    });
+  }
+
+  async getPositions(): Promise<FuturesPosition[]> {
+    return this.store.transaction(() => {
+      const pos = this.position();
+      if (pos.size === 0) return [];
+      const mark = this.loadMeta().price?.mark ?? pos.avgPrice;
+      return [{
+        symbol: this.config.symbol, side: pos.size > 0 ? "long" : "short", size: Math.abs(pos.size), price: pos.avgPrice,
+        unrealizedPnl: pos.size * (mark - pos.avgPrice), unrealizedFunding: null, pnlCurrency: "USD",
+      }];
+    });
+  }
+
+  async getOpenOrders(): Promise<FuturesOpenOrder[]> {
+    return this.store.transaction(() => this.openOrders().sort((a, b) => a.receivedMs - b.receivedMs).map(toOpenOrder));
+  }
+
+  async getFills(since: Date): Promise<FuturesFill[]> {
+    return this.store.transaction(() => this.store.listDocs<FuturesFill>(FILL, since.getTime()));
+  }
+
+  async getAccount(): Promise<AccountState> {
+    return this.store.transaction(() => this.account());
+  }
+
+  // ---- placement ---------------------------------------------------------------------------------------------
+
+  private place(req: OrderRequest): OrderAck {
+    const problem = this.validate(req);
+    if (problem) return rejected("unknown", problem);
+
+    const existing = this.getOrder(req.cliOrdId);
+    if (existing) return ok(existing.orderId); // a retry never creates a second order, whatever became of the first
+
+    const meta = this.loadMeta();
+    const price = meta.price;
+    const buy = req.side === "buy";
+    const pos = this.position();
+
+    if (req.reduceOnly && closable(pos, req.side) <= 0) return rejected("reduce_only_violation", "nothing to reduce");
+    if (req.orderType === "mkt" && !price) return rejected("unknown", "no price yet");
+    if (req.orderType === "post" && price && (buy ? req.limitPrice! >= price.ask : req.limitPrice! <= price.bid)) {
+      return rejected("would_cross", "post-only order would take liquidity");
+    }
+    if (!req.reduceOnly && price) {
+      const signed = buy ? req.size : -req.size;
+      const extra = Math.max(0, Math.abs(pos.size + signed) - Math.abs(pos.size));
+      const ref = req.orderType === "mkt" ? (buy ? price.ask : price.bid) : (req.limitPrice ?? req.stopPrice ?? price.mark);
+      if ((extra * ref) / this.config.max_leverage > this.account().availableMargin + 1e-9) {
+        return rejected("insufficient_margin", "not enough available margin");
+      }
+    }
+
+    const nowMs = this.clock.now();
+    const order: SimOrder = {
+      orderId: `sim-${meta.nextOrderId++}`, req, status: "open", filledSize: 0, receivedMs: nowMs, updatedMs: nowMs,
+    };
+    this.saveOrder(order);
+    if (price) this.match(meta, order, price, nowMs, true);
+    this.saveMeta(meta);
+    return ok(order.orderId);
+  }
+
+  // Returns the first problem with a request, or undefined.
+  private validate(r: OrderRequest): string | undefined {
+    if (r.symbol !== this.config.symbol) return `symbol ${r.symbol} is not ${this.config.symbol}`;
+    if (typeof r.cliOrdId !== "string" || r.cliOrdId.length === 0 || r.cliOrdId.length > 100) return "cliOrdId must be 1-100 characters";
+    if (!finitePos(r.size)) return "size must be a positive number";
+    switch (r.orderType) {
+      case "mkt":
+        if (r.limitPrice !== undefined || r.stopPrice !== undefined) return "a market order takes no price";
+        break;
+      case "lmt":
+      case "post":
+        if (!finitePos(r.limitPrice) || r.stopPrice !== undefined) return "a limit order needs a limitPrice only";
+        break;
+      case "stp":
+      case "take_profit":
+        if (!finitePos(r.stopPrice)) return "a stop order needs a stopPrice";
+        if (r.limitPrice !== undefined) return "stop-limit orders are not supported: stop-market only";
+        break;
+      default:
+        return `unsupported order type ${String(r.orderType)}`;
+    }
+    if (r.processBefore !== undefined) {
+      const by = Date.parse(r.processBefore);
+      if (Number.isNaN(by) || by <= this.clock.now()) return "processBefore has already passed";
+    }
+    return undefined;
+  }
+
+  // ---- matching ----------------------------------------------------------------------------------------------
+
+  // Fires `order` against quote `e` if it triggers. `onPlacement` lets a marketable limit take liquidity at once.
+  private match(meta: SimMeta, order: SimOrder, e: PriceEvent, tMs: number, onPlacement: boolean): void {
+    const r = order.req;
+    const buy = r.side === "buy";
+    const slip = this.config.slippage_cap_bps / 10_000;
+    let price: number | undefined;
+    let fillType: "maker" | "taker" = "taker";
+
+    switch (r.orderType) {
+      case "mkt":
+        price = buy ? e.ask * (1 + slip) : e.bid * (1 - slip);
+        break;
+      case "lmt":
+      case "post": {
+        const limit = r.limitPrice!;
+        if (buy ? limit >= e.ask : limit <= e.bid) {
+          if (onPlacement) price = buy ? e.ask : e.bid; // marketable: takes the quote
+        } else if (!onPlacement && (buy ? e.last < limit : e.last > limit)) {
+          price = limit; // traded through: filled as a resting (maker) order
+          fillType = "maker";
+        }
+        break;
+      }
+      case "stp":
+      case "take_profit": {
+        const stop = r.stopPrice!;
+        const signal = (r.triggerSignal ?? "mark") === "mark" ? e.mark : e.last;
+        const triggersDown = (r.orderType === "stp") === !buy; // stp sell and take_profit buy fire on a falling price
+        if (triggersDown ? signal <= stop : signal >= stop) {
+          price = buy ? Math.max(stop, e.ask) * (1 + slip) : Math.min(stop, e.bid) * (1 - slip);
+        }
+        break;
+      }
+    }
+    if (price === undefined) return;
+
+    let qty = r.size - order.filledSize;
+    if (r.reduceOnly) {
+      const room = closable(this.position(), r.side);
+      if (room <= 0) {
+        this.saveOrder({ ...order, status: "cancelled", updatedMs: tMs }); // nothing left to reduce
+        return;
+      }
+      qty = Math.min(qty, room);
+    }
+    this.applyFill(meta, order, price, qty, fillType, tMs);
+  }
+
+  private applyFill(meta: SimMeta, order: SimOrder, price: number, qty: number, fillType: "maker" | "taker", tMs: number): void {
+    const r = order.req;
+    const pos = this.position();
+    const acct = this.account0();
+    const sign = r.side === "buy" ? 1 : -1;
+
+    // Average-cost netting; a fill larger than the position closes it and opens the remainder the other way.
+    let realized = 0;
+    let avg = pos.avgPrice;
+    if (pos.size === 0 || Math.sign(pos.size) === sign) {
+      avg = (Math.abs(pos.size) * pos.avgPrice + qty * price) / (Math.abs(pos.size) + qty);
+    } else {
+      const closing = Math.min(qty, Math.abs(pos.size));
+      realized = closing * (price - pos.avgPrice) * Math.sign(pos.size);
+      if (qty > Math.abs(pos.size)) avg = price;
+    }
+    let size = Number((pos.size + sign * qty).toFixed(12));
+    if (Math.abs(size) < EPS) {
+      size = 0;
+      avg = 0;
+    }
+
+    const bps = fillType === "maker" ? this.config.fees_bps.maker : this.config.fees_bps.taker;
+    acct.realizedPnl += realized;
+    acct.fees += (qty * price * bps) / 10_000;
+
+    const fillId = `simfill-${String(meta.nextFillId++).padStart(8, "0")}`;
+    const fill: FuturesFill = {
+      fill_id: fillId, order_id: order.orderId, cliOrdId: r.cliOrdId, symbol: r.symbol, side: r.side, size: qty, price,
+      fillTime: new Date(tMs).toISOString(), fillType, realized_pnl: realized,
+    };
+    this.store.putDoc(FILL, fillId, tMs, fill);
+    this.store.putDoc(POSITION, this.config.symbol, tMs, { size, avgPrice: avg } satisfies SimPosition);
+    this.store.putDoc(ACCOUNT, "acct", tMs, acct);
+
+    const filledSize = order.filledSize + qty;
+    const done = filledSize >= r.size - EPS || r.reduceOnly; // a capped reduce-only order is finished too
+    this.saveOrder({ ...order, filledSize, status: done ? "filled" : "open", updatedMs: tMs });
+  }
+
+  // ---- state -------------------------------------------------------------------------------------------------
+
+  private loadMeta(): SimMeta {
+    return this.store.getDoc<SimMeta>(META, "meta") ?? { nextOrderId: 1, nextFillId: 1, lastTickMs: 0, price: null };
+  }
+
+  private saveMeta(m: SimMeta): void {
+    this.store.putDoc(META, "meta", m.lastTickMs, m);
+  }
+
+  private getOrder(cliOrdId: string): SimOrder | undefined {
+    return this.store.getDoc<SimOrder>(OPEN, cliOrdId) ?? this.store.getDoc<SimOrder>(DONE, cliOrdId);
+  }
+
+  private openOrders(): SimOrder[] {
+    return this.store.listDocs<SimOrder>(OPEN);
+  }
+
+  private saveOrder(o: SimOrder): void {
+    const open = o.status === "open";
+    this.store.putDoc(open ? OPEN : DONE, o.req.cliOrdId, o.receivedMs, o);
+    this.store.deleteDoc(open ? DONE : OPEN, o.req.cliOrdId);
+  }
+
+  private position(): SimPosition {
+    return this.store.getDoc<SimPosition>(POSITION, this.config.symbol) ?? { size: 0, avgPrice: 0 };
+  }
+
+  private account0(): SimAccount {
+    return this.store.getDoc<SimAccount>(ACCOUNT, "acct") ?? { realizedPnl: 0, fees: 0, funding: 0 };
+  }
+
+  private account(): AccountState {
+    const a = this.account0();
+    const pos = this.position();
+    const mark = this.loadMeta().price?.mark ?? pos.avgPrice;
+    const unrealizedPnl = pos.size * (mark - pos.avgPrice);
+    const equity = this.config.trading_capital_usd + a.realizedPnl - a.fees - a.funding + unrealizedPnl;
+    const availableMargin = equity - (Math.abs(pos.size) * mark) / this.config.max_leverage;
+    return { equity, availableMargin, realizedPnl: a.realizedPnl, unrealizedPnl, fees: a.fees, funding: a.funding };
+  }
+}
+
+// How much of the position an order on `side` can reduce.
+function closable(pos: SimPosition, side: "buy" | "sell"): number {
+  return side === "sell" ? Math.max(0, pos.size) : Math.max(0, -pos.size);
+}
+
+function toOpenOrder(o: SimOrder): FuturesOpenOrder {
+  const r = o.req;
+  const isStop = r.orderType === "stp" || r.orderType === "take_profit";
+  return {
+    order_id: o.orderId,
+    cliOrdId: r.cliOrdId,
+    symbol: r.symbol,
+    side: r.side,
+    orderType: r.orderType === "post" || r.orderType === "mkt" ? "lmt" : r.orderType,
+    status: o.filledSize > 0 ? "partiallyFilled" : "untouched",
+    ...(r.limitPrice !== undefined ? { limitPrice: r.limitPrice } : {}),
+    ...(r.stopPrice !== undefined ? { stopPrice: r.stopPrice } : {}),
+    filledSize: o.filledSize,
+    unfilledSize: r.size - o.filledSize,
+    reduceOnly: r.reduceOnly,
+    ...(isStop ? { triggerSignal: r.triggerSignal ?? "mark" } : {}),
+    receivedTime: new Date(o.receivedMs).toISOString(),
+    lastUpdateTime: new Date(o.updatedMs).toISOString(),
+  };
+}
