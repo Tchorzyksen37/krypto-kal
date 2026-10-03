@@ -286,18 +286,23 @@ Failure modes the spec implies but does not spell out. Each has a test in the ta
 
 ### Task 10: Reconciliation
 
-**Files:** Create `bot/reconcile.ts`, `bot/reconcile.test.ts`.
+**Files:** Create `bot/reconcile.ts`, `bot/reconcile.test.ts`, `bot/trader-fixtures.ts` (the shared test world, moved out of
+`trader.test.ts`). Modify `bot/executor.ts` (`getOrderHistory`, `PlacedOrder`), `bot/dry-run-executor.ts` (`getOrderHistory`,
+`lastTickMs`), `bot/engine.ts` (a HALTED bot closes a stop-less position only when it has a trade record for it).
 
 **Interfaces:**
-- Produces: `reconcile(d: TraderDeps, sinceMs: number): Promise<{ clean: boolean; incidents: Incident[] }>`
-  (rebuilds state from positions, orders and fills; calls `rebuildCounters`; replays candles through
-  `DryRunExecutor.replay` from the last tick; sets the persisted `reconciled` flag only when clean).
+- Produces: `reconcile(d: TraderDeps, opts?: { replayer?: Replayer }): Promise<{ clean: boolean; incidents: Incident[] }>`;
+  `Replayer { replay(candles, intervalSec?); accrueFunding(rates); lastTickMs() }` (`DryRunExecutor` satisfies it).
+- Rules: the persisted `reconciled` flag is cleared first and set again only by a clean run; a position with no trade record (or on the
+  wrong side of it) halts for acknowledgement and is never closed; a bot position without a stop halts and the engine closes it; orders the
+  bot created that no trade explains are cancelled; orders it did not create are reported and left alone (entries stay blocked while they
+  exist); counters are raised from the order history; in the simulation the downtime is replayed from one-minute candles (at most 2000)
+  and the funding of the hours held is charged; an unreadable exchange or record, a failed or impossible replay with something open, are not clean.
 
-- [ ] **Step 1: Write failing tests** (scenarios 6 and 7): restart with a position and no SL is an incident, the
-  position is protected or closed, state is HALTED with `manualAck`; restart where a simulated stop fired during
-  downtime books PnL exactly once; a position or order on the symbol without the `bot-` prefix blocks entries, is
-  never cancelled, and records an incident; counters rebuilt from history never go below the persisted ones; entries
-  stay blocked until a clean reconcile.
+- [ ] **Step 1: Write failing tests:** a clean start; a healthy position and a resting entry left alone; idempotence; the flag cleared before
+  anything else; an unreadable exchange or record; a bot position without a stop; an unexplained position never closed (and its stops kept);
+  the wrong side; orphan and foreign orders; counters raised, never lowered, bot orders only, and a rebuilt budget refusing the next entry;
+  a stop that fired in the downtime books once; a target and funding during the downtime; no candles, too long a gap, and a long gap with nothing open.
 - [ ] **Step 2: Run** `node --test bot/reconcile.test.ts`. Expected: FAIL.
 - [ ] **Step 3: Implement.** **Step 4: Run.** Expected: PASS. **Step 5: Commit** `bot: add reconciliation`.
 

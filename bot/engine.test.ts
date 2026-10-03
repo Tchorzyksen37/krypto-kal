@@ -574,6 +574,13 @@ describe("HALTED", () => {
     assert.deepEqual(places(decide(halted({ trade: trade(), position: position(), openOrders: [slOrder()] }), config)), []);
   });
 
+  test("a position with no trade record may be the user's own: it is never closed, stop or no stop", () => {
+    const a = decide(halted({ trade: null, position: position(), openOrders: [] }), config);
+    assert.deepEqual(places(a), []);
+    assert.deepEqual(cancels(a), []);
+    assert.deepEqual(a, [{ type: "skip", reason: "halted" }]);
+  });
+
   test("a position without a stop is closed at market", () => {
     assert.deepEqual(places(decide(halted({ trade: trade(), position: position(), openOrders: [] }), config)), [closeReq()]);
   });

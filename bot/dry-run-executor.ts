@@ -21,7 +21,7 @@ import type { Clock } from "./clock.ts";
 import type { BotConfig } from "./config.ts";
 import type {
   AccountState, Executor, FuturesFill, FuturesOpenOrder, FuturesPosition, OrderAck, OrderEdit, OrderRequest,
-  PriceEvent, RejectKind,
+  PlacedOrder, PriceEvent, RejectKind,
 } from "./executor.ts";
 
 interface SimOrder {
@@ -215,8 +215,20 @@ export class DryRunExecutor implements Executor {
     return this.store.transaction(() => this.store.listDocs<FuturesFill>(FILL, since.getTime()));
   }
 
+  async getOrderHistory(since: Date): Promise<PlacedOrder[]> {
+    return this.store.transaction(() => {
+      const all = [...this.store.listDocs<SimOrder>(OPEN, since.getTime()), ...this.store.listDocs<SimOrder>(DONE, since.getTime())];
+      return all.map((o) => ({ cliOrdId: o.req.cliOrdId, placedAtMs: o.receivedMs })).sort((a, b) => a.placedAtMs - b.placedAtMs);
+    });
+  }
+
   async getAccount(): Promise<AccountState> {
     return this.store.transaction(() => this.account());
+  }
+
+  // The time of the newest quote seen (0 if none): how far a downtime replay has to reach back.
+  lastTickMs(): number {
+    return this.store.transaction(() => this.loadMeta().lastTickMs);
   }
 
   // ---- faults ------------------------------------------------------------------------------------------------

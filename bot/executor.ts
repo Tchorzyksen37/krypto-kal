@@ -81,7 +81,15 @@ export interface Executor {
   getPositions(): Promise<FuturesPosition[]>;
   getOpenOrders(): Promise<FuturesOpenOrder[]>;
   getFills(since: Date): Promise<FuturesFill[]>;
+  // Every order placed since `since`, whatever became of it (filled, cancelled, still open). The daily counters are
+  // rebuilt from it after a restart, because fills alone miss orders that were never filled.
+  getOrderHistory(since: Date): Promise<PlacedOrder[]>;
   getAccount(): Promise<AccountState>;
+}
+
+export interface PlacedOrder {
+  cliOrdId?: string;
+  placedAtMs: number;
 }
 
 // Market data always comes from the real read-only client, in dry-run too.

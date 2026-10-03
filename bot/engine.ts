@@ -333,9 +333,9 @@ function halted(s: Snapshot, config: BotConfig): Action[] {
     if (parseCliOrdId(o.cliOrdId)?.role === "entry") out.push(cancel(o.cliOrdId, "halted_withdraw_entry"));
   }
   if (s.position) {
-    // An open position keeps its stop; without one it is closed rather than left bare.
-    const hasStop = !!(s.trade ? findRole(s, s.trade, "sl") : findRoleAny(s, "sl"));
-    if (!hasStop) out.push(closeAction(s, config, 0, "halted_without_stop"));
+    // A position the bot opened (it has a trade record) keeps its stop; without one it is closed rather than left
+    // bare. A position with no trade record may be the user's own: it is never touched.
+    if (s.trade && !findRole(s, s.trade, "sl")) out.push(closeAction(s, config, 0, "halted_without_stop"));
   } else if (s.halt && !s.halt.manualAck && s.halt.untilMs !== null && s.nowMs >= s.halt.untilMs) {
     out.push(go("FLAT", "halt_expired"));
   }

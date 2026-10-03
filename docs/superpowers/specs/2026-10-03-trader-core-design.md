@@ -219,6 +219,7 @@ interface Executor {
   getPositions(): Promise<Position[]>;
   getOpenOrders(): Promise<OpenOrder[]>;
   getFills(since: Date): Promise<Fill[]>;
+  getOrderHistory(since: Date): Promise<PlacedOrder[]>;   // every order placed since, whatever became of it
   getAccount(): Promise<AccountState>;
 }
 interface MarketData {                                   // always the real read-only client
