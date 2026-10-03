@@ -331,19 +331,28 @@ Failure modes the spec implies but does not spell out. Each has a test in the ta
 
 ### Task 12: Property tests and tripwire
 
-**Files:** Create `bot/sim.ts`, `bot/invariants.test.ts`.
+**Files:** Create `bot/sim.ts`, `bot/invariants.test.ts`. Modify `bot/engine.ts` (a backwards clock no longer stops protection),
+`bot/trader.ts` (an outage is recorded once, not every cycle), `bot/watchdog.ts` (counts its orders; oversized targets are not an issue),
+`bot/dry-run-executor.ts` (an injected partial fill is rounded down to the size step).
 
 **Interfaces:**
-- Produces: `runRandomScenario(seed: number, steps: number, opts?: { breakProtectTimeout?: boolean }): void`
-  (throws with seed and step on the first invariant violation); `checkInvariants(w: World): string[]`.
+- Produces: `collectScenario(seed, steps, opts?): Promise<{ violations: Violation[]; stats: Stats }>`;
+  `runRandomScenario(seed, steps, opts?): Promise<void>` (throws `P1 violated (seed N, step M): ...` on the first violation);
+  `ScenarioOptions { breakProtectTimeout?: boolean; trace?: boolean }`; `Prop`, `Violation`, `Stats`.
+- A scenario is deterministic from its seed and uses the fake clock. It drives the real engine, executor, watchdog and reconciliation through
+  price walks with gaps, hostile policies (stored only if the real validator accepts them), lost acks, rejections, partial fills, delays, refused
+  stops, targets acknowledged but never placed, an unreadable exchange, a hung engine, stops cancelled behind the bot, oversized targets, foreign
+  orders, clock jumps both ways, and restarts with downtime and orders cancelled meanwhile.
+- Properties checked after every step: P1 (a bot position never lacks a stop for more than 30 s of operating time, paused while the exchange is
+  unreadable), P2, P3 (state, risk, leverage, entries per day, the order budget for the whole bundle), P4 (undisturbed OPEN cycles; targets must
+  not under-cover), P5, P6, P7, P8, G1 (one entry order; foreign orders untouched), G3, G5, X1 (nothing throws).
 
-- [ ] **Step 1: Write the tests:** P1-P8 from spec section 10, each as a seeded loop over at least 200 seeds with
-  random fills, partial fills, rejects, dropped and delayed acks, restarts, clock jumps (also backwards) and hostile
-  policies. Tripwire: `runRandomScenario(seed, steps, { breakProtectTimeout: true })` must throw for at least one
-  seed, so a passing P1 means something.
+- [ ] **Step 1: Write the tests:** one test per property over `SIM_SEEDS` (default 60) scenarios of `SIM_STEPS` (default 500) steps; coverage
+  thresholds so no property passes because nothing happened; the tripwire (with stops and closes never reaching the exchange the harness must
+  report P1, and `runRandomScenario` must throw naming the seed); determinism (the same seed gives the same result).
 - [ ] **Step 2: Run** `node --test bot/invariants.test.ts`. Expected: FAIL (no `sim.ts`).
-- [ ] **Step 3: Implement `sim.ts`** by composing Tasks 5-11. Print the failing seed on any violation.
-- [ ] **Step 4: Run.** Expected: PASS, including the tripwire. **Step 5: Commit** `bot: add property tests`.
+- [ ] **Step 3: Implement `sim.ts`** by composing Tasks 5-11. **Step 4: Run.** Expected: PASS, tripwire included (about 20 s).
+- [ ] **Step 5: Commit** `bot: add property tests`.
 
 ### Task 13: Live stub and approval decorator
 

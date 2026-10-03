@@ -92,7 +92,37 @@ const closeReq = (size = 0.004, attempt = 0): OrderRequest => ({
 describe("decide – every state, global rules", () => {
   const STATES: EngineState[] = ["FLAT", "ENTERING", "PROTECTING", "OPEN", "REDUCING", "COOLDOWN", "HALTED"];
 
-  test("a clock that moved backwards yields only a skip, in every state", () => {
+  describe("a clock that moved backwards", () => {
+    const behind = { nowMs: NOW - 5000, lastClockMs: NOW };
+
+    test("still protects a position whose stop is missing (protection does not depend on the time)", () => {
+      const a = decide(base({ ...behind, state: "PROTECTING", trade: trade(), position: position(), openOrders: [] }), config);
+      assert.deepEqual(places(a), [slReq(), tpReq(1, 102000), tpReq(2, 104000)]);
+    });
+
+    test("in OPEN, a missing stop sends it back to PROTECTING with a fresh sequence number", () => {
+      const a = decide(base({ ...behind, state: "OPEN", trade: trade(), position: position(), openOrders: [tpOrder(1, 102000), tpOrder(2, 104000)] }), config);
+      assert.equal(only(transitions(a)).to, "PROTECTING");
+      assert.equal(only(transitions(a)).trade?.protectSeq, 1);
+    });
+
+    test("in OPEN, a stop of the wrong size is still resized", () => {
+      const a = decide(base({ ...behind, state: "OPEN", trade: trade(), position: position({ size: 0.002 }), openOrders: [slOrder(0.004), tpOrder(2, 104000)] }), config);
+      assert.deepEqual(edits(a).map((e) => [e.cliOrdId, e.size]), [[makeCliOrdId(ID, "sl", 0), 0.002]]);
+    });
+
+    test("but nothing that depends on the time: no timeout close, no time-stop, no trailing, no entry, no halt expiry", () => {
+      const lateProtect = decide(base({ ...behind, state: "PROTECTING", stateSinceMs: NOW - 99 * MIN, trade: trade(), position: position(), openOrders: [] }), config);
+      assert.deepEqual(places(lateProtect).filter((r) => r.orderType === "mkt"), []);
+      const timeStop = decide(base({ ...behind, state: "OPEN", trade: trade({ horizonEndMs: NOW - MIN }), position: position(), openOrders: protectedOrders(), price: px(101000, NOW) }), config);
+      assert.deepEqual(timeStop, [{ type: "skip", reason: "clock_went_backwards" }]);
+      assert.deepEqual(decide(base({ ...behind }), config), [{ type: "skip", reason: "clock_went_backwards" }]);
+      const expired = decide(base({ ...behind, state: "HALTED", halt: { reason: "daily_loss_limit", manualAck: false, untilMs: NOW - 99 * MIN } }), config);
+      assert.deepEqual(transitions(expired), []);
+    });
+  });
+
+  test("a clock that moved backwards yields only a skip when there is nothing to protect, in every state", () => {
     for (const state of STATES) {
       const a = decide(base({ state, nowMs: NOW - 5000, lastClockMs: NOW, trade: trade(), position: position(), openOrders: protectedOrders() }), config);
       assert.deepEqual(a, [{ type: "skip", reason: "clock_went_backwards" }], state);
@@ -658,7 +688,16 @@ describe("decide – properties over random snapshots", () => {
     for (let i = 0; i < 1500; i++) {
       const s = randomSnapshot();
       const a = decide(s, config);
-      if (s.nowMs < s.lastClockMs) assert.deepEqual(a, [{ type: "skip", reason: "clock_went_backwards" }]);
+      if (s.nowMs < s.lastClockMs) {
+        // Only protection is allowed: no entry, no close, no halt, no cancel, and no state change but OPEN -> PROTECTING.
+        for (const x of a) {
+          if (x.type === "skip") continue;
+          if (x.type === "place") assert.ok(x.req.reduceOnly && !x.req.cliOrdId.includes("-close-"), `${x.req.cliOrdId} on a backwards clock`);
+          else if (x.type === "edit") assert.equal(x.stopPrice, undefined, "a stop must not be moved on an untrusted clock");
+          else if (x.type === "transition") assert.ok(s.state === "OPEN" && x.to === "PROTECTING", `transition to ${x.to} on a backwards clock`);
+          else assert.fail(`${x.type} on a backwards clock`);
+        }
+      }
       const entries = places(a).filter((r) => !r.reduceOnly);
       if (entries.length) {
         assert.ok(s.priceAgeSec !== null && s.priceAgeSec <= config.stale_data_max_age_sec, "an entry on stale data");

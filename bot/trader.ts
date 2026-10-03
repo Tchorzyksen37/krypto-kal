@@ -31,6 +31,7 @@ const log = createLogger("trader");
 export const JOURNAL_HEARTBEAT_MS = 60_000;
 const CONTRACT_CACHE_KEY = "contract:cache";
 const JOURNAL_LAST_KEY = "journal:last";
+const UNAVAILABLE_KEY = "journal:unavailable";
 
 export interface TraderDeps {
   executor: Executor;
@@ -170,18 +171,21 @@ export async function runCycle(d: TraderDeps): Promise<Action[]> {
   return actions;
 }
 
+// An outage lasts many cycles: it is recorded when it starts, when its cause changes, and as a heartbeat, not every cycle.
 function snapshotUnavailable(d: TraderDeps, e: unknown): Action[] {
   const detail = e instanceof Error ? e.message : String(e);
-  note(d, "cannot_verify", detail);
-  const actions: Action[] = [{ type: "skip", reason: "snapshot_unavailable" }];
+  const nowMs = d.clock.now();
   try {
-    d.store.appendJournal({
-      tMs: d.clock.now(), configHash: d.configHash, kind: "cycle", snapshot: null, decision: "skip:snapshot_unavailable", reason: detail,
-    });
+    const last = JSON.parse(d.store.getKv(UNAVAILABLE_KEY) ?? "null") as { detail: string; tMs: number } | null;
+    if (!last || last.detail !== detail || nowMs - last.tMs >= JOURNAL_HEARTBEAT_MS || nowMs < last.tMs) {
+      note(d, "cannot_verify", detail);
+      d.store.appendJournal({ tMs: nowMs, configHash: d.configHash, kind: "cycle", snapshot: null, decision: "skip:snapshot_unavailable", reason: detail });
+      d.store.setKv(UNAVAILABLE_KEY, JSON.stringify({ detail, tMs: nowMs }));
+    }
   } catch {
-    /* the incident above is already recorded */
+    /* a journal that cannot be written must not hide the fact that nothing was decided */
   }
-  return actions;
+  return [{ type: "skip", reason: "snapshot_unavailable" }];
 }
 
 const describe = (a: Action): string => {

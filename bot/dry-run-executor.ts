@@ -19,6 +19,7 @@ import type { FuturesCandle } from "../kraken-futures-client.ts";
 import type { BotStore } from "./bot-store.ts";
 import type { Clock } from "./clock.ts";
 import type { BotConfig } from "./config.ts";
+import { floorTo } from "./sizing.ts";
 import type {
   AccountState, Executor, FuturesFill, FuturesOpenOrder, FuturesPosition, OrderAck, OrderEdit, OrderRequest,
   PlacedOrder, PriceEvent, RejectKind,
@@ -74,6 +75,7 @@ export interface DryRunOptions {
   clock: Clock;
   config: BotConfig;
   sleep?: (ms: number) => void; // called for an injected delay; tests wire it to the fake clock
+  sizeStep?: number; // the contract's size step; an injected partial fill is rounded down to it (default 0.0001)
 }
 
 export interface Faults {
@@ -89,6 +91,7 @@ export class DryRunExecutor implements Executor {
   private readonly clock: Clock;
   private readonly config: BotConfig;
   private readonly sleep: (ms: number) => void;
+  private readonly sizeStep: number;
   private faults: Faults = {}; // in memory on purpose: faults exist for tests
 
   constructor(o: DryRunOptions) {
@@ -96,6 +99,7 @@ export class DryRunExecutor implements Executor {
     this.clock = o.clock;
     this.config = o.config;
     this.sleep = o.sleep ?? (() => {});
+    this.sizeStep = o.sizeStep ?? 0.0001;
   }
 
   // Arms one-shot faults (see Faults). New settings are added to what is already armed.
@@ -417,7 +421,9 @@ export class DryRunExecutor implements Executor {
     const fraction = this.faults.partialFill;
     if (fraction !== undefined) {
       this.faults.partialFill = undefined;
-      qty *= fraction;
+      // An exchange fills in whole lots: a fraction of an order is rounded DOWN to the size step (possibly to nothing).
+      qty = floorTo(qty * fraction, this.sizeStep);
+      if (qty <= 0) return;
       finish = r.orderType === "mkt"; // a market order's remainder is dropped, a resting order's stays open
     }
     this.applyFill(meta, order, price, qty, fillType, tMs, finish);

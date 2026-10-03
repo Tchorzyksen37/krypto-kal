@@ -64,6 +64,10 @@ describe("checkProtection", () => {
     assert.deepEqual(kinds(checkProtection(input({ orders: [stop(), target(1), target(2, 0.001)] }))), ["wrong_tp_size"]);
   });
 
+  test("targets larger than the position are harmless: reduce-only caps them (as after a partly filled stop)", () => {
+    assert.deepEqual(checkProtection(input({ position: position({ size: 0.0017 }), orders: [stop(0.0017), target(1, 0.0019), target(2, 0.0018)] })), []);
+  });
+
   test("a filled rung is not expected any more", () => {
     const p = position({ size: 0.002 });
     assert.deepEqual(checkProtection(input({ position: p, filledRoles: ["tp1"], orders: [stop(0.002), target(2)] })), []);

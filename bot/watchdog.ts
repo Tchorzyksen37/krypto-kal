@@ -19,7 +19,10 @@ import type { BotStore } from "./bot-store.ts";
 import type { BotConfig } from "./config.ts";
 import type { TradeRecord } from "./engine.ts";
 import { loadEngineRecord } from "./engine-state.ts";
-import { type FuturesOpenOrder, type FuturesPosition, type OrderRole, isBotOrder, makeCliOrdId, parseCliOrdId } from "./executor.ts";
+import {
+  type FuturesOpenOrder, type FuturesPosition, type OrderRequest, type OrderRole, isBotOrder, makeCliOrdId, parseCliOrdId,
+} from "./executor.ts";
+import { recordPlacedOrder } from "./limits.ts";
 import { filledTargets, type TraderDeps } from "./trader.ts";
 
 const log = createLogger("watchdog");
@@ -79,8 +82,10 @@ export function checkProtection(i: ProtectionInput): ProtectionIssue[] {
     if (targets.length === 0) {
       issues.push({ kind: "no_tp", detail: `no target for a position of ${position.size}` });
     } else if (targets.every((o) => o.unfilledSize !== undefined)) {
+      // Targets larger than the position are harmless (reduce-only caps them, as after a partly filled stop); only
+      // a part of the position with no target is a gap.
       const coverage = targets.reduce((sum, o) => sum + (o.unfilledSize ?? 0), 0);
-      if (Math.abs(coverage - position.size) > EPS) {
+      if (coverage < position.size - EPS) {
         issues.push({ kind: "wrong_tp_size", detail: `targets cover ${coverage} of a position of ${position.size}` });
       }
     }
@@ -187,6 +192,17 @@ async function repair(
   // Only a position the bot has a trade record for is its to look after.
   if (!trade || has("unexplained_position") || has("position_on_wrong_side")) return actions;
 
+  // Every order the watchdog places counts toward the day, like the trader's (idempotent per id), so a restart that rebuilds
+  // the counters from the exchange history agrees with what was counted live.
+  const place = (req: OrderRequest) => {
+    try {
+      recordPlacedOrder(d.store, config, d.clock.now(), { cliOrdId: req.cliOrdId, isEntry: false });
+    } catch {
+      /* counting must never stop a repair */
+    }
+    return executor.placeOrder(req);
+  };
+
   const closing = position.side === "long" ? "sell" : "buy";
   const mine = orders.filter((o): o is BotOrder => typeof o.cliOrdId === "string" && isBotOrder(o.cliOrdId));
   const own = mine.filter((o) => o.reduceOnly && parseCliOrdId(o.cliOrdId)?.policyId === trade.policyId);
@@ -196,14 +212,14 @@ async function repair(
       // First try: put the stop back, at the last trailed value (never wider than what was live).
       const id = makeCliOrdId(trade.policyId, "sl", SL_SEQ_BASE + wd.slAttempts++);
       wd.failedRepairs++;
-      await attempt(`place:${id}`, () => executor.placeOrder({
+      await attempt(`place:${id}`, () => place({
         symbol: config.symbol, side: closing, orderType: "stp", size: position.size, stopPrice: trade.lastStop ?? trade.plan.stop,
         reduceOnly: true, triggerSignal: "mark", cliOrdId: id,
       }));
     } else {
       // It did not work: a position with no stop is closed.
       const id = makeCliOrdId(trade.policyId, "close", CLOSE_SEQ_BASE + wd.closeAttempts++);
-      await attempt(`place:${id}`, () => executor.placeOrder({
+      await attempt(`place:${id}`, () => place({
         symbol: config.symbol, side: closing, orderType: "mkt", size: position.size, reduceOnly: true, cliOrdId: id,
       }));
     }
@@ -226,7 +242,7 @@ async function repair(
     const missing = Number((position.size - covered).toFixed(10));
     if (rung && missing > EPS) {
       const id = makeCliOrdId(trade.policyId, rung.role, TP_SEQ_BASE + wd.tpAttempts++);
-      await attempt(`place:${id}`, () => executor.placeOrder({
+      await attempt(`place:${id}`, () => place({
         symbol: config.symbol, side: closing, orderType: "lmt", size: missing, limitPrice: rung.price, reduceOnly: true, cliOrdId: id,
       }));
     }

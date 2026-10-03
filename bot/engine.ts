@@ -97,7 +97,7 @@ export function reduceOnlyReason(s: Snapshot, config: BotConfig): string | null 
 }
 
 export function decide(s: Snapshot, config: BotConfig): Action[] {
-  if (s.nowMs < s.lastClockMs) return [skip("clock_went_backwards")];
+  if (s.nowMs < s.lastClockMs) return timeUntrusted(s, config);
   if (s.liquidated) return [halt("liquidation_or_adl", true)];
   if (s.dailyLossBreached && s.state !== "HALTED") {
     // Halt until the next reset hour. Existing protection stays; only a resting entry is withdrawn.
@@ -117,6 +117,25 @@ export function decide(s: Snapshot, config: BotConfig): Action[] {
     case "COOLDOWN": return cooldown(s, config);
     case "HALTED": return halted(s, config);
   }
+}
+
+// The clock moved backwards, so everything that depends on the time (entries, timeouts, the time-stop, cooldowns, trailing, a
+// policy's expiry, the end of a halt) cannot be judged. Protecting a position does not depend on the time, so a missing
+// stop is still put back, and nothing else is done.
+function timeUntrusted(s: Snapshot, config: BotConfig): Action[] {
+  const trade = s.trade;
+  if (s.position && trade && !wrongSide(s.position, trade)) {
+    if (s.state === "PROTECTING") {
+      const missing = protectionActions(s, trade, config);
+      if (missing.length) return missing;
+    }
+    if (s.state === "OPEN") {
+      const stop = findRole(s, trade, "sl");
+      if (!stop) return [go("PROTECTING", "sl_missing", { trade: { ...trade, protectSeq: trade.protectSeq + 1 } })];
+      if (sizeDiffers(stop, s.position.size)) return [{ type: "edit", cliOrdId: stop.cliOrdId, size: s.position.size, reason: "resize_stop" }];
+    }
+  }
+  return [skip("clock_went_backwards")];
 }
 
 // ---- FLAT -----------------------------------------------------------------------------------------------------------
