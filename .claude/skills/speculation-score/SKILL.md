@@ -19,8 +19,9 @@ all data comes from the Kraken Futures API through the MCP tools.
 
 ## Procedure
 
-1. **Score:** run `node --env-file-if-exists=.env src/speculation/score.ts <BRAIN>/output/speculation` from the repo.
-   It fetches everything itself:
+1. **Score:** call the MCP tool `speculation_score` (optionally `day: "YYYY-MM-DD"`). It runs inside the krypto-kal
+   server, so your trades come from the same Kraken Futures fill sync as `kraken_futures_fills`, and it fetches
+   everything else itself:
    - 1m trade-price candles of each bet's **futures contract** (public Kraken Futures endpoint, no keys; never
      the spot `kraken_ohlc`, which is a different market and only reaches back 12 hours);
    - your fills, synced into the local fill store with the read-only keys (`KRAKEN_FUTURES_RO_API_KEY/_SECRET`),
@@ -34,6 +35,8 @@ all data comes from the Kraken Futures API through the MCP tools.
      taker fees on stops and time-outs.
    Without the read-only keys it prints a warning and scores only the hypothetical outcomes. Warnings about failed
    candle requests mean those bets stay pending; rerun later.
+   If the tool is not available (old server), run `node --env-file-if-exists=.env src/speculation/score.ts
+   <BRAIN>/output/speculation` from the repo instead; it does the same.
    If the network cannot reach Kraken, gather the data with the MCP tools (`kraken_futures_candles` per contract and
    window, `kraken_futures_fills`) into a JSON file `{ fills, candles: { "PF_...": [...] } }` and run
    `node src/speculation/score.ts <dir> --input <file>`.
