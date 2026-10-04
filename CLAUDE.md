@@ -104,6 +104,7 @@ docs/           architecture notes, guides, plans
   - `yahoo_*`: `search`, `quote`, `history`.
   - `kraken_*`: `ticker`, `ohlc`, `order_book`, `system_status`, plus read-only `balance` and `open_orders` when keys are set. **Kraken trading is never exposed as an MCP tool.**
   - `speculation_context`: the measured inputs of a speculation report in one call (registered whenever Kraken Futures is enabled; uses Coinalyze when its key is set). Takes up to about a minute.
+  - `speculation_score`: scores the bets and biases in `<BRAIN_DIR>/output/speculation` (same fill sync and store as `kraken_futures_fills`; without the read-only keys only hypothetical outcomes) and writes the scorecard.
   - `kraken_futures_candles`: public trade-price candles of a futures contract (no keys; registered whenever Kraken Futures is enabled). Use it, not spot `kraken_ohlc`, for PF_ prices and older ranges.
   - `kraken_futures_*` account tools (registered only with `KRAKEN_FUTURES_RO_API_KEY`/`_SECRET`; `KRAKEN_FUTURES_ENABLED=false` turns them off): `positions` (open positions + margin account), `open_orders`, `fills` and `pnl`. The last two first sync new fills into the local DB (`CACHE_DB_PATH`), so history goes past the API's 100-fill window. The MCP client never has `tradingEnabled`.
   - `x_*`: `sync` (fetch new posts into `brain/raw/x/`) and `accounts` (curated list + live profiles); `x_recent` reads the local archive and works without a token.

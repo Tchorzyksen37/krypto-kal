@@ -98,8 +98,9 @@ session reports on the running session; its bets can only fill from the moment i
 
 ## 5. Scoring
 
-Once a day (or whenever you like), ask Claude "score the speculation bets" (skill `speculation-score`), or run it
-yourself: `node --env-file-if-exists=.env src/speculation/score.ts <vault>/output/speculation`. It fetches the futures
+Once a day (or whenever you like), ask Claude "score the speculation bets" (skill `speculation-score`, which calls
+the MCP tool `speculation_score`; your trades come from the same Kraken Futures fill sync as `kraken_futures_fills`),
+or run it yourself: `node --env-file-if-exists=.env src/speculation/score.ts <vault>/output/speculation`. It fetches the futures
 candles and your fills itself, and:
 
 - pulls your Kraken Futures fills and matches them to bets automatically (same contract and side, inside the bet's

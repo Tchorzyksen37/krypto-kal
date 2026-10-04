@@ -3,7 +3,7 @@
 // Run: npm run test:x  (X reads are paid: the sync is limited to 10 posts per query from the last hour)
 
 import assert from "node:assert/strict";
-import { copyFileSync, mkdtempSync, rmSync } from "node:fs";
+import { copyFileSync, existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, test } from "node:test";
@@ -31,6 +31,17 @@ describe("Second brain", () => {
     assert.deepEqual(hits.map((h) => h.path), ["wiki/places/strait-of-hormuz.md"]);
     const files = (await call(ctx, "brain_list", { dir: "wiki", recursive: true })) as { path: string }[];
     assert.ok(files.some((f) => f.path === "wiki/places/strait-of-hormuz.md"));
+  });
+
+  test("speculation_score scores the speculation folder of the brain and writes the scorecard", { skip: process.env.KRAKEN_FUTURES_ENABLED === "false" && "KRAKEN_FUTURES_ENABLED=false" }, async () => {
+    const data = (await call(ctx, "speculation_score", { day: "2026-10-04" })) as {
+      edge: string; stats: { bets: number }; changed: { betsResolved: string[] }; files: string[];
+    };
+    assert.equal(data.stats.bets, 0);
+    assert.match(data.edge, /No touched bets/);
+    assert.deepEqual(data.changed.betsResolved, []);
+    assert.ok(existsSync(join(dir, "output", "speculation", "_scorecard.md")));
+    assert.ok(existsSync(join(dir, "output", "speculation", "2026-10-04", "_day.md")));
   });
 
   test("raw/ cannot be written", async () => {
