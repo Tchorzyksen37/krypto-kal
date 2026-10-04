@@ -22,6 +22,28 @@ export interface XAccount {
   filter: boolean; // true = only posts matching `topics`
   enabled?: boolean; // default true; false keeps the account on the list without syncing it
   note?: string; // why this account is on the list / how reliable it is
+  weight?: number; // 0..3, how much this account's posts move markets; default from its category (CATEGORY_WEIGHT)
+}
+
+// How much a source category usually moves markets: officials and wires first, OSINT and commentary last.
+// Used to sync the most important accounts first when the budget is tight, and by the ingest triage.
+export const CATEGORY_WEIGHT: Record<string, number> = {
+  official: 3, wire: 3, markets: 2.5, news: 2, journalist: 1.5, osint: 1.5, analyst: 1, commentary: 0.75,
+};
+export const DEFAULT_WEIGHT = 1;
+
+export function accountWeight(a: Pick<XAccount, "category" | "weight"> | undefined): number {
+  if (!a) return DEFAULT_WEIGHT;
+  if (typeof a.weight === "number" && Number.isFinite(a.weight)) return Math.min(3, Math.max(0, a.weight));
+  return CATEGORY_WEIGHT[a.category?.toLowerCase()] ?? DEFAULT_WEIGHT;
+}
+
+// Queries in the order they should run: the one with the most important account first (stable otherwise). The query
+// strings themselves are unchanged, so their sync cursors keep working.
+export function prioritizeQueries(queries: string[], config: XAccountsConfig): string[] {
+  const weightOf = new Map(config.accounts.map((a) => [a.username.replace(/^@/, "").toLowerCase(), accountWeight(a)]));
+  const priority = (q: string) => Math.max(0, ...[...q.matchAll(/from:(\w+)/g)].map((m) => weightOf.get(m[1]!.toLowerCase()) ?? DEFAULT_WEIGHT));
+  return queries.map((q, i) => ({ q, i, p: priority(q) })).sort((a, b) => b.p - a.p || a.i - b.i).map((x) => x.q);
 }
 
 export interface XAccountsConfig {
@@ -270,7 +292,7 @@ export async function syncX(client: XClient, brain: Brain, opts: SyncOptions = {
   const config = await loadAccounts(brain);
   const enabled = config.accounts.filter(isEnabled);
   const accounts = new Map(enabled.map((a) => [uname(a).toLowerCase(), a]));
-  const queries = buildQueries(config);
+  const queries = prioritizeQueries(buildQueries(config), config); // most important accounts first: a tight budget cuts the rest
   const state = await brain.readState<SyncState>("x-sync", { queries: {} });
   const spend = await new Spend(brain, opts.budget ?? {}).load();
   const startTotal = spend.summary().totalUsd;
@@ -359,7 +381,7 @@ export interface RawXPost {
   text: string;
 }
 
-function parseFrontmatter(md: string): { meta: Record<string, string>; body: string } {
+export function parseFrontmatter(md: string): { meta: Record<string, string>; body: string } {
   const m = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/.exec(md);
   if (!m) return { meta: {}, body: md };
   const meta: Record<string, string> = {};

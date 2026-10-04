@@ -22,6 +22,7 @@ import {
   type SymbolHistory,
 } from "../providers/coinalyze/coinalyze-client.ts";
 import { Brain } from "../brain/brain.ts";
+import { markIngested, runTriage } from "../brain/triage.ts";
 import { coinalyzeJobs, startCollector, yahooJobs, type CollectorJob } from "./collector.ts";
 import { HistoryStore } from "../core/history-store.ts";
 import { estimateLiquidationHeatmap, type HeatmapBar } from "../analytics/liquidation-heatmap.ts";
@@ -875,6 +876,37 @@ function registerBrain(server: McpServer) {
       },
     },
     (args) => toResult("brain_write", { path: args.path }, () => brain.write(args.path, args.content)),
+  );
+
+  server.registerTool(
+    "brain_triage",
+    {
+      description:
+        "[Brain] What to ingest next: every raw X post not yet in the wiki, ranked by likely market impact (account " +
+        "weight and reliability, market-moving terms, post kind, engagement), grouped into events (posts from several " +
+        "accounts about the same thing within a few hours; corroboration raises an event). Returns `selected` events to " +
+        "read now (best first, `read` = posts to open, `alsoInEvent` = same event, cite without reading), `deferred`, " +
+        "`noise` and `stale` posts to mark as skipped, and per-account statistics for source suggestions. Local files only.",
+      inputSchema: {
+        max_posts: z.number().int().min(1).max(200).default(40).describe("How many posts to read this run"),
+        per_event: z.number().int().min(1).max(10).default(4).describe("At most this many posts read per event"),
+      },
+    },
+    (args) => toResult("brain_triage", args, () => runTriage(brain, { maxPosts: args.max_posts, perCluster: args.per_event })),
+  );
+
+  server.registerTool(
+    "brain_ingest_mark",
+    {
+      description:
+        "[Brain] Records raw X posts as ingested (cited in the wiki) or skipped (noise, duplicate, stale; give a reason), " +
+        "so brain_triage never offers them again. Writes only <brain>/.ingest-state.json; raw/ is never changed.",
+      inputSchema: {
+        ingested: z.array(z.string()).default([]).describe("raw/x/<date>/<user>-<id>.md paths"),
+        skipped: z.array(z.object({ path: z.string(), reason: z.string().min(1) })).default([]),
+      },
+    },
+    (args) => toResult("brain_ingest_mark", { ingested: args.ingested.length, skipped: args.skipped.length }, () => markIngested(brain, args)),
   );
 }
 
