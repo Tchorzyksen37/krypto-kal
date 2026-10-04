@@ -301,3 +301,23 @@ Routine setup (on the user's machine, once): four scheduled tasks, or one task a
   (with a migration for older databases). Fees are per leg: maker for the limit entry and take-profit, taker for
   stops and time-outs; actual trades use each fill's type (unknown counts as taker). Fills matched in an earlier run
   are not reported as stray again.
+
+## 17. Revision 6: review fixes (groups 3 and 4)
+
+- **Edge over chance:** calibration and the headline rate are about take-profit hits (the event the stated P
+  describes), compared with the chance baseline `1/(1+RR)` (driftless random walk), with Wilson 95% intervals, a
+  Brier score and Brier skill against chance, and a 95% interval on mean net R. The scorecard prints a one-line
+  verdict (too few / not distinguishable / above / below chance).
+- **Bias scored:** the checker writes `reports-log.json` (bias, per-symbol leans, last, ATR); the scorer judges each
+  finished window on the futures candles (open of the first trade to the last close; flat below
+  0.25 x ATR x sqrt(hours)); the headline call on BTC. Hit rate with interval, flat share, Brier, NEUTRAL hits,
+  per-symbol leans.
+- **Measured inputs:** `src/speculation/market.ts` (ATR, ATR ratio, spread, depth, funding % per 8h, symbol
+  mapping) and `src/speculation/context.ts` behind the MCP tool `speculation_context`: session, screened symbols
+  with Kraken Futures and Coinalyze (Binance USDT perp proxy) measurements, meta-ready rows, and the volume share
+  summed over several exchanges' BTC perpetuals (Kraken-only fallback, labelled). The checker re-measures last price,
+  spread and ATR before validating bets (`SPECULATION_VERIFY=false` turns it off) and flags differences in the note.
+- **Skill:** one `speculation_context` call replaces the hand-gathered numbers and the scratch-file scripts; macro
+  quotes carry their time and stale ones are labelled; `x_sync` runs before `x_recent` when available.
+- First live run (2026-10-04) showed why: the volume share and Coinalyze history were skipped, the X archive was
+  stale (the skill never synced it) and the weekend macro quotes were Friday's close.

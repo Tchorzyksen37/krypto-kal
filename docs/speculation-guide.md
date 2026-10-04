@@ -115,10 +115,14 @@ How to read the scorecard:
 
 | Number | Meaning | What good looks like |
 |---|---|---|
-| Win rate (N=…) | share of filled bets that ended in profit | above the break-even rate for the bets' reward:risk; always read N |
-| Mean net R | average result per filled bet, in units of risk, after assumed fees | above 0 over a large N |
+| Edge line | how often the take profit was reached (95% interval) vs the stated P and the chance baseline `1/(1+R:R)` | interval above chance; the verdict says so explicitly |
+| Brier skill | how much better the stated probabilities forecast TP hits than the chance baseline | above 0 (below 0: the model's numbers are worse than chance) |
+| TP rate [95%] (N=…) | share of filled bets that reached take profit, with its 95% interval | above the "Chance" column; always read N |
+| Profitable | filled bets that ended in profit, including profitable time-outs | context only; the TP rate is what P is about |
+| Mean net R [95%] | average result per filled bet, in units of risk, after fees, with its 95% interval | the whole interval above 0 over a large N |
+| Bias table | the headline LONG/SHORT call judged on BTC's session move (flat when below 0.25 x 1h ATR x sqrt(hours)) | right more often than the "Chance" column `(1 - flat share)/2`; Brier below 0.25 |
 | Never touched | bets whose entry was not reached | high is fine; it means the limits were patient |
-| Calibration | stated probability vs how often it happened | stated 40% bets should win about 40% of the time |
+| Calibration | stated probability vs chance vs how often the take profit was reached | stated 40% bets reach TP about 40% of the time, above their chance column |
 | By session / symbol / side / vs bias | where results come from | tells you which sessions to ignore |
 | Taken by you vs all bets | your selection and execution vs the raw bets | your mean R much lower than the raw bets' means execution costs you |
 
@@ -141,18 +145,22 @@ In this repo: `src/speculation/` (checker, screen, sessions, volume, scorer; `np
 
 Fixed on 2026-10-04: negative-expectancy bets, stops smaller than fees, limit entries on the wrong side of the market,
 stale levels in `bets-log.json` after a rerun, ranking that was not expected value, scoring on spot candles with a
-12-hour limit, and assumed instead of real maker/taker fees. Still open:
+12-hour limit, assumed instead of real maker/taker fees, model-written prices (the checker now re-measures them),
+model-gathered inputs (now one `speculation_context` call), win rate instead of TP rate in calibration, no chance
+baseline, the unscored bias, Kraken-only volume, and the screen's funding unit. Still open:
 
-- **Prices in the report are written by the model.** The checker trusts the last price and ATR it is given. Compare
-  the entry with the live price before placing an order.
-- **The bias is stated but not scored yet**, and the calibration counts profitable time-outs as wins. There is no
-  "edge over chance" line in the scorecard yet; use the break-even column of each bet in the meantime.
 - **Session times assume summer offsets** in the descriptive text. In late October/early November and in March the
   US open shifts by an hour relative to Warsaw (e.g. 14:30 instead of 15:30 on 2026-10-27).
-- **"Who is trading" is a proxy.** Volume by hour comes from Kraken, which under-represents Asian exchanges, and
-  clock time does not prove which region is trading.
+- **"Who is trading" is a timing proxy.** Volume by hour is now summed over several exchanges, but clock time still
+  does not prove which region is trading.
+- **Coinalyze data uses Binance USDT perpetuals as the proxy** for each symbol's open interest, long/short ratio
+  and liquidations; Kraken's own positioning can differ.
 - **No guard against overlapping or correlated bets** across reports, and the night session has no "orders before
   bed" mode yet.
 - **Funding** paid or received while holding is not included in the R results.
 - **Fees** default to Kraken Futures base-tier rates (0.02% maker, 0.05% taker). If your tier differs, set
   `SPECULATION_MAKER_FEE_BPS` / `SPECULATION_TAKER_FEE_BPS` (scoring) and `SPECULATION_FEE_BPS` (checker).
+- **News freshness depends on the X sync.** Without `X_BEARER_TOKEN` (or `X_COLLECT=true` for a background sync) the
+  archive goes stale; the report then says how old the newest post is.
+- **Weekend macro quotes are Friday's close.** The skill labels them as stale; only CME futures (`ES=F`, `NQ=F`)
+  update from Sunday evening.

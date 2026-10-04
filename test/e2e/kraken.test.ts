@@ -62,6 +62,21 @@ describe("Kraken", { skip: process.env.KRAKEN_ENABLED === "false" && "KRAKEN_ENA
     });
   });
 
+  describe("speculation context (public futures data, Coinalyze when configured)", { skip: process.env.KRAKEN_FUTURES_ENABLED === "false" && "KRAKEN_FUTURES_ENABLED=false" }, () => {
+    test("speculation_context measures the core symbols and returns meta-ready rows", { timeout: 180_000 }, async () => {
+      const data = (await call(ctx, "speculation_context", { core: ["BTC"], extra: 0 })) as {
+        session: { session: string }; symbols: { symbol: string; last: number; atr_1h?: number }[];
+        metaSymbols: { symbol: string; futures: string; last: number; atr_1h: number }[]; notMeasured: string[];
+      };
+      assert.ok(["europe_open", "eu_us_overlap", "us", "night_asia"].includes(data.session.session));
+      assert.equal(data.symbols[0]!.symbol, "BTC");
+      assert.ok(data.symbols[0]!.last > 0);
+      assert.equal(data.metaSymbols[0]!.futures, "PF_XBTUSD");
+      assert.ok(data.metaSymbols[0]!.atr_1h > 0);
+      assert.ok(Array.isArray(data.notMeasured));
+    });
+  });
+
   describe("account (read-only)", { skip: !HAS_KEYS && "KRAKEN_API_KEY/KRAKEN_API_SECRET not set" }, () => {
     test("kraken_balance", async () => {
       const data = await call(ctx, "kraken_balance");

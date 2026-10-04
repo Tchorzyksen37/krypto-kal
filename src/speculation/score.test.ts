@@ -7,10 +7,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, test } from "node:test";
 import {
-  actualOutcome, calibration, groupFills, matchFills, normalizeCandle, normalizeFill, renderDay, renderScorecard,
+  actualOutcome, biasStats, calibration, chanceOfTp, resolveBias, scoreReports, edgeLine, groupFills, meanCI, wilson, matchFills, normalizeCandle, normalizeFill, renderDay, renderScorecard,
   resolveBet, scoreFiles, scoreLog, summarize,
 } from "./score.ts";
-import type { Bet, Candle, Fill, LoggedBet } from "./types.ts";
+import type { Bet, Candle, Fill, LoggedBet, ReportLogEntry } from "./types.ts";
 
 const T0 = Date.parse("2026-10-03T14:00:00Z") / 1000;
 const MS = (min: number) => (T0 + min * 60) * 1000;
@@ -195,6 +195,64 @@ describe("fills", () => {
 
 const logged = (b: Bet, over: Partial<LoggedBet> = {}): LoggedBet => ({ ...b, report: "r.md", generated: "2026-10-03T13:52:00Z", ...over });
 
+describe("edge over chance", () => {
+  const touchedBet = (id: string, p: number, status: "tp" | "sl", rr = 2): LoggedBet => {
+    const risk = 0.03;
+    return logged({ ...long, id, probability: p, take_profit: long.entry + rr * risk, stop_loss: long.entry - risk }, { hypothetical: { status, netR: status === "tp" ? rr : -1 } });
+  };
+
+  test("chance of reaching take profit first is 1 / (1 + R:R)", () => {
+    assert.ok(Math.abs(chanceOfTp(long) - 1 / 3) < 1e-9);
+    assert.ok(Math.abs(chanceOfTp({ ...long, take_profit: long.entry + 0.03 }) - 0.5) < 1e-9);
+  });
+
+  test("Wilson interval and mean interval", () => {
+    assert.deepEqual(wilson(0, 0), undefined);
+    const w = wilson(5, 10)!;
+    assert.ok(w.lo < 0.5 && w.hi > 0.5 && Math.abs(0.5 - w.lo - (w.hi - 0.5)) < 1e-3);
+    assert.deepEqual(wilson(10, 10)!.hi, 1);
+    assert.equal(meanCI([1]), undefined);
+    const m = meanCI([1, -1, 1, -1])!;
+    assert.ok(m.lo < 0 && m.hi > 0);
+  });
+
+  test("summarize scores take-profit hits against stated P and chance (Brier skill)", () => {
+    // 40 bets at 2:1 (chance 33%), stated 50%, half reach TP: the stated P is right, chance is beaten
+    const log = Array.from({ length: 40 }, (_, i) => touchedBet(`b${i}`, 0.5, i % 2 === 0 ? "tp" : "sl"));
+    const s = summarize(log);
+    assert.equal(s.tp, 20);
+    assert.equal(s.tpRate, 0.5);
+    assert.equal(s.meanStated, 0.5);
+    assert.equal(s.meanChance, 0.333);
+    assert.ok(s.skill! > 0);
+    assert.match(edgeLine(s), /Brier skill vs chance \+0\.\d\d: not distinguishable from chance yet|above chance/);
+  });
+
+  test("a model that is always too confident scores below chance", () => {
+    const log = Array.from({ length: 40 }, (_, i) => touchedBet(`b${i}`, 0.8, i % 3 === 0 ? "tp" : "sl"));
+    const s = summarize(log);
+    assert.ok(s.skill! < 0);
+  });
+
+  test("the verdict needs 30 bets and a confidence interval clear of chance", () => {
+    const few = summarize(Array.from({ length: 10 }, (_, i) => touchedBet(`b${i}`, 0.6, "tp")));
+    assert.match(edgeLine(few), /too few bets/);
+    const many = summarize(Array.from({ length: 60 }, (_, i) => touchedBet(`b${i}`, 0.6, i % 5 === 0 ? "sl" : "tp")));
+    assert.match(edgeLine(many), /above chance/);
+    const bad = summarize(Array.from({ length: 60 }, (_, i) => touchedBet(`b${i}`, 0.6, i % 10 === 0 ? "tp" : "sl")));
+    assert.match(edgeLine(bad), /BELOW chance/);
+    assert.match(edgeLine(summarize([])), /No touched bets/);
+  });
+
+  test("a profitable time-out is not a take-profit hit", () => {
+    const ttl = logged({ ...long, id: "t" }, { hypothetical: { status: "ttl", netR: 0.4 } });
+    const s = summarize([ttl]);
+    assert.equal(s.wins, 1);
+    assert.equal(s.tp, 0);
+    assert.equal(calibration([ttl]).find((c) => c.n === 1)!.realized, 0);
+  });
+});
+
 describe("statistics", () => {
   const win = (id: string, p: number, netR = 1.9): LoggedBet => logged({ ...long, id, probability: p }, { hypothetical: { status: "tp", netR } });
   const loss = (id: string, p: number): LoggedBet => logged({ ...long, id, probability: p }, { hypothetical: { status: "sl", netR: -1.1 } });
@@ -274,7 +332,7 @@ describe("scoreLog and rendering", () => {
   test("scorecard prints N next to percentages and warns about small samples", () => {
     const r = scoreLog([logged(long)], input());
     const text = renderScorecard(r.log, T0 + 100 * 60);
-    assert.match(text, /100% \(N=1\)/);
+    assert.match(text, /100% \[21%, 100%\] \(N=1\)/);
     assert.match(text, /too few bets/);
     assert.match(text, /### Calibration/);
     assert.match(text, /\| XRP \| 1 \|/);
@@ -309,5 +367,79 @@ describe("scoreLog and rendering", () => {
     assert.equal(log[0]!.hypothetical?.status, "tp");
     assert.match(await readFile(join(dir, "2026-10-03", "_day.md"), "utf8"), /20261003-14Z-XRP-1/);
     assert.match(await readFile(join(dir, "_scorecard.md"), "utf8"), /Last 7 days/);
+  });
+});
+
+describe("bias scoring", () => {
+  // 4-hour window from T0; BTC and XRP 1m candles with a linear drift from `from` to `to`
+  const drift = (from: number, to: number, minutes = 240): Candle[] =>
+    Array.from({ length: minutes }, (_, m) => {
+      const o = from + ((to - from) * m) / minutes;
+      const c = from + ((to - from) * (m + 1)) / minutes;
+      return { t: T0 + m * 60, o, h: Math.max(o, c), l: Math.min(o, c), c };
+    });
+  const entry = (over: Partial<ReportLogEntry> = {}): ReportLogEntry => ({
+    report: "r.md", session: "eu_us_overlap",
+    window: ["2026-10-03T14:00:00Z", "2026-10-03T18:00:00Z"], generated: "2026-10-03T13:40:00Z",
+    bias: { direction: "long", probability: 0.6 },
+    symbols: [
+      { symbol: "BTC", futures: "PF_XBTUSD", last: 65000, atr_1h: 400, bias: "long" },
+      { symbol: "XRP", futures: "PF_XRPUSD", last: 2.4, atr_1h: 0.03, bias: "short" },
+    ],
+    ...over,
+  });
+
+  test("judges each lean on the session move, with a dead zone of 0.25 x ATR x sqrt(hours)", () => {
+    // BTC +600 (dead zone 0.25*400*2 = 200): up. XRP +0.01 (dead zone 0.015): flat.
+    const o = resolveBias(entry(), { PF_XBTUSD: drift(65000, 65600), PF_XRPUSD: drift(2.4, 2.41) })!;
+    const btc = o.symbols.find((x) => x.symbol === "BTC")!;
+    const xrp = o.symbols.find((x) => x.symbol === "XRP")!;
+    assert.deepEqual([btc.result, btc.correct], ["up", true]);
+    assert.deepEqual([xrp.result, xrp.correct], ["flat", false]);
+    assert.equal(btc.deadZonePct, Math.round((200 / 65000) * 100 * 1000) / 1000);
+    assert.deepEqual(o.headline, { symbol: "BTC", direction: "long", probability: 0.6, result: "up", correct: true });
+  });
+
+  test("a NEUTRAL call is right only in a flat session; the headline falls back to the first symbol without BTC", () => {
+    const e = entry({ bias: { direction: "neutral" }, symbols: [{ symbol: "XRP", futures: "PF_XRPUSD", last: 2.4, atr_1h: 0.03 }] });
+    const o = resolveBias(e, { PF_XRPUSD: drift(2.4, 2.405) })!;
+    assert.deepEqual([o.headline!.symbol, o.headline!.result, o.headline!.correct], ["XRP", "flat", true]);
+  });
+
+  test("not scored until candles cover the whole window or the window has ended", () => {
+    assert.equal(resolveBias(entry(), { PF_XBTUSD: drift(65000, 65600, 100), PF_XRPUSD: drift(2.4, 2.41) }), undefined);
+    const early = scoreReports([entry()], { PF_XBTUSD: drift(65000, 65600), PF_XRPUSD: drift(2.4, 2.41) }, T0 + 3600);
+    assert.deepEqual(early.scored, []);
+    const done = scoreReports([entry()], { PF_XBTUSD: drift(65000, 65600), PF_XRPUSD: drift(2.4, 2.41) }, T0 + 5 * 3600);
+    assert.deepEqual(done.scored, ["r.md"]);
+    const again = scoreReports(done.entries, {}, T0 + 6 * 3600);
+    assert.deepEqual(again.scored, []); // already scored, kept
+    assert.ok(again.entries[0]!.outcome);
+  });
+
+  test("bias statistics: hit rate, flat share, Brier and per-symbol leans", () => {
+    const candles = (btcTo: number) => ({ PF_XBTUSD: drift(65000, btcTo), PF_XRPUSD: drift(2.4, 2.35) });
+    const scored = [
+      { e: entry({ report: "a" }), c: candles(65600) }, // long, up: right
+      { e: entry({ report: "b" }), c: candles(64400) }, // long, down: wrong
+      { e: entry({ report: "c", bias: { direction: "short", probability: 0.7 } }), c: candles(64400) }, // short, down: right
+      { e: entry({ report: "d", bias: { direction: "neutral" } }), c: candles(65050) }, // neutral, flat: right
+    ].map(({ e, c }) => ({ ...e, outcome: resolveBias(e, c)! }));
+    const st = biasStats(scored);
+    assert.equal(st.reports, 4);
+    assert.equal(st.directional, 3);
+    assert.equal(st.correct, 2);
+    assert.equal(st.hitRate, 0.667);
+    assert.equal(st.neutral, 1);
+    assert.equal(st.neutralCorrect, 1);
+    assert.equal(st.flatShare, 0.25);
+    assert.equal(st.brier, Math.round(((0.6 - 1) ** 2 + (0.6 - 0) ** 2 + (0.7 - 1) ** 2) / 3 * 1000) / 1000);
+    assert.equal(st.leans, 8); // two leans per report
+    assert.equal(st.leansCorrect, 5); // BTC lean long is right only in a; XRP lean short is right in all four
+    assert.match(renderScorecard([], T0, scored), /### Bias \(headline call, judged on BTC\)[\s\S]*\| 4 \| 3 \| 67% \[/);
+  });
+
+  test("the scorecard says when nothing has been scored", () => {
+    assert.match(renderScorecard([], T0, []), /No session has been scored yet/);
   });
 });

@@ -8,8 +8,10 @@ import { existsSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { FuturesCandle, FuturesTicker } from "../providers/kraken/kraken-futures-client.ts";
+import { spreadBps, volatility } from "./market.ts";
 import { sessionById } from "./sessions.ts";
-import type { Bet, BetInput, Bias, DroppedBet, LoggedBet, MetaSymbol, ReportMeta } from "./types.ts";
+import type { Bet, BetInput, Bias, DroppedBet, LoggedBet, MetaSymbol, PriceCheck, ReportLogEntry, ReportMeta } from "./types.ts";
 
 export interface CheckOptions {
   maxBets: number;
@@ -204,8 +206,86 @@ export function renderBestBets(result: CheckResult, meta: ReportMeta): string {
   if (result.bets.length > 0) {
     lines.push("_Break-even is the win rate the bet needs after fees; P above it is the model's claimed edge. EV assumes TP or SL, nothing in between._", "");
   }
+  lines.push(...renderVerification(meta.verification));
   lines.push(`_Speculation, not advice. Generated ${meta.generated}. The levels above were validated by code; the model's reasoning may still be wrong._`, "");
   return lines.join("\n");
+}
+
+// ---- price verification: the model's last price and ATR are replaced by measured ones ----
+
+export interface MarketSource {
+  tickers(symbols: string[]): Promise<FuturesTicker[]>;
+  candles(symbol: string, resolution: "1h", range: { from?: number; to?: number }): Promise<{ candles: FuturesCandle[] }>;
+}
+
+export const PRICE_WARN_PCT = 0.5; // a model price further than this from the market is flagged
+export const ATR_WARN_PCT = 30;
+
+const pctDiff = (model: number, measured: number) => Math.round(((model - measured) / measured) * 10_000) / 100;
+
+// Fetches the futures last price, spread and 1h ATR of every symbol and returns a copy of the meta that uses
+// them (bets are then validated against the market, not against the model's memory). A symbol whose
+// measurement fails keeps the model's numbers and is reported as unverified.
+export async function verifyPrices(meta: ReportMeta, source: MarketSource, nowSec = Math.floor(Date.now() / 1000)): Promise<ReportMeta> {
+  const checkedAt = new Date(nowSec * 1000).toISOString();
+  let tickers = new Map<string, FuturesTicker>();
+  let tickerError: string | undefined;
+  try {
+    tickers = new Map((await source.tickers(meta.symbols.map((s) => s.futures))).map((t) => [t.symbol.toUpperCase(), t]));
+  } catch (e) {
+    tickerError = e instanceof Error ? e.message : String(e);
+  }
+  const checks: PriceCheck[] = [];
+  const symbols: MetaSymbol[] = [];
+  for (const s of meta.symbols) {
+    const check: PriceCheck = { symbol: s.symbol, futures: s.futures, checkedAt, model_last: s.last, model_atr_1h: s.atr_1h };
+    const t = tickers.get(s.futures.toUpperCase());
+    let vol: ReturnType<typeof volatility>;
+    let candleError: string | undefined;
+    try {
+      vol = volatility((await source.candles(s.futures, "1h", { from: nowSec - 30 * 3600, to: nowSec })).candles);
+    } catch (e) {
+      candleError = e instanceof Error ? e.message : String(e);
+    }
+    const next = { ...s };
+    if (t && t.last > 0) {
+      check.measured_last = t.last;
+      check.last_diff_pct = pctDiff(s.last, t.last);
+      check.spread_bps = spreadBps(t);
+      next.last = t.last;
+      if (Number.isFinite(check.spread_bps)) next.spread_bps = check.spread_bps;
+    }
+    if (vol) {
+      check.measured_atr_1h = vol.atr_1h;
+      check.atr_diff_pct = pctDiff(s.atr_1h, vol.atr_1h);
+      next.atr_1h = vol.atr_1h;
+    }
+    const errors = [
+      !t ? tickerError ?? `no ticker for ${s.futures}` : undefined,
+      !vol ? candleError ?? "too few hourly candles for the ATR" : undefined,
+    ].filter(Boolean);
+    if (errors.length) check.error = errors.join("; ");
+    checks.push(check);
+    symbols.push(next);
+  }
+  return { ...meta, symbols, verification: checks };
+}
+
+export function renderVerification(checks: PriceCheck[] | undefined): string[] {
+  if (!checks?.length) return ["> [!warning] Prices were NOT checked against the market. Compare every entry with the live price before placing an order.", ""];
+  const flagged = checks.filter(
+    (c) => c.error || Math.abs(c.last_diff_pct ?? 0) > PRICE_WARN_PCT || Math.abs(c.atr_diff_pct ?? 0) > ATR_WARN_PCT,
+  );
+  const lines = [`_Levels were validated against Kraken Futures prices measured at ${clock(Date.parse(checks[0]!.checkedAt))}, not the model's numbers._`, ""];
+  if (flagged.length) {
+    lines.push("> [!warning] The model's numbers differed from the market (the measured values were used):");
+    for (const c of flagged) {
+      if (c.error) lines.push(`> - ${c.symbol}: NOT verified (${c.error}); the model's last ${c.model_last} and ATR ${c.model_atr_1h} were kept.`);
+      else lines.push(`> - ${c.symbol}: model last ${c.model_last} vs market ${c.measured_last} (${c.last_diff_pct}%), model ATR ${c.model_atr_1h} vs ${c.measured_atr_1h} (${c.atr_diff_pct}%).`);
+    }
+    lines.push("");
+  }
+  return lines;
 }
 
 // ---- bias: every report must say whether it leans long or short ----
@@ -293,13 +373,32 @@ export function upsertReportBets(log: LoggedBet[], bets: Bet[], report: string, 
   return [...kept, ...bets.filter((b) => !frozen.has(b.id)).map((b) => ({ ...b, report, generated }))];
 }
 
-export async function runCheck(metaPath: string, options: Partial<CheckOptions> = {}): Promise<CheckResult> {
-  const meta = JSON.parse(await readFile(metaPath, "utf8")) as ReportMeta;
-  if (!Array.isArray(meta.symbols) || !Array.isArray(meta.bets) || !Array.isArray(meta.window)) {
+// The report's bias, kept so the scorer can check it against the session's actual move. A rerun replaces the
+// entry unless it was already scored.
+export function upsertReportEntry(entries: ReportLogEntry[], meta: ReportMeta, report: string): ReportLogEntry[] {
+  const existing = entries.find((e) => e.report === report);
+  if (existing?.outcome) return entries;
+  const entry: ReportLogEntry = {
+    report,
+    ...(meta.session ? { session: meta.session } : {}),
+    window: meta.window,
+    generated: meta.generated,
+    bias: meta.bias!,
+    symbols: meta.symbols.map((s) => ({ symbol: s.symbol, futures: s.futures, last: s.last, atr_1h: s.atr_1h, ...(s.bias ? { bias: s.bias } : {}) })),
+  };
+  return [...entries.filter((e) => e.report !== report), entry];
+}
+
+// `market` measures the real last price and ATR (the CLI passes the public Kraken Futures client); without it the
+// note says the prices were not checked.
+export async function runCheck(metaPath: string, options: Partial<CheckOptions> = {}, market?: MarketSource): Promise<CheckResult> {
+  const raw = JSON.parse(await readFile(metaPath, "utf8")) as ReportMeta;
+  if (!Array.isArray(raw.symbols) || !Array.isArray(raw.bets) || !Array.isArray(raw.window)) {
     throw new Error("meta file needs symbols[], bets[] and window[]");
   }
-  const err = biasError(meta);
+  const err = biasError(raw);
   if (err) throw new Error(err);
+  const meta = market ? await verifyPrices(raw, market) : raw;
   const result = validateBets(meta, options);
   meta.validated = result.bets;
   meta.dropped = result.dropped;
@@ -312,6 +411,10 @@ export async function runCheck(metaPath: string, options: Partial<CheckOptions> 
   const logPath = join(dirname(dirname(metaPath)), "bets-log.json");
   const log: LoggedBet[] = existsSync(logPath) ? (JSON.parse(await readFile(logPath, "utf8")) as LoggedBet[]) : [];
   await writeFile(logPath, `${JSON.stringify(upsertReportBets(log, result.bets, mdPath, meta.generated), null, 2)}\n`, "utf8");
+
+  const reportsPath = join(dirname(dirname(metaPath)), "reports-log.json");
+  const reports: ReportLogEntry[] = existsSync(reportsPath) ? (JSON.parse(await readFile(reportsPath, "utf8")) as ReportLogEntry[]) : [];
+  await writeFile(reportsPath, `${JSON.stringify(upsertReportEntry(reports, meta, mdPath), null, 2)}\n`, "utf8");
   return result;
 }
 
@@ -322,7 +425,12 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     process.exit(2);
   }
   try {
-    const r = await runCheck(path, optionsFromEnv());
+    let market: MarketSource | undefined;
+    if (process.env.SPECULATION_VERIFY?.toLowerCase() !== "false") {
+      const { KrakenFuturesClient } = await import("../providers/kraken/kraken-futures-client.ts");
+      market = new KrakenFuturesClient({ apiKey: "", apiSecret: "" }); // public endpoints only
+    }
+    const r = await runCheck(path, optionsFromEnv(), market);
     console.log(`bets kept: ${r.bets.length}, dropped: ${r.dropped.length}`);
     for (const b of r.bets) console.log(`  ${b.id} ${b.side} entry ${b.entry} SL ${b.stop_loss} TP ${b.take_profit} P ${b.probability} R:R ${b.rr}`);
     for (const d of r.dropped) console.log(`  dropped ${d.bet.symbol} ${d.bet.side}: ${d.reason}`);

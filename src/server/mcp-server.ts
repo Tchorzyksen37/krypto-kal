@@ -26,6 +26,7 @@ import { HistoryStore } from "../core/history-store.ts";
 import { estimateLiquidationHeatmap, type HeatmapBar } from "../analytics/liquidation-heatmap.ts";
 import { KRAKEN_OHLC_INTERVALS, KrakenClient } from "../providers/kraken/kraken-client.ts";
 import { KRAKEN_FUTURES_RESOLUTIONS, KrakenFuturesClient } from "../providers/kraken/kraken-futures-client.ts";
+import { buildContext, contextOptionsFromEnv } from "../speculation/context.ts";
 import { report as pnlReport, syncFills } from "../trading/futures-pnl.ts";
 import { TradeStore } from "../trading/trade-store.ts";
 import { createLogger } from "../core/logger.ts";
@@ -662,6 +663,38 @@ function registerKrakenFutures(server: McpServer, client: KrakenFuturesClient, t
   );
 }
 
+// --- Speculation mode ---
+
+// The measured KNOWN layer of a speculation report in one call (see src/speculation/context.ts).
+function registerSpeculation(server: McpServer, futures: KrakenFuturesClient, cz: CoinalyzeClient | undefined) {
+  server.registerTool(
+    "speculation_context",
+    {
+      description:
+        "[Speculation] Measured inputs for a speculation report in one call: the session to report on (window, limits, " +
+        "profile, regions, investors), the screened symbols with Kraken Futures last/bid/ask, spread, 1h ATR and ATR " +
+        "ratio, 24h volume, open interest, funding (% per 8h), order-book depth, plus Coinalyze OI change 1h/4h, " +
+        "long/short ratio and liquidation burst (when a key is set), `metaSymbols` ready for the report's meta file, " +
+        "and the measured share of daily volume per session across several exchanges. `notMeasured` lists what goes " +
+        "to UNKNOWN. Takes up to about a minute because of Coinalyze's rate limit.",
+      inputSchema: {
+        core: z.array(z.string()).optional().describe('Core symbols, default from SPECULATION_SYMBOLS or ["BTC","ETH","XRP"]'),
+        extra: z.number().int().min(0).max(5).optional().describe("Screened extra symbols, default SPECULATION_SCREEN_EXTRA or 3"),
+      },
+    },
+    (args) =>
+      toResult("speculation_context", args, () => {
+        const opts = contextOptionsFromEnv();
+        opts.screen = {
+          ...opts.screen,
+          ...(args.core ? { core: args.core.map((c) => c.toUpperCase()) } : {}),
+          ...(args.extra !== undefined ? { extra: args.extra } : {}),
+        };
+        return buildContext({ futures, ...(cz ? { coinalyze: cz } : {}) }, opts);
+      }),
+  );
+}
+
 // --- X ---
 
 function registerX(server: McpServer, client: XClient) {
@@ -771,6 +804,7 @@ function buildServer(): McpServer {
   if (yahoo) registerYahoo(server, yahoo);
   if (kraken) registerKraken(server, kraken);
   if (krakenFutures) registerKrakenFuturesMarket(server, krakenFutures);
+  if (krakenFutures) registerSpeculation(server, krakenFutures, coinalyze);
   if (krakenFutures?.hasCredentials) registerKrakenFutures(server, krakenFutures, tradeStore);
   if (x) registerX(server, x);
   registerBrain(server);

@@ -17,7 +17,7 @@ export interface Candidate {
   atrRatio: number; // 1h ATR / 24h median of 1h ATR
   oiChange1hPct: number;
   oiChange4hPct: number;
-  fundingPct: number; // current funding rate in percent per interval
+  fundingPct8h: number; // funding in percent per 8 hours (Kraken quotes hourly; context.ts converts)
   longShortRatio: number; // longs / shorts
   liqBurst: number; // last-hour liquidations / average hourly liquidations of the last 24h
   heatmapDistancePct?: number; // distance to the nearest ESTIMATED liquidation cluster
@@ -67,7 +67,7 @@ export function setupScore(c: Candidate): { score: number; reason: string } {
   const parts: [string, number][] = [
     [`ATR ${c.atrRatio.toFixed(1)}x its 24h median`, clamp01(c.atrRatio - 1) * 3],
     [`OI ${c.oiChange1hPct >= 0 ? "+" : ""}${c.oiChange1hPct.toFixed(1)}% 1h / ${c.oiChange4hPct >= 0 ? "+" : ""}${c.oiChange4hPct.toFixed(1)}% 4h`, clamp01(Math.max(Math.abs(c.oiChange1hPct) / 2, Math.abs(c.oiChange4hPct) / 5)) * 2],
-    [`funding ${c.fundingPct.toFixed(3)}%`, clamp01(Math.abs(c.fundingPct) / 0.05) * 2],
+    [`funding ${c.fundingPct8h.toFixed(3)}%/8h`, clamp01(Math.abs(c.fundingPct8h) / 0.05) * 2],
     [`long/short ${c.longShortRatio.toFixed(2)}`, c.longShortRatio > 0 ? clamp01(Math.abs(Math.log(c.longShortRatio)) / Math.log(2)) * 1.5 : 0],
     [`liquidations ${c.liqBurst.toFixed(1)}x normal`, clamp01((c.liqBurst - 1) / 3) * 1.5],
     [`ESTIMATED cluster ${c.heatmapDistancePct?.toFixed(2) ?? "?"}% away`, c.heatmapDistancePct === undefined ? 0 : clamp01(1 - c.heatmapDistancePct) * 0.5],

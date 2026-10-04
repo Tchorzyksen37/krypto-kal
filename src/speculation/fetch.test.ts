@@ -7,7 +7,7 @@ import type { FuturesCandle, FuturesFill } from "../providers/kraken/kraken-futu
 import { setLogLevel } from "../core/logger.ts";
 import { TradeStore } from "../trading/trade-store.ts";
 import { candleRanges, fetchCandles, fillsFrom, gatherInput, type CandleSource } from "./fetch.ts";
-import type { Bet, LoggedBet } from "./types.ts";
+import type { Bet, LoggedBet, ReportLogEntry } from "./types.ts";
 
 setLogLevel("error");
 
@@ -48,6 +48,20 @@ describe("candleRanges", () => {
     assert.deepEqual(r.get("PF_XRPUSD"), [{ from: T0 - 60, to: T0 + 121 * 60 }, { from: T0 + 599 * 60, to: T0 + 650 * 60 }]);
     assert.equal(r.has("PF_XBTUSD"), false);
     assert.ok(r.has("PF_ETHUSD"));
+  });
+
+  test("adds the window of every finished, unscored report for each of its symbols", () => {
+    const report = (window: [string, string], outcome = false): ReportLogEntry => ({
+      report: "r", window, generated: window[0], bias: { direction: "long", probability: 0.6 },
+      symbols: [{ symbol: "BTC", futures: "PF_XBTUSD", last: 1, atr_1h: 1 }],
+      ...(outcome ? { outcome: { symbols: [] } } : {}),
+    });
+    const r = candleRanges([], T0 + 600 * 60, [
+      report([iso(T0), iso(T0 + 240 * 60)]),
+      report([iso(T0 + 300 * 60), iso(T0 + 900 * 60)]), // not finished yet
+      report([iso(T0 - 600 * 60), iso(T0 - 300 * 60)], true), // already scored
+    ]);
+    assert.deepEqual(r.get("PF_XBTUSD"), [{ from: T0 - 60, to: T0 + 241 * 60 }]);
   });
 
   test("a bet in the future needs nothing yet", () => {

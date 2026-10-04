@@ -6,8 +6,8 @@ import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, test } from "node:test";
-import { DEFAULT_CHECK, biasError, breakEven, expectedR, feeR, upsertReportBets, fmtPrice, patchBias, patchReport, renderBestBets, renderBias, runCheck, validateBets } from "./check.ts";
-import type { BetInput, LoggedBet, ReportMeta } from "./types.ts";
+import { DEFAULT_CHECK, type MarketSource, biasError, renderVerification, verifyPrices, breakEven, expectedR, feeR, upsertReportBets, upsertReportEntry, fmtPrice, patchBias, patchReport, renderBestBets, renderBias, runCheck, validateBets } from "./check.ts";
+import type { BetInput, LoggedBet, ReportLogEntry, ReportMeta } from "./types.ts";
 
 const meta = (bets: BetInput[], over: Partial<ReportMeta> = {}): ReportMeta => ({
   generated: "2026-10-03T13:52:00Z",
@@ -339,10 +339,90 @@ describe("runCheck (files)", () => {
     assert.equal(out.find((x) => x.id === b.id)!.entry, 2.39); // frozen: the scored bet wins
   });
 
+  test("records the report's bias in reports-log.json and replaces it on a rerun until it is scored", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spec-check-"));
+    const day = join(root, "2026-10-03");
+    await mkdir(day, { recursive: true });
+    const metaPath = join(day, "1400Z.meta.json");
+    await writeFile(metaPath, JSON.stringify(meta([xrpLong])), "utf8");
+    await runCheck(metaPath);
+    await writeFile(metaPath, JSON.stringify(meta([xrpLong], { bias: { direction: "short", probability: 0.55 } })), "utf8");
+    await runCheck(metaPath);
+    const reports = JSON.parse(await readFile(join(root, "reports-log.json"), "utf8")) as ReportLogEntry[];
+    assert.equal(reports.length, 1);
+    assert.equal(reports[0]!.bias.direction, "short");
+    assert.deepEqual(reports[0]!.symbols.find((x) => x.symbol === "XRP"), { symbol: "XRP", futures: "PF_XRPUSD", last: 2.4, atr_1h: 0.03, bias: "long" });
+
+    const scored = [{ ...reports[0]!, outcome: { symbols: [] } }];
+    assert.equal(upsertReportEntry(scored, meta([], { bias: { direction: "long", probability: 0.9 } }), reports[0]!.report), scored);
+  });
+
   test("rejects a meta file without the required arrays", async () => {
     const root = await mkdtemp(join(tmpdir(), "spec-check-"));
     const p = join(root, "x.meta.json");
     await writeFile(p, "{}", "utf8");
     await assert.rejects(() => runCheck(p), /needs symbols/);
+  });
+});
+
+describe("price verification", () => {
+  const NOW = Date.parse("2026-10-03T13:52:00Z") / 1000;
+  const hourly = (price: number, range: number) =>
+    Array.from({ length: 30 }, (_, i) => ({ t: NOW - (30 - i) * 3600, o: price, h: price + range / 2, l: price - range / 2, c: price, v: 1 }));
+  const market = (prices: Record<string, number>, ranges: Record<string, number>, fail?: "tickers" | "candles"): MarketSource => ({
+    async tickers(symbols) {
+      if (fail === "tickers") throw new Error("HTTP 503");
+      return symbols.filter((s) => prices[s] !== undefined).map((s) => ({
+        symbol: s, last: prices[s]!, markPrice: prices[s]!, bid: prices[s]! * 0.9999, ask: prices[s]! * 1.0001,
+        vol24h: 0, openInterest: 0, suspended: false,
+      }));
+    },
+    async candles(symbol) {
+      if (fail === "candles") throw new Error("HTTP 500");
+      return { candles: hourly(prices[symbol] ?? 1, ranges[symbol] ?? 0.01) };
+    },
+  });
+
+  test("replaces the model's last price, ATR and spread with measured ones", async () => {
+    const m = await verifyPrices(meta([xrpLong]), market({ PF_XRPUSD: 2.4, PF_XBTUSD: 65000, PF_ETHUSD: 3000 }, { PF_XRPUSD: 0.03 }), NOW);
+    const xrp = m.symbols.find((s) => s.symbol === "XRP")!;
+    assert.equal(xrp.last, 2.4);
+    assert.equal(xrp.atr_1h, 0.03);
+    assert.equal(xrp.spread_bps, 2);
+    assert.equal(m.verification!.find((c) => c.symbol === "XRP")!.last_diff_pct, 0);
+  });
+
+  test("a wrong model price is corrected before the bets are checked, and flagged in the note", async () => {
+    // the model thought XRP was 2.40; the market is at 2.30, so the 2.39 long limit is above the market and would fill at once
+    const m = await verifyPrices(meta([xrpLong]), market({ PF_XRPUSD: 2.3, PF_XBTUSD: 65000, PF_ETHUSD: 3000 }, { PF_XRPUSD: 0.03 }), NOW);
+    const r = validateBets(m);
+    assert.equal(r.bets.length, 0);
+    assert.match(r.dropped[0]!.reason, /long limit above the last price 2.3/);
+    const text = renderBestBets(r, m);
+    assert.match(text, /model last 2.4 vs market 2.3 \(4.35%\)/);
+    assert.match(text, /measured at 13:52Z/);
+  });
+
+  test("a failed measurement keeps the model's numbers and says so", async () => {
+    const m = await verifyPrices(meta([xrpLong]), market({}, {}, "tickers"), NOW);
+    assert.equal(m.symbols.find((s) => s.symbol === "XRP")!.last, 2.4);
+    assert.match(m.verification![0]!.error!, /HTTP 503/);
+    assert.match(renderVerification(m.verification).join("\n"), /XRP: NOT verified \(HTTP 503/);
+  });
+
+  test("without a market source the note warns that prices were not checked", () => {
+    assert.match(renderVerification(undefined).join("\n"), /NOT checked against the market/);
+  });
+
+  test("runCheck with a market source writes the verification into the meta file", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spec-verify-"));
+    const day = join(root, "2026-10-03");
+    await mkdir(day, { recursive: true });
+    const metaPath = join(day, "1400Z.meta.json");
+    await writeFile(metaPath, JSON.stringify(meta([xrpLong])), "utf8");
+    await runCheck(metaPath, {}, market({ PF_XRPUSD: 2.4, PF_XBTUSD: 65000, PF_ETHUSD: 3000 }, { PF_XRPUSD: 0.03 }));
+    const saved = JSON.parse(await readFile(metaPath, "utf8")) as ReportMeta;
+    assert.equal(saved.verification?.length, 3);
+    assert.equal(saved.validated?.length, 1);
   });
 });

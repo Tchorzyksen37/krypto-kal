@@ -45,6 +45,22 @@ export interface ReportMeta {
   // Written back by the checker:
   validated?: Bet[];
   dropped?: DroppedBet[];
+  verification?: PriceCheck[];
+}
+
+// The checker's comparison of the model's numbers with Kraken Futures at check time.
+export interface PriceCheck {
+  symbol: string;
+  futures: string;
+  checkedAt: string; // ISO
+  model_last: number;
+  model_atr_1h: number;
+  measured_last?: number;
+  measured_atr_1h?: number;
+  spread_bps?: number;
+  last_diff_pct?: number; // (model - measured) / measured
+  atr_diff_pct?: number;
+  error?: string; // measurement failed: the model's numbers were kept, unverified
 }
 
 // A bet that passed validation.
@@ -118,4 +134,35 @@ export interface LoggedBet extends Bet {
   generated: string;
   hypothetical?: Hypothetical; // set once final
   actual?: Actual;
+}
+
+// ---- bias scoring ----
+
+export type MoveResult = "up" | "down" | "flat";
+
+export interface SymbolBiasOutcome {
+  symbol: string;
+  open: number; // first trade of the window
+  close: number; // last close before the window ends
+  movePct: number;
+  deadZonePct: number; // moves smaller than this count as flat
+  result: MoveResult;
+  lean?: Direction;
+  correct?: boolean; // only when a lean was stated
+}
+
+export interface BiasOutcome {
+  symbols: SymbolBiasOutcome[];
+  headline?: { symbol: string; direction: Direction; probability?: number; result: MoveResult; correct: boolean };
+}
+
+// One entry per report in reports-log.json, written by the checker, scored by the scorer.
+export interface ReportLogEntry {
+  report: string;
+  session?: string;
+  window: [string, string];
+  generated: string;
+  bias: Bias;
+  symbols: { symbol: string; futures: string; last: number; atr_1h: number; bias?: Direction }[];
+  outcome?: BiasOutcome;
 }

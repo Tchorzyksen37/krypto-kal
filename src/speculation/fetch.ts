@@ -12,7 +12,7 @@ import { syncFills, type FillSource } from "../trading/futures-pnl.ts";
 import type { FuturesCandle } from "../providers/kraken/kraken-futures-client.ts";
 import type { TradeStore } from "../trading/trade-store.ts";
 import type { ScoreInput } from "./score.ts";
-import type { Candle, Fill, LoggedBet } from "./types.ts";
+import type { Candle, Fill, LoggedBet, ReportLogEntry } from "./types.ts";
 
 const MINUTE = 60;
 const PAGE_MINUTES = 2000; // the charts API returns at most 2000 candles per call
@@ -30,15 +30,18 @@ export interface Range {
 const isFinal = (b: LoggedBet) => b.hypothetical !== undefined && b.hypothetical.status !== "open";
 
 // Candle ranges still needed per futures contract: from each unresolved bet's fill start to its latest close
-// (capped at now), with overlapping ranges merged.
-export function candleRanges(log: LoggedBet[], nowSec: number): Map<string, Range[]> {
+// and over each finished, unscored report window (for the bias), capped at now, with overlapping ranges merged.
+export function candleRanges(log: LoggedBet[], nowSec: number, reports: ReportLogEntry[] = []): Map<string, Range[]> {
   const raw = new Map<string, Range[]>();
-  for (const b of log) {
-    if (isFinal(b)) continue;
-    const from = Math.floor(Date.parse(b.fill_from) / 1000 / MINUTE) * MINUTE - MINUTE;
-    const to = Math.min(nowSec, Math.ceil(Date.parse(b.latest_close) / 1000 / MINUTE) * MINUTE + MINUTE);
-    if (to <= from) continue;
-    raw.set(b.futures, [...(raw.get(b.futures) ?? []), { from, to }]);
+  const add = (symbol: string, fromIso: string, toIso: string) => {
+    const from = Math.floor(Date.parse(fromIso) / 1000 / MINUTE) * MINUTE - MINUTE;
+    const to = Math.min(nowSec, Math.ceil(Date.parse(toIso) / 1000 / MINUTE) * MINUTE + MINUTE);
+    if (to > from) raw.set(symbol, [...(raw.get(symbol) ?? []), { from, to }]);
+  };
+  for (const b of log) if (!isFinal(b)) add(b.futures, b.fill_from, b.latest_close);
+  for (const r of reports) {
+    if (r.outcome || Date.parse(r.window[1]) / 1000 > nowSec) continue;
+    for (const s of r.symbols) add(s.futures, r.window[0], r.window[1]);
   }
   const merged = new Map<string, Range[]>();
   for (const [symbol, ranges] of raw) {
@@ -81,10 +84,12 @@ export interface LiveDeps {
   fills?: { source: FillSource; store: TradeStore }; // absent without read-only keys: only hypothetical outcomes
 }
 
-export async function gatherInput(log: LoggedBet[], nowSec: number, deps: LiveDeps): Promise<{ input: ScoreInput; warnings: string[] }> {
+export async function gatherInput(
+  log: LoggedBet[], nowSec: number, deps: LiveDeps, reports: ReportLogEntry[] = [],
+): Promise<{ input: ScoreInput; warnings: string[] }> {
   const warnings: string[] = [];
   const candles: Record<string, Candle[]> = {};
-  for (const [symbol, ranges] of candleRanges(log, nowSec)) {
+  for (const [symbol, ranges] of candleRanges(log, nowSec, reports)) {
     const all: Candle[] = [];
     for (const r of ranges) {
       try {
@@ -107,13 +112,13 @@ export async function gatherInput(log: LoggedBet[], nowSec: number, deps: LiveDe
 }
 
 // Production wiring: the public futures client for candles, the read-only keys and the shared cache DB for fills.
-export async function liveInput(log: LoggedBet[], nowSec: number, env: NodeJS.ProcessEnv = process.env) {
+export async function liveInput(log: LoggedBet[], nowSec: number, env: NodeJS.ProcessEnv = process.env, reports: ReportLogEntry[] = []) {
   const { KrakenFuturesClient } = await import("../providers/kraken/kraken-futures-client.ts");
   const { TradeStore } = await import("../trading/trade-store.ts");
   const client = new KrakenFuturesClient({ apiKey: env.KRAKEN_FUTURES_RO_API_KEY ?? "", apiSecret: env.KRAKEN_FUTURES_RO_API_SECRET ?? "" });
   const store = client.hasCredentials ? new TradeStore(env.CACHE_DB_PATH ?? join(homedir(), ".krypto-kal", "cache.db")) : undefined;
   try {
-    return await gatherInput(log, nowSec, { candles: client, ...(store ? { fills: { source: client, store } } : {}) });
+    return await gatherInput(log, nowSec, { candles: client, ...(store ? { fills: { source: client, store } } : {}) }, reports);
   } finally {
     store?.close();
   }

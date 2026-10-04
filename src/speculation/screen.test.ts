@@ -16,7 +16,7 @@ const cand = (symbol: string, over: Partial<Candidate> = {}): Candidate => ({
   atrRatio: 1,
   oiChange1hPct: 0,
   oiChange4hPct: 0,
-  fundingPct: 0,
+  fundingPct8h: 0,
   longShortRatio: 1,
   liqBurst: 1,
   ...over,
@@ -26,7 +26,7 @@ describe("setupScore", () => {
   test("is zero for a calm market and grows with each signal", () => {
     assert.equal(setupScore(cand("A")).score, 0);
     assert.equal(setupScore(cand("A")).reason, "no strong signal");
-    const hot = setupScore(cand("A", { atrRatio: 2, oiChange1hPct: 3, fundingPct: 0.05, liqBurst: 4 }));
+    const hot = setupScore(cand("A", { atrRatio: 2, oiChange1hPct: 3, fundingPct8h: 0.05, liqBurst: 4 }));
     assert.ok(hot.score > 6);
     assert.match(hot.reason, /ATR 2\.0x/);
   });
@@ -36,7 +36,7 @@ describe("setupScore", () => {
   });
 
   test("never exceeds the sum of weights", () => {
-    const max = setupScore(cand("A", { atrRatio: 99, oiChange1hPct: 99, oiChange4hPct: 99, fundingPct: 9, longShortRatio: 99, liqBurst: 99, heatmapDistancePct: 0, xMentions: 99 }));
+    const max = setupScore(cand("A", { atrRatio: 99, oiChange1hPct: 99, oiChange4hPct: 99, fundingPct8h: 9, longShortRatio: 99, liqBurst: 99, heatmapDistancePct: 0, xMentions: 99 }));
     assert.ok(max.score <= 11 + 1e-9);
   });
 });
@@ -57,7 +57,7 @@ describe("screen", () => {
     cand("BTC"),
     cand("ETH"),
     cand("XRP"),
-    cand("SOL", { atrRatio: 2, fundingPct: 0.04 }),
+    cand("SOL", { atrRatio: 2, fundingPct8h: 0.04 }),
     cand("DOGE", { oiChange1hPct: 2.5, liqBurst: 3 }),
     cand("ADA", { atrRatio: 1.2 }),
     cand("AVAX", { atrRatio: 1.1 }),
