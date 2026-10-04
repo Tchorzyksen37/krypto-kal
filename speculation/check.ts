@@ -21,6 +21,8 @@ export interface CheckOptions {
   entryDeadlineMinutes: number;
   minTtl: number;
   maxTtl: number;
+  maxFeeR: number; // round-trip fees may cost at most this fraction of the risk
+  minEdgeR: number; // expected value per bet, in R after fees, must be above this
 }
 
 export const DEFAULT_CHECK: CheckOptions = {
@@ -33,6 +35,24 @@ export const DEFAULT_CHECK: CheckOptions = {
   entryDeadlineMinutes: 30,
   minTtl: 5,
   maxTtl: 60,
+  maxFeeR: 0.2,
+  minEdgeR: 0,
+};
+
+// Round-trip fee in units of risk (taker on both legs: the conservative case).
+export const feeR = (b: BetInput, feeBps: number) => (2 * feeBps * b.entry) / 10_000 / Math.abs(b.entry - b.stop_loss);
+
+// Expected value in R, treating the bet as binary (TP with `probability`, otherwise SL), after fees.
+// Equivalent to "probability beats the break-even rate 1 / (1 + R:R)". Time-outs make the real result less extreme.
+export const expectedR = (b: BetInput, feeBps: number) => {
+  const rr = Math.abs(b.take_profit - b.entry) / Math.abs(b.entry - b.stop_loss);
+  return b.probability * rr - (1 - b.probability) - feeR(b, feeBps);
+};
+
+// The win rate a bet needs to break even after fees: p·RR − (1 − p) − fee = 0.
+export const breakEven = (b: BetInput, feeBps: number) => {
+  const rr = Math.abs(b.take_profit - b.entry) / Math.abs(b.entry - b.stop_loss);
+  return (1 + feeR(b, feeBps)) / (1 + rr);
 };
 
 export interface CheckResult {
@@ -60,6 +80,8 @@ function reasonToDrop(b: BetInput, s: MetaSymbol | undefined, o: CheckOptions): 
   const long = b.side === "long";
   const ordered = long ? b.stop_loss < b.entry && b.entry < b.take_profit : b.take_profit < b.entry && b.entry < b.stop_loss;
   if (!ordered) return long ? "long needs SL < entry < TP" : "short needs TP < entry < SL";
+  // Entries are limit orders that wait for a touch: a long limit above the market (or a short below) would fill at once.
+  if (long ? b.entry > s.last : b.entry < s.last) return `${b.side} limit ${long ? "above" : "below"} the last price ${s.last} would fill immediately (not a limit entry)`;
   const dev = Math.abs(b.entry - s.last) / s.last;
   if (dev > o.maxEntryDeviation) return `entry ${(dev * 100).toFixed(2)}% away from last price (max ${(o.maxEntryDeviation * 100).toFixed(2)}%)`;
   const risk = Math.abs(b.entry - b.stop_loss);
@@ -68,8 +90,14 @@ function reasonToDrop(b: BetInput, s: MetaSymbol | undefined, o: CheckOptions): 
   if (s.atr_1h > 0 && risk < minStop) return `stop inside noise (${(risk / s.atr_1h).toFixed(2)} ATR < ${(minStop / s.atr_1h).toFixed(2)})`;
   const costFrac = (2 * o.feeBps + (s.spread_bps ?? 0)) / 10_000;
   if (reward / b.entry < o.costMultiple * costFrac) return `take profit does not clear costs (needs ${(o.costMultiple * costFrac * 100).toFixed(3)}%)`;
+  const fr = feeR(b, o.feeBps);
+  if (fr > o.maxFeeR) return `fees cost ${fr.toFixed(2)}R per round trip (max ${o.maxFeeR}R): stop too tight for the fees`;
   if (reward / risk < o.minRewardRisk) return `reward:risk ${(reward / risk).toFixed(2)} < ${o.minRewardRisk}`;
   if (b.ttl_minutes < o.minTtl || b.ttl_minutes > o.maxTtl) return `ttl ${b.ttl_minutes} outside ${o.minTtl}..${o.maxTtl} min`;
+  const ev = expectedR(b, o.feeBps);
+  if (ev <= o.minEdgeR) {
+    return `no edge: probability ${Math.round(b.probability * 100)}% is below the break-even ${Math.round(breakEven(b, o.feeBps) * 100)}% for this R:R after fees (EV ${ev.toFixed(2)}R)`;
+  }
   return undefined;
 }
 
@@ -86,7 +114,7 @@ export function validateBets(meta: ReportMeta, options: Partial<CheckOptions> = 
   const o = optionsFor(meta, options);
   const bySymbol = new Map(meta.symbols.map((s) => [s.symbol, s]));
   const dropped: DroppedBet[] = [];
-  const ok: (BetInput & { rr: number; score: number })[] = [];
+  const ok: (BetInput & { rr: number; score: number })[] = []; // score = expected R after fees
 
   for (const b of meta.bets) {
     const reason = reasonToDrop(b, bySymbol.get(b.symbol), o);
@@ -95,7 +123,7 @@ export function validateBets(meta: ReportMeta, options: Partial<CheckOptions> = 
       continue;
     }
     const rr = Math.abs(b.take_profit - b.entry) / Math.abs(b.entry - b.stop_loss);
-    ok.push({ ...b, rr, score: b.probability * rr });
+    ok.push({ ...b, rr, score: expectedR(b, o.feeBps) });
   }
 
   ok.sort((a, b) => b.score - a.score);
@@ -126,6 +154,8 @@ export function validateBets(meta: ReportMeta, options: Partial<CheckOptions> = 
       id: `${prefix}-${b.symbol}-${i + 1}`,
       futures: bySymbol.get(b.symbol)!.futures,
       rr: Math.round(b.rr * 100) / 100,
+      ev_r: Math.round(b.score * 100) / 100,
+      break_even: Math.round(breakEven(b, o.feeBps) * 1000) / 1000,
       fill_from: new Date(start).toISOString(),
       entry_deadline: new Date(deadline).toISOString(),
       latest_close: new Date(deadline + b.ttl_minutes * MIN).toISOString(),
@@ -147,12 +177,12 @@ export function renderBestBets(result: CheckResult, meta: ReportMeta): string {
     lines.push("> [!note] No bet this session. Nothing passed validation, or nothing had an edge worth stating.", "");
   } else {
     lines.push(
-      "| # | Symbol | Side | Entry (limit) | SL | TP | Fill by | Hold max | Latest close | P | R:R |",
-      "|---|---|---|---|---|---|---|---|---|---|---|",
+      "| # | Symbol | Side | Entry (limit) | SL | TP | Fill by | Hold max | Latest close | P | Break-even | R:R | EV |",
+      "|---|---|---|---|---|---|---|---|---|---|---|---|---|",
     );
     result.bets.forEach((b, i) =>
       lines.push(
-        `| ${i + 1} | ${b.symbol} | ${b.side} | ${fmtPrice(b.entry)} | ${fmtPrice(b.stop_loss)} | ${fmtPrice(b.take_profit)} | ${clock(Date.parse(b.entry_deadline))} | ${b.ttl_minutes} min | ${clock(Date.parse(b.latest_close))} | ${Math.round(b.probability * 100)}% | ${b.rr.toFixed(2)} |`,
+        `| ${i + 1} | ${b.symbol} | ${b.side} | ${fmtPrice(b.entry)} | ${fmtPrice(b.stop_loss)} | ${fmtPrice(b.take_profit)} | ${clock(Date.parse(b.entry_deadline))} | ${b.ttl_minutes} min | ${clock(Date.parse(b.latest_close))} | ${Math.round(b.probability * 100)}% | ${Math.round(b.break_even * 100)}% | ${b.rr.toFixed(2)} | ${b.ev_r >= 0 ? "+" : ""}${b.ev_r.toFixed(2)}R |`,
       ),
     );
     lines.push("");
@@ -170,6 +200,9 @@ export function renderBestBets(result: CheckResult, meta: ReportMeta): string {
     lines.push("### Dropped bets", "");
     for (const d of result.dropped) lines.push(`- ${d.bet.symbol} ${d.bet.side}: ${d.reason}`);
     lines.push("");
+  }
+  if (result.bets.length > 0) {
+    lines.push("_Break-even is the win rate the bet needs after fees; P above it is the model's claimed edge. EV assumes TP or SL, nothing in between._", "");
   }
   lines.push(`_Speculation, not advice. Generated ${meta.generated}. The levels above were validated by code; the model's reasoning may still be wrong._`, "");
   return lines.join("\n");
@@ -251,6 +284,15 @@ export function optionsFromEnv(env: NodeJS.ProcessEnv = process.env): Partial<Ch
   return out;
 }
 
+// A rerun of the checker replaces this report's bets in the log, so corrected levels win. Bets that were
+// already scored (an outcome or a matched fill) are frozen: they are kept as they are and never overwritten.
+export function upsertReportBets(log: LoggedBet[], bets: Bet[], report: string, generated: string): LoggedBet[] {
+  const scored = (b: LoggedBet) => (b.hypothetical !== undefined && b.hypothetical.status !== "open") || b.actual !== undefined;
+  const kept = log.filter((b) => b.report !== report || scored(b));
+  const frozen = new Set(kept.map((b) => b.id));
+  return [...kept, ...bets.filter((b) => !frozen.has(b.id)).map((b) => ({ ...b, report, generated }))];
+}
+
 export async function runCheck(metaPath: string, options: Partial<CheckOptions> = {}): Promise<CheckResult> {
   const meta = JSON.parse(await readFile(metaPath, "utf8")) as ReportMeta;
   if (!Array.isArray(meta.symbols) || !Array.isArray(meta.bets) || !Array.isArray(meta.window)) {
@@ -269,9 +311,7 @@ export async function runCheck(metaPath: string, options: Partial<CheckOptions> 
 
   const logPath = join(dirname(dirname(metaPath)), "bets-log.json");
   const log: LoggedBet[] = existsSync(logPath) ? (JSON.parse(await readFile(logPath, "utf8")) as LoggedBet[]) : [];
-  const known = new Set(log.map((b) => b.id));
-  for (const b of result.bets) if (!known.has(b.id)) log.push({ ...b, report: mdPath, generated: meta.generated });
-  await writeFile(logPath, `${JSON.stringify(log, null, 2)}\n`, "utf8");
+  await writeFile(logPath, `${JSON.stringify(upsertReportBets(log, result.bets, mdPath, meta.generated), null, 2)}\n`, "utf8");
   return result;
 }
 

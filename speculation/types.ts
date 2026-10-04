@@ -54,6 +54,8 @@ export interface Bet extends BetInput {
   vs_bias?: "with" | "against" | "neutral"; // the bet's side relative to the symbol's bias
   futures: string;
   rr: number; // reward:risk
+  ev_r: number; // expected value per bet in R after fees (binary TP/SL approximation)
+  break_even: number; // win rate needed to break even after fees
   fill_from: string; // ISO, window start
   entry_deadline: string; // ISO, the bet is void if the entry is not touched by then
   latest_close: string; // ISO, entry_deadline + ttl: the latest moment the position can still be open
@@ -82,6 +84,7 @@ export interface Fill {
   size: number;
   price: number;
   ts: number; // epoch ms
+  fillType?: string; // "maker", "taker", ... (decides the fee)
 }
 
 export type ExitReason = "tp" | "sl" | "ttl" | "other";
@@ -99,6 +102,9 @@ export interface Hypothetical {
 export interface Actual {
   entryFill: number; // VWAP of the matched entry fill(s)
   entryAt: number; // epoch ms
+  entryFillId?: string;
+  exitFillId?: string;
+  feeR?: number; // fees of both legs in R (maker/taker from the fill type)
   slippagePct: number; // positive = worse than the suggested entry
   size: number;
   exitFill?: number;

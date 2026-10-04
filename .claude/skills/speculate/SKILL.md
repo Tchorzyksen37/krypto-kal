@@ -43,8 +43,10 @@ Schedule (local time Europe/Warsaw, routine fires 20 min before each window): 07
    its rank per hour. Say whether this session is a high- or low-volume one, which region dominates it, and
    which investor types (from step 1) are therefore most likely to be moving price. Footprints that our tools
    cannot measure (ETF flows, Korean premium, whale prints) go to UNKNOWN.
-4. **KNOWN**, per symbol: `coinalyze_current`; 5m and 1h OI, funding, predicted funding, long/short ratio,
-   liquidations; `kraken_ohlc` 1m / 5m / 1h; `kraken_order_book` (imbalance, spread). Global: `yahoo_quote`
+4. **KNOWN**, per symbol: `kraken_futures_candles` of the **PF_ contract** you would trade (1m / 5m / 1h): this is
+   the price for `last`, the 1h ATR and every level (entry, SL, TP), because bets are scored on futures prices, not
+   spot; `coinalyze_current`; 5m and 1h OI, funding, predicted funding, long/short ratio, liquidations;
+   `kraken_order_book` (imbalance, spread). Global: `yahoo_quote`
    for ES, NQ, DXY, US10Y, oil, and for the Asian session Nikkei, Hang Seng, USDJPY; `x_recent` for the last
    6 h; `brain_search` / `brain_read` of the wiki timeline; `kraken_futures_positions` for what the user holds.
 5. **UNKNOWN.** Always include: real liquidation levels, whale / market-maker intent, spoofed depth, news not
@@ -60,7 +62,12 @@ Schedule (local time Europe/Warsaw, routine fires 20 min before each window): 07
    2-4 scenarios (probabilities sum to 1), catalysts with time and direction, risks with what invalidates the
    call, and 0 to `maxBets` bets. Bets: `symbol, side, entry, stop_loss, take_profit, ttl_minutes, probability,
    rationale`. Within the session limits from step 1; stops outside noise (wider for longer holds);
-   take-profit clears round-trip fees. A bet against the stated bias must say why.
+   take-profit clears round-trip fees. A bet against the stated bias must say why. The checker drops a bet when:
+   - the probability does not beat break-even after fees, `p > (1 + fees in R) / (1 + R:R)` (about 33% at 2:1 is
+     what a coin-flip market gives; state a higher P only if you can say why);
+   - round-trip fees cost more than 0.2R (stop too tight for the price, typical for BTC);
+   - the limit is on the wrong side of the market: a long entry must be at or below `last`, a short at or above.
+     A breakout entry is not supported; express it as a pullback limit instead.
    **Night session:** the window is 10 hours, so each bet names the phase it targets (US wind-down, Asia open,
    HK/China open, Europe pre-open); prefer few, high reward:risk, limit-at-range-edge bets, wide stops.
 8. **Write the report** to `BRAIN/output/speculation/YYYY-MM-DD/HHMMZ.md` (HHMM = window start in UTC), with

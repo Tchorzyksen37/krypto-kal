@@ -157,6 +157,34 @@ describe("syncFills", () => {
     db.close();
   });
 
+  test("keeps the order id and maker/taker type, and backfills them into fills stored without", async () => {
+    const db = new TradeStore(":memory:");
+    db.saveFills([{ id: "a1", symbol: "PF_XBTUSD", side: "buy", size: 1, price: 100, ts: T0 }]); // as an older version stored it
+    await syncFills(fakeSource(history), db);
+    const byId = new Map(db.fills().map((f) => [f.id, f]));
+    assert.equal(byId.get("a1")!.fillType, "taker");
+    assert.equal(byId.get("a1")!.orderId, "o1");
+    assert.equal(byId.get("a2")!.orderId, "o2");
+    db.close();
+  });
+
+  test("migrates a database created before the order id and fill type columns", async () => {
+    const { mkdtemp } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const { DatabaseSync } = await import("node:sqlite");
+    const path = join(await mkdtemp(join(tmpdir(), "trade-store-")), "old.db");
+    const old = new DatabaseSync(path);
+    old.exec("CREATE TABLE futures_fills (fill_id TEXT PRIMARY KEY, ts INTEGER NOT NULL, symbol TEXT NOT NULL, side TEXT NOT NULL, size REAL NOT NULL, price REAL NOT NULL)");
+    old.exec(`INSERT INTO futures_fills VALUES ('x1', ${T0}, 'PF_XBTUSD', 'buy', 1, 100)`);
+    old.close();
+    const db = new TradeStore(path);
+    assert.deepEqual(db.fills(), [{ id: "x1", ts: T0, symbol: "PF_XBTUSD", side: "buy", size: 1, price: 100 }]);
+    db.saveFills([{ id: "x2", symbol: "PF_XBTUSD", side: "sell", size: 1, price: 101, ts: T0 + 1, orderId: "o9", fillType: "taker" }]);
+    assert.equal(db.fills({}, 1)[0]!.fillType, "taker");
+    db.close();
+  });
+
   test("stops when the cursor does not move", async () => {
     const db = new TradeStore(":memory:");
     const same = [apiFill(1, 0, "buy", 100), apiFill(2, 0, "sell", 100)];

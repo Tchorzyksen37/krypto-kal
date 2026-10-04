@@ -25,7 +25,7 @@ import { coinalyzeJobs, startCollector, yahooJobs, type CollectorJob } from "./c
 import { HistoryStore } from "./history-store.ts";
 import { estimateLiquidationHeatmap, type HeatmapBar } from "./liquidation-heatmap.ts";
 import { KRAKEN_OHLC_INTERVALS, KrakenClient } from "./kraken-client.ts";
-import { KrakenFuturesClient } from "./kraken-futures-client.ts";
+import { KRAKEN_FUTURES_RESOLUTIONS, KrakenFuturesClient } from "./kraken-futures-client.ts";
 import { report as pnlReport, syncFills } from "./futures-pnl.ts";
 import { TradeStore } from "./trade-store.ts";
 import { createLogger } from "./logger.ts";
@@ -552,6 +552,38 @@ function registerKraken(server: McpServer, client: KrakenClient) {
 
 // --- Kraken Futures (read-only; the client is created without trading) ---
 
+const FUTURES_RESOLUTION_SECONDS: Record<(typeof KRAKEN_FUTURES_RESOLUTIONS)[number], number> = {
+  "1m": 60, "5m": 300, "15m": 900, "30m": 1800, "1h": 3600, "4h": 14_400, "12h": 43_200, "1d": 86_400, "1w": 604_800,
+};
+
+// Public market data of the futures exchange: needs no keys, so it is registered whenever Kraken Futures is enabled.
+function registerKrakenFuturesMarket(server: McpServer, client: KrakenFuturesClient) {
+  server.registerTool(
+    "kraken_futures_candles",
+    {
+      description:
+        "[Kraken Futures] Trade-price OHLC candles of a futures contract (t = UNIX seconds, volume in contracts). " +
+        "Use this, not the spot kraken_ohlc, for prices of PF_ perpetuals. Goes back far (unlike spot's 720-candle limit): " +
+        "pass from/to for an older range. At most 2000 candles per call.",
+      inputSchema: {
+        symbol: z.string().describe('Futures contract, e.g. "PF_XBTUSD", "PF_ETHUSD", "PF_XRPUSD"'),
+        resolution: z.enum(KRAKEN_FUTURES_RESOLUTIONS).default("1h"),
+        from: z.string().datetime({ offset: true }).optional().describe("Start, ISO 8601. Default: `limit` candles before `to`"),
+        to: z.string().datetime({ offset: true }).optional().describe("End, ISO 8601. Default: now"),
+        limit: z.number().int().min(1).max(2000).default(200),
+      },
+    },
+    (args) =>
+      toResult("kraken_futures_candles", args, async () => {
+        const to = args.to ? Math.floor(Date.parse(args.to) / 1000) : Math.floor(Date.now() / 1000);
+        const from = args.from ? Math.floor(Date.parse(args.from) / 1000) : to - args.limit * FUTURES_RESOLUTION_SECONDS[args.resolution];
+        const res = await client.candles(args.symbol, args.resolution, { from, to });
+        const candles = args.from ? res.candles.slice(0, args.limit) : res.candles.slice(-args.limit);
+        return { symbol: args.symbol, resolution: args.resolution, candles, more: res.moreCandles || res.candles.length > candles.length };
+      }),
+  );
+}
+
 function registerKrakenFutures(server: McpServer, client: KrakenFuturesClient, trades: TradeStore) {
   const iso = z.string().datetime({ offset: true }).optional();
   const toMs = (v: string | undefined) => (v ? Date.parse(v) : undefined);
@@ -738,6 +770,7 @@ function buildServer(): McpServer {
   if (coinalyze) registerCoinalyze(server, coinalyze);
   if (yahoo) registerYahoo(server, yahoo);
   if (kraken) registerKraken(server, kraken);
+  if (krakenFutures) registerKrakenFuturesMarket(server, krakenFutures);
   if (krakenFutures?.hasCredentials) registerKrakenFutures(server, krakenFutures, tradeStore);
   if (x) registerX(server, x);
   registerBrain(server);

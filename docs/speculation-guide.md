@@ -3,10 +3,10 @@
 How to use the speculation reports, how to act on them, and what to expect from them.
 Design details: [superpowers/plans/2026-10-03-speculation-mode.md](superpowers/plans/2026-10-03-speculation-mode.md).
 
-> **Status (2026-10-04):** the support code (`speculation/`) and both skills exist and the offline tests pass, but the
-> mode has **not been run against the live tools yet**, and the review found bugs that are not fixed yet (see
-> [Known limitations](#known-limitations)). Until those are fixed, treat reports as a test run and do not size
-> positions on them.
+> **Status (2026-10-04):** the support code (`speculation/`) and both skills exist and the offline tests pass. The
+> checker and scoring bugs found in review are fixed, but the mode has **not been run against the live tools yet**
+> and some limitations remain (see [Known limitations](#known-limitations)). Treat the first reports as a test run
+> and do not size positions on them.
 
 ## 1. What it is
 
@@ -81,9 +81,12 @@ session reports on the running session; its bets can only fill from the moment i
    - **SL / TP:** set both as soon as you are filled.
    - **"Hold max"**: after the fill, close the position when this time runs out, even if neither SL nor TP was hit.
      "Latest close" is the latest possible moment (if you were filled right at the deadline).
+   - **Break-even / EV:** the win rate the bet needs after fees, and the expected result per bet if the model's P is
+     right. P minus break-even is the edge the model claims. Bets without a claimed edge are dropped.
    - **Counter-bias** warning: the bet goes against the symbol's stated lean. Be extra sceptical.
-   - **Dropped bets** are listed with the reason. They failed a rule (levels in the wrong order, too far from price,
-     stop inside normal noise, target not covering fees, reward:risk too low, hold too long).
+   - **Dropped bets** are listed with the reason. They failed a rule (levels in the wrong order, limit on the wrong
+     side of the market, too far from price, stop inside normal noise, target not covering fees, fees above 0.2R,
+     reward:risk too low, hold too long, no edge over break-even).
 4. **Night session:** you will be asleep, so you cannot close by hand at the hold limit. Either skip night bets, or
    place the entry, SL and TP as orders before bed and accept that the hold limit is not enforced. (A proper
    "orders-before-bed, close at 08:00" mode is planned; see limitations.)
@@ -95,14 +98,17 @@ session reports on the running session; its bets can only fill from the moment i
 
 ## 5. Scoring
 
-Once a day (or whenever you like), ask Claude "score the speculation bets" (skill `speculation-score`). It:
+Once a day (or whenever you like), ask Claude "score the speculation bets" (skill `speculation-score`), or run it
+yourself: `node --env-file-if-exists=.env speculation/score.ts <vault>/output/speculation`. It fetches the futures
+candles and your fills itself, and:
 
 - pulls your Kraken Futures fills and matches them to bets automatically (same contract and side, inside the bet's
   time window, entry price within 0.3%); fills that match no bet are listed separately; ambiguous matches are flagged,
   never guessed;
-- scores **every** bet, taken or not, against 1-minute candles (did the entry touch, then TP, SL or time-out first?).
-  This measures the speculation itself, separately from your execution;
-- scores the bets **you took** from your real fills: slippage, exit reason, result in R after fees;
+- scores **every** bet, taken or not, against 1-minute candles of the futures contract (did the entry touch, then TP,
+  SL or time-out first?). This measures the speculation itself, separately from your execution;
+- scores the bets **you took** from your real fills: slippage, exit reason, result in R after the real maker/taker
+  fees of your fills;
 - writes `output/speculation/YYYY-MM-DD/_day.md` and `output/speculation/_scorecard.md`.
 
 How to read the scorecard:
@@ -133,23 +139,20 @@ In this repo: `speculation/` (checker, screen, sessions, volume, scorer; `npm ru
 
 ## 7. Known limitations
 
-Found in review, **not fixed yet**. Until they are, use the reports as a test run only.
+Fixed on 2026-10-04: negative-expectancy bets, stops smaller than fees, limit entries on the wrong side of the market,
+stale levels in `bets-log.json` after a rerun, ranking that was not expected value, scoring on spot candles with a
+12-hour limit, and assumed instead of real maker/taker fees. Still open:
 
-- **Negative-expectancy bets can pass.** The checker does not yet require the stated probability to beat the
-  break-even rate, and its ranking is not true expected value. Check yourself: `probability > 1 / (1 + R:R)`.
-- **Stops can be smaller than fees.** A tight BTC stop can cost more in fees than the stop itself. Check that the stop
-  distance is at least about 5x the round-trip fee (0.1% of price at 5 bps per side).
-- **Limit entries on the wrong side of price are accepted.** A long "limit" above the market (or a short below) would
-  fill at once. Skip such bets.
-- **Re-running the checker keeps the old levels in `bets-log.json`.**
-- **Scoring data:** the scorer currently has to use spot candles, which only reach back 12 hours at 1-minute
-  resolution and differ slightly from futures prices. Score at least twice a day, and treat hypothetical results near
-  the entry price as approximate. A futures-candles tool is planned.
 - **Prices in the report are written by the model.** The checker trusts the last price and ATR it is given. Compare
   the entry with the live price before placing an order.
-- **The bias is stated but not scored yet**, and the calibration counts profitable time-outs as wins.
+- **The bias is stated but not scored yet**, and the calibration counts profitable time-outs as wins. There is no
+  "edge over chance" line in the scorecard yet; use the break-even column of each bet in the meantime.
 - **Session times assume summer offsets** in the descriptive text. In late October/early November and in March the
   US open shifts by an hour relative to Warsaw (e.g. 14:30 instead of 15:30 on 2026-10-27).
 - **"Who is trading" is a proxy.** Volume by hour comes from Kraken, which under-represents Asian exchanges, and
   clock time does not prove which region is trading.
-- **No guard against overlapping or correlated bets** across reports.
+- **No guard against overlapping or correlated bets** across reports, and the night session has no "orders before
+  bed" mode yet.
+- **Funding** paid or received while holding is not included in the R results.
+- **Fees** default to Kraken Futures base-tier rates (0.02% maker, 0.05% taker). If your tier differs, set
+  `SPECULATION_MAKER_FEE_BPS` / `SPECULATION_TAKER_FEE_BPS` (scoring) and `SPECULATION_FEE_BPS` (checker).

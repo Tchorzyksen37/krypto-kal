@@ -17,7 +17,7 @@ const MS = (min: number) => (T0 + min * 60) * 1000;
 
 const long: Bet = {
   id: "20261003-14Z-XRP-1", symbol: "XRP", futures: "PF_XRPUSD", side: "long",
-  entry: 2.39, stop_loss: 2.36, take_profit: 2.45, ttl_minutes: 45, probability: 0.4, rr: 2,
+  entry: 2.39, stop_loss: 2.36, take_profit: 2.45, ttl_minutes: 45, probability: 0.4, rr: 2, ev_r: 0.12, break_even: 0.36,
   fill_from: "2026-10-03T14:00:00.000Z", entry_deadline: "2026-10-03T14:30:00.000Z", latest_close: "2026-10-03T15:15:00.000Z",
 };
 const short: Bet = {
@@ -43,6 +43,15 @@ describe("resolveBet", () => {
     assert.equal(h.exitPrice, 2.45);
     assert.equal(h.r, 2);
     assert.ok(h.netR! < 2 && h.netR! > 1.9);
+  });
+
+  test("fees per leg: maker entry, maker take-profit, taker stop", () => {
+    const tp = resolveBet(long, candles({ 5: [2.389, 2.395], 12: [2.4, 2.452] }, 80));
+    assert.equal(tp.netR, Math.round((2 - (2.39 * 2 + 2.45 * 2) / 10_000 / 0.03) * 1000) / 1000);
+    const sl = resolveBet(long, candles({ 5: [2.389, 2.395], 9: [2.355, 2.4] }, 80));
+    assert.equal(sl.netR, Math.round((-1 - (2.39 * 2 + 2.36 * 5) / 10_000 / 0.03) * 1000) / 1000);
+    const free = resolveBet(long, candles({ 5: [2.389, 2.395], 9: [2.355, 2.4] }, 80), { makerFeeBps: 0, takerFeeBps: 0 });
+    assert.equal(free.netR, -1);
   });
 
   test("stop loss after the touch", () => {
@@ -152,6 +161,32 @@ describe("fills", () => {
     assert.equal(actualOutcome(long, { betId: long.id, entry: fill("e", { min: 6 }) }).exitReason, undefined);
   });
 
+  test("actual fees follow the fill type; an unknown type counts as taker", () => {
+    const m = (entryType?: string, exitType?: string) => ({
+      betId: long.id,
+      entry: fill("e", { min: 6, price: 2.39, ...(entryType ? { fillType: entryType } : {}) }),
+      exit: fill("x", { min: 20, side: "sell", price: 2.45, ...(exitType ? { fillType: exitType } : {}) }),
+    });
+    const makerBoth = actualOutcome(long, m("maker", "maker"));
+    const takerBoth = actualOutcome(long, m("taker", "taker"));
+    const unknown = actualOutcome(long, m());
+    assert.equal(makerBoth.feeR, Math.round(((2.39 * 2 + 2.45 * 2) / 10_000 / 0.03) * 1000) / 1000);
+    assert.equal(takerBoth.feeR, Math.round(((2.39 * 5 + 2.45 * 5) / 10_000 / 0.03) * 1000) / 1000);
+    assert.equal(unknown.feeR, takerBoth.feeR);
+    assert.ok(makerBoth.netR! > takerBoth.netR!);
+    assert.equal(makerBoth.entryFillId, "e");
+    assert.equal(makerBoth.exitFillId, "x");
+  });
+
+  test("a grouped order is maker only if every part was", () => {
+    const parts = (t2: string) => groupFills([
+      fill("a", { min: 5, orderId: "o1", fillType: "maker" }),
+      fill("b", { min: 6, orderId: "o1", fillType: t2 }),
+    ])[0]!.fillType;
+    assert.equal(parts("maker"), "maker");
+    assert.equal(parts("taker"), "taker");
+  });
+
   test("short slippage is positive when filled below the suggested entry", () => {
     const a = actualOutcome(short, { betId: short.id, entry: fill("e", { min: 6, side: "sell", price: 2.405 }) });
     assert.equal(a.slippagePct, 0.207);
@@ -217,6 +252,13 @@ describe("scoreLog and rendering", () => {
     assert.deepEqual(second.log, first.log);
   });
 
+  test("fills matched in an earlier run are not reported as stray in the next one", () => {
+    const first = scoreLog([logged(long)], input());
+    assert.deepEqual(first.unmatchedFills, []);
+    const second = scoreLog(first.log, input());
+    assert.deepEqual(second.unmatchedFills, []);
+  });
+
   test("a bet that is not finished yet stays pending and unmatched", () => {
     const r = scoreLog([logged(long)], input({ nowSec: T0 + 20 * 60, candles: { PF_XRPUSD: candles({}, 15) } }));
     assert.equal(r.log[0]!.hypothetical?.status, "open");
@@ -247,8 +289,8 @@ describe("scoreLog and rendering", () => {
   });
 
   test("normalizes the raw tool shapes", () => {
-    const f = normalizeFill({ fill_id: "f1", order_id: "o1", symbol: "PF_XRPUSD", side: "sell", size: 5, price: "2.4", fillTime: "2026-10-03T14:06:00.000Z" } as Record<string, unknown>);
-    assert.deepEqual([f.id, f.orderId, f.ts, f.price], ["f1", "o1", MS(6), 2.4]);
+    const f = normalizeFill({ fill_id: "f1", order_id: "o1", symbol: "PF_XRPUSD", side: "sell", size: 5, price: "2.4", fillTime: "2026-10-03T14:06:00.000Z", fillType: "maker" } as Record<string, unknown>);
+    assert.deepEqual([f.id, f.orderId, f.ts, f.price, f.fillType], ["f1", "o1", MS(6), 2.4, "maker"]);
     const c = normalizeCandle({ time: (T0 + 60) * 1000, open: "1", high: "2", low: "0.5", close: "1.5" });
     assert.deepEqual(c, { t: T0 + 60, o: 1, h: 2, l: 0.5, c: 1.5 });
     assert.throws(() => normalizeFill({ symbol: "x" }), /unreadable fill/);

@@ -6,7 +6,7 @@ import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, test } from "node:test";
-import { DEFAULT_CHECK, biasError, fmtPrice, patchBias, patchReport, renderBestBets, renderBias, runCheck, validateBets } from "./check.ts";
+import { DEFAULT_CHECK, biasError, breakEven, expectedR, feeR, upsertReportBets, fmtPrice, patchBias, patchReport, renderBestBets, renderBias, runCheck, validateBets } from "./check.ts";
 import type { BetInput, LoggedBet, ReportMeta } from "./types.ts";
 
 const meta = (bets: BetInput[], over: Partial<ReportMeta> = {}): ReportMeta => ({
@@ -40,7 +40,7 @@ describe("validateBets", () => {
   });
 
   test("keeps a sound short", () => {
-    const r = validateBets(meta([{ symbol: "BTC", side: "short", entry: 65100, stop_loss: 65400, take_profit: 64500, ttl_minutes: 30, probability: 0.35 }]));
+    const r = validateBets(meta([{ symbol: "BTC", side: "short", entry: 65100, stop_loss: 65500, take_profit: 64300, ttl_minutes: 30, probability: 0.45 }]));
     assert.equal(r.bets.length, 1);
     assert.equal(r.bets[0]!.rr, 2);
   });
@@ -76,7 +76,7 @@ describe("validateBets", () => {
 
   test("one bet per symbol (best expected value wins) and a cap on the total", () => {
     const better = { ...xrpLong, probability: 0.6 };
-    const worse = { ...xrpLong, probability: 0.3 };
+    const worse = { ...xrpLong, probability: 0.45 };
     const r = validateBets(meta([worse, better]));
     assert.equal(r.bets.length, 1);
     assert.equal(r.bets[0]!.probability, 0.6);
@@ -89,6 +89,41 @@ describe("validateBets", () => {
     assert.equal(capped.dropped.length, 1);
     assert.match(capped.dropped[0]!.reason, /limit of 2/);
     assert.deepEqual(capped.bets.map((b) => b.id.slice(-1)), ["1", "2"]);
+  });
+
+  test("drops a bet whose probability does not beat break-even after fees", () => {
+    // R:R 1.5 at P 30%: EV = 0.45 - 0.70 - fees < 0
+    const neg = { ...xrpLong, stop_loss: 2.36, take_profit: 2.435, probability: 0.3 };
+    assert.match(reasons(meta([neg]))[0]!, /no edge: probability 30% is below the break-even 4\d%/);
+    assert.equal(validateBets(meta([{ ...neg, probability: 0.5 }])).bets.length, 1);
+  });
+
+  test("drops a stop so tight that fees eat more than 0.2R", () => {
+    // BTC $60 stop: round-trip taker fees are about $65, i.e. 1.08R
+    const m = meta([{ symbol: "BTC", side: "long", entry: 64990, stop_loss: 64930, take_profit: 65200, ttl_minutes: 30, probability: 0.6 }]);
+    assert.match(reasons(m)[0]!, /fees cost 1\.08R/);
+  });
+
+  test("a limit entry must wait for the market: long at or below last, short at or above", () => {
+    assert.match(reasons(meta([{ ...xrpLong, entry: 2.41, stop_loss: 2.38, take_profit: 2.47 }]))[0]!, /long limit above the last price/);
+    const short: BetInput = { symbol: "XRP", side: "short", entry: 2.39, stop_loss: 2.42, take_profit: 2.33, ttl_minutes: 30, probability: 0.5 };
+    assert.match(reasons(meta([short]))[0]!, /short limit below the last price/);
+    assert.equal(validateBets(meta([{ ...xrpLong, entry: 2.4, stop_loss: 2.37, take_profit: 2.46 }])).bets.length, 1); // at the last price is fine
+  });
+
+  test("ranks by expected value, not by probability x R:R", () => {
+    // p 0.2 x RR 5 ties p 0.5 x RR 2 on the old score, but EV is about 0R vs +0.5R
+    const longshot: BetInput = { symbol: "BTC", side: "long", entry: 64950, stop_loss: 64550, take_profit: 66950, ttl_minutes: 60, probability: 0.22 };
+    const solid: BetInput = { symbol: "ETH", side: "long", entry: 2995, stop_loss: 2965, take_profit: 3055, ttl_minutes: 60, probability: 0.5 };
+    const r = validateBets(meta([longshot, solid]));
+    assert.deepEqual(r.bets.map((b) => b.symbol), ["ETH", "BTC"]);
+    assert.ok(r.bets[0]!.ev_r > r.bets[1]!.ev_r);
+  });
+
+  test("fee, EV and break-even helpers agree", () => {
+    const b = { ...xrpLong, probability: breakEven(xrpLong, 5) };
+    assert.ok(Math.abs(expectedR(b, 5)) < 1e-12);
+    assert.ok(Math.abs(feeR(xrpLong, 5) - (2 * 5 * 2.39) / 10_000 / 0.03) < 1e-12);
   });
 
   test("randomized: no kept bet breaks ordering, deviation, R:R or ttl rules", () => {
@@ -113,6 +148,9 @@ describe("validateBets", () => {
         assert.ok(b.rr >= DEFAULT_CHECK.minRewardRisk - 1e-9);
         assert.ok(b.ttl_minutes >= DEFAULT_CHECK.minTtl && b.ttl_minutes <= DEFAULT_CHECK.maxTtl);
         assert.ok(b.probability > 0 && b.probability <= 1);
+        assert.ok(long ? b.entry <= last : b.entry >= last);
+        assert.ok(feeR(b, DEFAULT_CHECK.feeBps) <= DEFAULT_CHECK.maxFeeR + 1e-12);
+        assert.ok(expectedR(b, DEFAULT_CHECK.feeBps) > 0);
       }
     }
   });
@@ -137,7 +175,7 @@ describe("sessions", () => {
   test("the night session keeps at most 2 bets and wants reward:risk 1.5", () => {
     const m = nightMeta([{ ...xrpLong, take_profit: 2.41 }]); // R:R 0.67
     assert.match(validateBets(m).dropped[0]!.reason, /reward:risk .* < 1\.5/);
-    const btc: BetInput = { symbol: "BTC", side: "long", entry: 64950, stop_loss: 64300, take_profit: 66000, ttl_minutes: 120, probability: 0.4 };
+    const btc: BetInput = { symbol: "BTC", side: "long", entry: 64950, stop_loss: 64300, take_profit: 66000, ttl_minutes: 120, probability: 0.5 };
     const eth: BetInput = { symbol: "ETH", side: "long", entry: 2995, stop_loss: 2960, take_profit: 3060, ttl_minutes: 120, probability: 0.4 };
     const r = validateBets(nightMeta([{ ...xrpLong, take_profit: 2.47, ttl_minutes: 120 }, btc, eth]));
     assert.equal(r.bets.length, 2);
@@ -149,10 +187,11 @@ describe("sessions", () => {
   });
 
   test("longer holds need wider stops", () => {
-    // 0.0054 risk is 0.18 ATR: fine for a 60-minute hold, inside the noise for a 240-minute hold (needs 0.30 ATR)
-    const tight = { ...xrpLong, stop_loss: 2.3846, take_profit: 2.4108 + 0.02, ttl_minutes: 60 };
-    assert.equal(validateBets(nightMeta([tight])).dropped.length, 0);
-    assert.match(validateBets(nightMeta([{ ...tight, ttl_minutes: 240 }])).dropped[0]!.reason, /stop inside noise/);
+    // ATR 0.07: a 0.015 stop is 0.21 ATR, enough for a 60-minute hold (0.15) but not for 240 minutes (0.30)
+    const wide = (bets: BetInput[]): ReportMeta => ({ ...nightMeta(bets), symbols: [{ symbol: "XRP", futures: "PF_XRPUSD", last: 2.4, atr_1h: 0.07 }] });
+    const bet = { ...xrpLong, stop_loss: 2.375, take_profit: 2.43, ttl_minutes: 60 };
+    assert.equal(validateBets(wide([bet])).dropped.length, 0, JSON.stringify(validateBets(wide([bet])).dropped));
+    assert.match(validateBets(wide([{ ...bet, ttl_minutes: 240 }])).dropped[0]!.reason, /stop inside noise/);
   });
 
   test("a manual run after the window opened fills from the generation time", () => {
@@ -230,7 +269,7 @@ describe("rendering and patching", () => {
     const m = meta([xrpLong, { ...xrpLong, symbol: "DOGE" }]);
     const text = renderBestBets(validateBets(m), m);
     assert.match(text, /^## Best bets \(next 1h\)/);
-    assert.match(text, /\| 1 \| XRP \| long \| 2\.390 \| 2\.360 \| 2\.450 \| 14:30Z \| 45 min \| 15:15Z \| 40% \| 2\.00 \|/);
+    assert.match(text, /\| 1 \| XRP \| long \| 2\.390 \| 2\.360 \| 2\.450 \| 14:30Z \| 45 min \| 15:15Z \| 40% \| 36% \| 2\.00 \| \+0\.12R \|/);
     assert.match(text, /\[!tip\] 1\. XRP long/);
     assert.match(text, /### Dropped bets/);
     assert.match(text, /DOGE long: unknown symbol/);
@@ -274,6 +313,30 @@ describe("runCheck (files)", () => {
     const log = JSON.parse(await readFile(join(root, "bets-log.json"), "utf8")) as LoggedBet[];
     assert.equal(log.length, 1);
     assert.equal(log[0]!.id, "20261003-1400Z-XRP-1");
+  });
+
+  test("a rerun replaces this report's unscored bets, but never one already scored", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spec-check-"));
+    const day = join(root, "2026-10-03");
+    await mkdir(day, { recursive: true });
+    const metaPath = join(day, "1400Z.meta.json");
+    await writeFile(metaPath, JSON.stringify(meta([xrpLong])), "utf8");
+    await runCheck(metaPath);
+    await writeFile(metaPath, JSON.stringify(meta([{ ...xrpLong, entry: 2.395, stop_loss: 2.37 }])), "utf8");
+    await runCheck(metaPath);
+    const log = JSON.parse(await readFile(join(root, "bets-log.json"), "utf8")) as LoggedBet[];
+    assert.equal(log.length, 1);
+    assert.deepEqual([log[0]!.entry, log[0]!.stop_loss], [2.395, 2.37]);
+  });
+
+  test("upsertReportBets keeps other reports and frozen bets", () => {
+    const b = validateBets(meta([xrpLong])).bets[0]!;
+    const other: LoggedBet = { ...b, id: "other", report: "b.md", generated: "g" };
+    const scored: LoggedBet = { ...b, report: "a.md", generated: "g", hypothetical: { status: "tp", netR: 1.9 } };
+    const stale: LoggedBet = { ...b, id: "stale", report: "a.md", generated: "g" };
+    const out = upsertReportBets([other, scored, stale], [{ ...b, entry: 2.395 }], "a.md", "g2");
+    assert.deepEqual(out.map((x) => x.id).sort(), ["20261003-1400Z-XRP-1", "other"]);
+    assert.equal(out.find((x) => x.id === b.id)!.entry, 2.39); // frozen: the scored bet wins
   });
 
   test("rejects a meta file without the required arrays", async () => {

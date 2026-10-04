@@ -44,6 +44,24 @@ describe("Kraken", { skip: process.env.KRAKEN_ENABLED === "false" && "KRAKEN_ENA
     });
   });
 
+  describe("futures market data (public)", { skip: process.env.KRAKEN_FUTURES_ENABLED === "false" && "KRAKEN_FUTURES_ENABLED=false" }, () => {
+    test("kraken_futures_candles returns `limit` candles of a perpetual", async () => {
+      const data = (await call(ctx, "kraken_futures_candles", { symbol: "PF_XBTUSD", resolution: "1m", limit: 5 })) as { candles: unknown[] };
+      assert.equal(data.candles.length, 5);
+      assertPoints(data.candles, ["o", "h", "l", "c", "v"], "t");
+    });
+
+    test("kraken_futures_candles reads an explicit past range", async () => {
+      const to = new Date(Date.now() - 3 * 86_400_000);
+      const from = new Date(to.getTime() - 30 * 60_000);
+      const data = (await call(ctx, "kraken_futures_candles", {
+        symbol: "PF_XBTUSD", resolution: "1m", from: from.toISOString(), to: to.toISOString(), limit: 2000,
+      })) as { candles: { t: number }[] };
+      assert.ok(data.candles.length >= 25 && data.candles.length <= 31, String(data.candles.length));
+      assert.ok(data.candles.every((c) => c.t * 1000 >= from.getTime() - 60_000 && c.t * 1000 <= to.getTime()));
+    });
+  });
+
   describe("account (read-only)", { skip: !HAS_KEYS && "KRAKEN_API_KEY/KRAKEN_API_SECRET not set" }, () => {
     test("kraken_balance", async () => {
       const data = await call(ctx, "kraken_balance");

@@ -288,3 +288,16 @@ New files: `speculation/sessions.ts`, `speculation/volume.ts` (+ tests). Changed
 
 Routine setup (on the user's machine, once): four scheduled tasks, or one task at 07:40, 13:10, 17:10 and 21:40 Europe/Warsaw, each running the
 `speculate` skill. Weekends run too (crypto is 24/7); the skill treats US sessions as quiet then.
+
+## 16. Revision 5: review fixes (groups 1 and 2)
+
+- **Checker:** bets must have positive expected value after fees (`p·RR − (1 − p) − fees > 0`, i.e. P above the
+  break-even rate) and are ranked by it; round-trip taker fees may cost at most 0.2R; a long limit must be at or below
+  the last price and a short at or above (breakout entries are not supported). The Best bets table shows break-even
+  and EV. A rerun replaces the report's unscored bets in `bets-log.json`; scored bets are frozen.
+- **Scoring on futures data:** new public MCP tool `kraken_futures_candles`. The scorer CLI fetches 1m futures
+  candles itself (paging past the 2000-candle limit) and syncs fills into the fill store with the read-only keys
+  (`speculation/fetch.ts`); `--input` keeps the offline mode. The fill store now keeps order id and maker/taker type
+  (with a migration for older databases). Fees are per leg: maker for the limit entry and take-profit, taker for
+  stops and time-outs; actual trades use each fill's type (unknown counts as taker). Fills matched in an earlier run
+  are not reported as stray again.

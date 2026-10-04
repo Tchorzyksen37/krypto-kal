@@ -1,6 +1,6 @@
 ---
 name: speculation-score
-description: Score past speculation bets using Kraken Futures fills pulled from the API (no manual upload). Matches fills to bets automatically, computes actual and hypothetical outcomes, hit rate, mean R and calibration, and updates the scorecard under output/speculation/. Use when the user says score, "evaluate speculation", or asks how the bets performed.
+description: Score past speculation bets using Kraken Futures fills and futures candles pulled from the API (no manual upload). Matches fills to bets automatically, computes actual and hypothetical outcomes, hit rate, mean R and calibration, and updates the scorecard under output/speculation/. Use when the user says score, "evaluate speculation", or asks how the bets performed.
 ---
 
 # Speculation score
@@ -19,16 +19,25 @@ all data comes from the Kraken Futures API through the MCP tools.
 
 ## Procedure
 
-1. **Pull data.** `kraken_futures_fills` and `kraken_futures_pnl` (they sync new fills into the local DB, so
-   history goes past the API's 100-fill window), `kraken_ohlc` 1m candles for each bet window, and
-   `BRAIN/output/speculation/bets-log.json`.
-2. **Score:** `node speculation/score.ts <day>`. It matches fills to bets automatically (same contract and
-   side, fill time inside the bet window plus TTL, price within the match tolerance, closest wins, one fill
-   per bet), then computes:
-   - taken or skipped; entry slippage; exit reason (TP, SL, manual close near TTL, other); net R after fees;
-   - hypothetical outcome of every bet from 1m candles (entry touched before the deadline? then TP, SL or
-     TTL first; SL wins a same-candle tie), taken or not.
-3. **Write** `YYYY-MM-DD/_day.md` and refresh the rolling 7-day and all-time tables: hit rate, mean R,
-   calibration buckets, per symbol / session / side, never-touched rate, taken vs skipped.
-4. **Reply** with: bets scored, win rate with N, mean R, the one pattern that stands out (or "nothing
+1. **Score:** run `node --env-file-if-exists=.env speculation/score.ts <BRAIN>/output/speculation` from the repo.
+   It fetches everything itself:
+   - 1m trade-price candles of each bet's **futures contract** (public Kraken Futures endpoint, no keys; never
+     the spot `kraken_ohlc`, which is a different market and only reaches back 12 hours);
+   - your fills, synced into the local fill store with the read-only keys (`KRAKEN_FUTURES_RO_API_KEY/_SECRET`),
+     including each fill's order id and maker/taker type.
+   It then matches fills to bets (same contract and side, fill time inside the bet window plus TTL, price within the
+   match tolerance, closest wins, one fill per bet) and computes:
+   - taken or skipped; entry slippage; exit reason (TP, SL, manual close near TTL, other); net R after the real
+     maker/taker fees of your fills (unknown type counts as taker);
+   - hypothetical outcome of every bet from futures 1m candles (entry touched before the deadline? then TP, SL or
+     TTL first; SL wins a same-candle tie), taken or not, with maker fees on the limit entry and take-profit and
+     taker fees on stops and time-outs.
+   Without the read-only keys it prints a warning and scores only the hypothetical outcomes. Warnings about failed
+   candle requests mean those bets stay pending; rerun later.
+   If the network cannot reach Kraken, gather the data with the MCP tools (`kraken_futures_candles` per contract and
+   window, `kraken_futures_fills`) into a JSON file `{ fills, candles: { "PF_...": [...] } }` and run
+   `node speculation/score.ts <dir> --input <file>`.
+2. **Read** `YYYY-MM-DD/_day.md` and `_scorecard.md` (the script wrote them): hit rate, mean R, calibration buckets,
+   per session / symbol / side / vs bias, never-touched rate, taken vs skipped.
+3. **Reply** with: bets scored, win rate with N, mean R, the one pattern that stands out (or "nothing
    significant yet"), and any fills that matched no bet.

@@ -18,23 +18,30 @@ const CANDLE_SEC = 60;
 const EPS = 1e-9;
 
 export interface ScoreOptions {
-  feeBps: number; // assumed one-way fee (the fills API has no fee field)
+  makerFeeBps: number; // one-way fee of a resting (maker) fill: limit entries and take-profit limits
+  takerFeeBps: number; // one-way fee of an aggressive (taker) fill: stops and market closes
   matchTolerance: number; // fraction of price
   exitGraceMs: number; // slack after TTL for a manual close
 }
 
-export const DEFAULT_SCORE: ScoreOptions = { feeBps: 5, matchTolerance: 0.003, exitGraceMs: 5 * 60_000 };
+// Kraken Futures base-tier fees (0.02% maker, 0.05% taker). The fills API has no fee amount, only the fill type.
+export const DEFAULT_SCORE: ScoreOptions = { makerFeeBps: 2, takerFeeBps: 5, matchTolerance: 0.003, exitGraceMs: 5 * 60_000 };
 
 const riskOf = (b: Bet) => Math.abs(b.entry - b.stop_loss);
 const rOf = (b: Bet, entry: number, exit: number) => ((b.side === "long" ? exit - entry : entry - exit) / riskOf(b));
-const feeR = (b: Bet, entry: number, feeBps: number) => (2 * feeBps * entry) / 10_000 / riskOf(b);
+// Fees of both legs in units of the bet's risk.
+const feeR = (b: Bet, entry: number, entryBps: number, exit: number, exitBps: number) => (entry * entryBps + exit * exitBps) / 10_000 / riskOf(b);
+const isMaker = (fillType: string | undefined) => /^maker/i.test(fillType ?? "");
+const feeBpsOf = (fillType: string | undefined, o: ScoreOptions) => (isMaker(fillType) ? o.makerFeeBps : o.takerFeeBps);
 
 // ---- hypothetical outcome ----
 
 // Walks 1m candles. The entry is a limit order: filled when price trades to it before the deadline.
 // Conservative intrabar rules: in the touch candle only the stop can trigger (the take-profit extreme may
 // have happened before the touch); in any later candle a stop and a take-profit in the same bar count as a stop.
-export function resolveBet(bet: Bet, candlesIn: Candle[], feeBps = DEFAULT_SCORE.feeBps): Hypothetical {
+// Fees: the limit entry and a take-profit limit are maker fills; a stop or a close at the time limit is taker.
+export function resolveBet(bet: Bet, candlesIn: Candle[], options: Partial<ScoreOptions> = {}): Hypothetical {
+  const o = { ...DEFAULT_SCORE, ...options };
   const candles = [...candlesIn].sort((a, b) => a.t - b.t);
   const fillFrom = Date.parse(bet.fill_from) / 1000;
   const deadline = Date.parse(bet.entry_deadline) / 1000;
@@ -55,7 +62,8 @@ export function resolveBet(bet: Bet, candlesIn: Candle[], feeBps = DEFAULT_SCORE
   const expiry = touch.t + bet.ttl_minutes * 60;
   const done = (status: "tp" | "sl" | "ttl", exitAt: number, exitPrice: number): Hypothetical => {
     const r = rOf(bet, bet.entry, exitPrice);
-    return { status, touchedAt: touch.t, exitAt, exitPrice, r: round(r), netR: round(r - feeR(bet, bet.entry, feeBps)) };
+    const exitBps = status === "tp" ? o.makerFeeBps : o.takerFeeBps;
+    return { status, touchedAt: touch.t, exitAt, exitPrice, r: round(r), netR: round(r - feeR(bet, bet.entry, o.makerFeeBps, exitPrice, exitBps)) };
   };
 
   if (slHit(touch)) return done("sl", touch.t, bet.stop_loss);
@@ -93,6 +101,7 @@ export function groupFills(fills: Fill[]): Fill[] {
     out.push({
       id: g.map((f) => f.id).join("+"),
       orderId,
+      ...(g.some((f) => f.fillType) ? { fillType: g.every((f) => isMaker(f.fillType)) ? "maker" : "taker" } : {}),
       symbol: first.symbol,
       side: first.side,
       size,
@@ -171,6 +180,7 @@ export function actualOutcome(bet: Bet, m: Match, options: Partial<ScoreOptions>
   const a: Actual = {
     entryFill: m.entry.price,
     entryAt: m.entry.ts,
+    entryFillId: m.entry.id,
     slippagePct: round(((long ? m.entry.price - bet.entry : bet.entry - m.entry.price) / bet.entry) * 100),
     size: m.entry.size,
   };
@@ -179,8 +189,12 @@ export function actualOutcome(bet: Bet, m: Match, options: Partial<ScoreOptions>
     const reason: ExitReason = near(bet.take_profit) ? "tp" : near(bet.stop_loss) ? "sl" : m.exit.ts >= m.entry.ts + bet.ttl_minutes * 60_000 - o.exitGraceMs ? "ttl" : "other";
     a.exitFill = m.exit.price;
     a.exitAt = m.exit.ts;
+    a.exitFillId = m.exit.id;
     a.exitReason = reason;
-    a.netR = round(rOf(bet, m.entry.price, m.exit.price) - feeR(bet, m.entry.price, o.feeBps));
+    // Unknown fill type counts as taker (the dearer case).
+    const fr = feeR(bet, m.entry.price, feeBpsOf(m.entry.fillType, o), m.exit.price, feeBpsOf(m.exit.fillType, o));
+    a.feeR = round(fr);
+    a.netR = round(rOf(bet, m.entry.price, m.exit.price) - fr);
   }
   return a;
 }
@@ -266,13 +280,16 @@ export function scoreLog(logIn: LoggedBet[], input: ScoreInput, options: Partial
   const resolved: string[] = [];
   for (const b of log) {
     if (b.hypothetical && b.hypothetical.status !== "open") continue;
-    const h = resolveBet(b, input.candles[b.futures] ?? [], o.feeBps);
+    const h = resolveBet(b, input.candles[b.futures] ?? [], o);
     b.hypothetical = h;
     if (h.status !== "open") resolved.push(b.id);
   }
 
+  // Fills matched in an earlier run belong to their bet already; they are neither re-matched nor reported as stray.
+  const used = new Set(log.flatMap((b) => [b.actual?.entryFillId, b.actual?.exitFillId]).filter(Boolean).flatMap((id) => id!.split("+")));
+  const fresh = input.fills.filter((f) => !used.has(f.id));
   const finished = log.filter((b) => !b.actual && Date.parse(b.latest_close) / 1000 <= input.nowSec);
-  const res = matchFills(finished, input.fills, o);
+  const res = matchFills(finished, fresh, o);
   const matched: string[] = [];
   for (const m of res.matches) {
     const b = log.find((x) => x.id === m.betId)!;
@@ -365,6 +382,8 @@ export function normalizeFill(raw: Record<string, unknown>): Fill {
   };
   const orderId = raw.orderId ?? raw.order_id;
   if (orderId) f.orderId = String(orderId);
+  const fillType = raw.fillType ?? raw.fill_type;
+  if (fillType) f.fillType = String(fillType);
   if (!Number.isFinite(f.ts) || !Number.isFinite(f.price) || !Number.isFinite(f.size)) throw new Error(`unreadable fill: ${JSON.stringify(raw)}`);
   return f;
 }
@@ -376,6 +395,12 @@ export function normalizeCandle(raw: Record<string, unknown>): Candle {
   return c;
 }
 
+export const readLog = async (dir: string): Promise<LoggedBet[]> => {
+  const logPath = join(dir, "bets-log.json");
+  return existsSync(logPath) ? (JSON.parse(await readFile(logPath, "utf8")) as LoggedBet[]) : [];
+};
+
+// Offline mode: candles and fills come from a JSON file (tests, or data gathered by hand).
 export async function scoreFiles(dir: string, inputPath: string, day?: string, options: Partial<ScoreOptions> = {}): Promise<ScoreRun> {
   const raw = JSON.parse(await readFile(inputPath, "utf8")) as { fills?: Record<string, unknown>[]; candles?: Record<string, Record<string, unknown>[]>; nowSec?: number };
   const input: ScoreInput = {
@@ -383,8 +408,13 @@ export async function scoreFiles(dir: string, inputPath: string, day?: string, o
     candles: Object.fromEntries(Object.entries(raw.candles ?? {}).map(([k, v]) => [k, v.map(normalizeCandle)])),
     nowSec: raw.nowSec ?? Math.floor(Date.now() / 1000),
   };
+  return scoreDir(dir, input, day, options);
+}
+
+// Scores the log in `dir` with `input` and writes the log, the day note and the scorecard.
+export async function scoreDir(dir: string, input: ScoreInput, day?: string, options: Partial<ScoreOptions> = {}): Promise<ScoreRun> {
   const logPath = join(dir, "bets-log.json");
-  const log: LoggedBet[] = existsSync(logPath) ? (JSON.parse(await readFile(logPath, "utf8")) as LoggedBet[]) : [];
+  const log = await readLog(dir);
   const run = scoreLog(log, input, options);
   await writeFile(logPath, `${JSON.stringify(run.log, null, 2)}\n`, "utf8");
   const d = day ?? new Date(input.nowSec * 1000).toISOString().slice(0, 10);
@@ -396,19 +426,42 @@ export async function scoreFiles(dir: string, inputPath: string, day?: string, o
 
 export function scoreOptionsFromEnv(env: NodeJS.ProcessEnv = process.env): Partial<ScoreOptions> {
   const out: Partial<ScoreOptions> = {};
-  if (env.SPECULATION_FEE_BPS && Number.isFinite(Number(env.SPECULATION_FEE_BPS))) out.feeBps = Number(env.SPECULATION_FEE_BPS);
+  const num = (k: string) => (env[k] && Number.isFinite(Number(env[k])) ? Number(env[k]) : undefined);
+  const maker = num("SPECULATION_MAKER_FEE_BPS");
+  const taker = num("SPECULATION_TAKER_FEE_BPS");
+  if (maker !== undefined) out.makerFeeBps = maker;
+  if (taker !== undefined) out.takerFeeBps = taker;
   if (env.SPECULATION_MATCH_TOLERANCE && Number.isFinite(Number(env.SPECULATION_MATCH_TOLERANCE))) out.matchTolerance = Number(env.SPECULATION_MATCH_TOLERANCE);
   return out;
 }
 
+// CLI:
+//   node --env-file-if-exists=.env speculation/score.ts <output/speculation dir> [--day YYYY-MM-DD]
+//       fetches futures candles (public) and your fills (KRAKEN_FUTURES_RO_API_KEY/_SECRET) itself;
+//   node speculation/score.ts <output/speculation dir> --input <input.json> [--day YYYY-MM-DD]
+//       uses candles and fills from a file instead.
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  const [dir, input, day] = process.argv.slice(2);
-  if (!dir || !input) {
-    console.error("usage: node speculation/score.ts <output/speculation dir> <input.json> [YYYY-MM-DD]");
+  const args = process.argv.slice(2);
+  const flag = (name: string) => {
+    const i = args.indexOf(name);
+    return i >= 0 ? args[i + 1] : undefined;
+  };
+  const dir = args[0];
+  if (!dir || dir.startsWith("--")) {
+    console.error("usage: node --env-file-if-exists=.env speculation/score.ts <output/speculation dir> [--input <input.json>] [--day YYYY-MM-DD]");
     process.exit(2);
   }
   try {
-    const r = await scoreFiles(dir, input, day, scoreOptionsFromEnv());
+    const input = flag("--input");
+    const day = flag("--day");
+    let r: ScoreRun;
+    if (input) r = await scoreFiles(dir, input, day, scoreOptionsFromEnv());
+    else {
+      const { liveInput } = await import("./fetch.ts");
+      const live = await liveInput(await readLog(dir), Math.floor(Date.now() / 1000));
+      for (const w of live.warnings) console.warn(`warning: ${w}`);
+      r = await scoreDir(dir, live.input, day, scoreOptionsFromEnv());
+    }
     console.log(`resolved ${r.resolved.length}, matched to your fills ${r.matched.length}, unmatched fills ${r.unmatchedFills.length}, ambiguous ${r.ambiguous.length}`);
     const s = summarize(r.log);
     console.log(`all time: ${s.bets} bets, ${s.touched} touched, win rate ${pct(s.winRate)} (N=${s.touched}), mean net R ${rFmt(s.meanNetR)}`);
