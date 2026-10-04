@@ -12,8 +12,9 @@ the contract.
 
 ## 0. Where things are
 
-- The brain root is `BRAIN_DIR` from `.env` (currently `C:\Users\mtchorze\OneDrive\Documents\pierdoly\krypto-kal`).
-  It is **not** inside this repo. Call it `BRAIN` below.
+- The brain root is the value of `BRAIN_DIR` in this repo's `.env` (read it; do not assume a path). It is **not**
+  inside this repo. Call it `BRAIN` below. If `BRAIN/CLAUDE.md` or `BRAIN/x-accounts.json` does not exist there, stop and
+  tell the user that `BRAIN_DIR` points to the wrong folder.
 - Read `BRAIN/CLAUDE.md` first. It is the source of truth for the page format; this skill only adds a procedure.
 - Folders: `BRAIN/raw/` (read only), `BRAIN/wiki/` (you write here), `BRAIN/output/` (briefings, Polish).
 - Edit brain files directly with Read/Write/Edit. The `brain_*` MCP tools do the same and are fine if present.
