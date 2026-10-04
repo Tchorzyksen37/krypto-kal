@@ -19,7 +19,7 @@ all data comes from the Kraken Futures API through the MCP tools.
 
 ## Procedure
 
-1. **Score:** run `node --env-file-if-exists=.env speculation/score.ts <BRAIN>/output/speculation` from the repo.
+1. **Score:** run `node --env-file-if-exists=.env src/speculation/score.ts <BRAIN>/output/speculation` from the repo.
    It fetches everything itself:
    - 1m trade-price candles of each bet's **futures contract** (public Kraken Futures endpoint, no keys; never
      the spot `kraken_ohlc`, which is a different market and only reaches back 12 hours);
@@ -36,7 +36,7 @@ all data comes from the Kraken Futures API through the MCP tools.
    candle requests mean those bets stay pending; rerun later.
    If the network cannot reach Kraken, gather the data with the MCP tools (`kraken_futures_candles` per contract and
    window, `kraken_futures_fills`) into a JSON file `{ fills, candles: { "PF_...": [...] } }` and run
-   `node speculation/score.ts <dir> --input <file>`.
+   `node src/speculation/score.ts <dir> --input <file>`.
 2. **Read** `YYYY-MM-DD/_day.md` and `_scorecard.md` (the script wrote them): hit rate, mean R, calibration buckets,
    per session / symbol / side / vs bias, never-touched rate, taken vs skipped.
 3. **Reply** with: bets scored, win rate with N, mean R, the one pattern that stands out (or "nothing

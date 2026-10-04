@@ -19,7 +19,7 @@ trader and the watchdog. The analyst is sub-project 2, so policies enter through
 - Node >= 23.6 runs `.ts` directly: no `enum`, no `namespace`, no constructor parameter properties (`erasableSyntaxOnly`).
 - Relative imports use the `.ts` extension; type-only imports use `import type` (`verbatimModuleSyntax`).
 - All code, comments, logs and error messages are in English. Loggers come from `createLogger(scope)` in `logger.ts`.
-- All new code lives in `bot/`. Tests are `bot/*.test.ts`, offline, using `node:test` and `node:assert/strict`.
+- All new code lives in `src/bot/`. Tests are `bot/*.test.ts`, offline, using `node:test` and `node:assert/strict`.
 - Iteration 1 cannot place real orders: `LiveExecutor` throws `NotImplemented` in its constructor; the trader process
   uses only `KRAKEN_FUTURES_RO_API_KEY` / `KRAKEN_FUTURES_RO_API_SECRET`.
 - Every order carries a `cliOrdId` of the form `bot-<policy_id>-<role>-<seq>`, at most 100 characters.
@@ -50,27 +50,27 @@ Failure modes the spec implies but does not spell out. Each has a test in the ta
 
 | File | Responsibility |
 |---|---|
-| `bot/clock.ts` | `Clock`, `SystemClock`, `FakeClock` |
-| `bot/config.ts` | Config schema, defaults, loader, hash |
-| `bot/policy.ts` | Policy schema, level menu, validation, effective policy |
-| `bot/sizing.ts` | Position sizing, pre-trade validation, liquidation estimate |
-| `bot/bot-store.ts` | SQLite tables, key-value state, counters, journal, incidents |
-| `bot/executor.ts` | `Executor`, `MarketData`, order types, `makeCliOrdId` |
-| `bot/dry-run-executor.ts` | Simulated exchange: fills, fees, funding, replay, fault injection |
-| `bot/limits.ts` | Day boundary, counters, cooldowns, limit gate, halt conditions |
-| `bot/engine.ts` | Pure `decide(snapshot, config) => Action[]` |
-| `bot/trader.ts` | `runCycle`: read, decide, execute, confirm by read-back, journal |
-| `bot/reconcile.ts` | Startup reconciliation |
-| `bot/watchdog.ts` | `checkProtection`, `watchdogTick` |
-| `bot/live-executor.ts`, `bot/approving-executor.ts` | Stub and approval decorator |
-| `bot/report.ts`, `bot/cli.ts` | Report, fixture policy insert, halt acknowledgement, launcher |
-| `bot/sim.ts` | Random-scenario driver and invariant checker used by property tests |
+| `src/bot/clock.ts` | `Clock`, `SystemClock`, `FakeClock` |
+| `src/bot/config.ts` | Config schema, defaults, loader, hash |
+| `src/bot/policy.ts` | Policy schema, level menu, validation, effective policy |
+| `src/bot/sizing.ts` | Position sizing, pre-trade validation, liquidation estimate |
+| `src/bot/bot-store.ts` | SQLite tables, key-value state, counters, journal, incidents |
+| `src/bot/executor.ts` | `Executor`, `MarketData`, order types, `makeCliOrdId` |
+| `src/bot/dry-run-executor.ts` | Simulated exchange: fills, fees, funding, replay, fault injection |
+| `src/bot/limits.ts` | Day boundary, counters, cooldowns, limit gate, halt conditions |
+| `src/bot/engine.ts` | Pure `decide(snapshot, config) => Action[]` |
+| `src/bot/trader.ts` | `runCycle`: read, decide, execute, confirm by read-back, journal |
+| `src/bot/reconcile.ts` | Startup reconciliation |
+| `src/bot/watchdog.ts` | `checkProtection`, `watchdogTick` |
+| `src/bot/live-executor.ts`, `src/bot/approving-executor.ts` | Stub and approval decorator |
+| `src/bot/report.ts`, `src/bot/cli.ts` | Report, fixture policy insert, halt acknowledgement, launcher |
+| `src/bot/sim.ts` | Random-scenario driver and invariant checker used by property tests |
 
 ## Tasks
 
 ### Task 1: Clock, config, test wiring
 
-**Files:** Create `bot/clock.ts`, `bot/config.ts`, `bot/config.test.ts`. Modify `package.json`.
+**Files:** Create `src/bot/clock.ts`, `src/bot/config.ts`, `bot/config.test.ts`. Modify `package.json`.
 
 **Interfaces:**
 - Produces: `interface Clock { now(): number }` (epoch ms); `class SystemClock implements Clock`;
@@ -90,7 +90,7 @@ Failure modes the spec implies but does not spell out. Each has a test in the ta
 
 ### Task 2: Policy, level menu, effective policy
 
-**Files:** Create `bot/policy.ts`, `bot/policy.test.ts`.
+**Files:** Create `src/bot/policy.ts`, `bot/policy.test.ts`.
 
 **Interfaces:**
 - Consumes: `BotConfig` (Task 1).
@@ -114,7 +114,7 @@ Failure modes the spec implies but does not spell out. Each has a test in the ta
 
 ### Task 3: Sizing and pre-trade validation
 
-**Files:** Create `bot/sizing.ts`, `bot/sizing.test.ts`.
+**Files:** Create `src/bot/sizing.ts`, `bot/sizing.test.ts`.
 
 **Interfaces:**
 - Consumes: `BotConfig`, `ResolvedScenario`.
@@ -137,7 +137,7 @@ Failure modes the spec implies but does not spell out. Each has a test in the ta
 
 ### Task 4: Store and journal
 
-**Files:** Create `bot/bot-store.ts`, `bot/bot-store.test.ts`.
+**Files:** Create `src/bot/bot-store.ts`, `bot/bot-store.test.ts`.
 
 **Interfaces:**
 - Produces: `expandHome(path: string): string` (expands a leading `~`);
@@ -163,7 +163,7 @@ Failure modes the spec implies but does not spell out. Each has a test in the ta
 
 ### Task 5: Executor interface and DryRunExecutor core
 
-**Files:** Create `bot/executor.ts`, `bot/dry-run-executor.ts`, `bot/dry-run-executor.test.ts`.
+**Files:** Create `src/bot/executor.ts`, `src/bot/dry-run-executor.ts`, `bot/dry-run-executor.test.ts`.
 
 **Interfaces:**
 - Consumes: `BotStore`, `Clock`, `BotConfig`; types `FuturesPosition`, `FuturesOpenOrder`, `FuturesFill` from
@@ -192,7 +192,7 @@ Failure modes the spec implies but does not spell out. Each has a test in the ta
 
 ### Task 6: DryRunExecutor funding, replay, fault injection, contract
 
-**Files:** Modify `bot/dry-run-executor.ts`. Create `bot/dry-run-replay.test.ts`.
+**Files:** Modify `src/bot/dry-run-executor.ts`. Create `bot/dry-run-replay.test.ts`.
 
 **Interfaces:**
 - Produces: `DryRunExecutor.accrueFunding(rates: { t: number; rate: number }[]): void`;
@@ -211,7 +211,7 @@ Failure modes the spec implies but does not spell out. Each has a test in the ta
 
 ### Task 7: Limits, counters, cooldowns
 
-**Files:** Create `bot/limits.ts`, `bot/limits.test.ts`. Modify `bot/bot-store.ts` (`raiseCounter`).
+**Files:** Create `src/bot/limits.ts`, `bot/limits.test.ts`. Modify `src/bot/bot-store.ts` (`raiseCounter`).
 
 **Interfaces:**
 - Consumes: `BotStore`, `BotConfig`, `FuturesFill`.
@@ -234,7 +234,7 @@ Failure modes the spec implies but does not spell out. Each has a test in the ta
 
 ### Task 8: Engine decision function (state machine)
 
-**Files:** Create `bot/engine.ts`, `bot/engine.test.ts`. Modify `bot/limits.ts` (pure `checkEntryLimits`), `bot/config.ts`
+**Files:** Create `src/bot/engine.ts`, `bot/engine.test.ts`. Modify `src/bot/limits.ts` (pure `checkEntryLimits`), `src/bot/config.ts`
 (`entry_confirm_sec`, `trail_atr_multiple`, `trail_start_r`).
 
 **Interfaces:**
@@ -260,8 +260,8 @@ Failure modes the spec implies but does not spell out. Each has a test in the ta
 
 ### Task 9: Trader cycle and protection flow
 
-**Files:** Create `bot/trader.ts`, `bot/trader.test.ts`, `bot/indicators.ts` (ATR), `bot/engine-state.ts` (the persisted record),
-`bot/indicators.test.ts`. Modify `bot/engine.ts` (`filledRoles`), `bot/policy.ts` (export `resolveScenario`), `bot/executor.ts`
+**Files:** Create `src/bot/trader.ts`, `bot/trader.test.ts`, `src/bot/indicators.ts` (ATR), `src/bot/engine-state.ts` (the persisted record),
+`bot/indicators.test.ts`. Modify `src/bot/engine.ts` (`filledRoles`), `src/bot/policy.ts` (export `resolveScenario`), `src/bot/executor.ts`
 (`MarketData.contract()`).
 
 **Interfaces:**
@@ -286,9 +286,9 @@ Failure modes the spec implies but does not spell out. Each has a test in the ta
 
 ### Task 10: Reconciliation
 
-**Files:** Create `bot/reconcile.ts`, `bot/reconcile.test.ts`, `bot/trader-fixtures.ts` (the shared test world, moved out of
-`trader.test.ts`). Modify `bot/executor.ts` (`getOrderHistory`, `PlacedOrder`), `bot/dry-run-executor.ts` (`getOrderHistory`,
-`lastTickMs`), `bot/engine.ts` (a HALTED bot closes a stop-less position only when it has a trade record for it).
+**Files:** Create `src/bot/reconcile.ts`, `bot/reconcile.test.ts`, `src/bot/trader-fixtures.ts` (the shared test world, moved out of
+`trader.test.ts`). Modify `src/bot/executor.ts` (`getOrderHistory`, `PlacedOrder`), `src/bot/dry-run-executor.ts` (`getOrderHistory`,
+`lastTickMs`), `src/bot/engine.ts` (a HALTED bot closes a stop-less position only when it has a trade record for it).
 
 **Interfaces:**
 - Produces: `reconcile(d: TraderDeps, opts?: { replayer?: Replayer }): Promise<{ clean: boolean; incidents: Incident[] }>`;
@@ -308,7 +308,7 @@ Failure modes the spec implies but does not spell out. Each has a test in the ta
 
 ### Task 11: Watchdog
 
-**Files:** Create `bot/watchdog.ts`, `bot/watchdog.test.ts`. Modify `bot/trader.ts` (export `filledTargets`).
+**Files:** Create `src/bot/watchdog.ts`, `bot/watchdog.test.ts`. Modify `src/bot/trader.ts` (export `filledTargets`).
 
 **Interfaces:**
 - Produces: `IssueKind` (`no_sl`, `wrong_sl_size`, `no_tp`, `wrong_tp_size`, `orphan_reduce_only`, `unexplained_position`,
@@ -331,9 +331,9 @@ Failure modes the spec implies but does not spell out. Each has a test in the ta
 
 ### Task 12: Property tests and tripwire
 
-**Files:** Create `bot/sim.ts`, `bot/invariants.test.ts`. Modify `bot/engine.ts` (a backwards clock no longer stops protection),
-`bot/trader.ts` (an outage is recorded once, not every cycle), `bot/watchdog.ts` (counts its orders; oversized targets are not an issue),
-`bot/dry-run-executor.ts` (an injected partial fill is rounded down to the size step).
+**Files:** Create `src/bot/sim.ts`, `bot/invariants.test.ts`. Modify `src/bot/engine.ts` (a backwards clock no longer stops protection),
+`src/bot/trader.ts` (an outage is recorded once, not every cycle), `src/bot/watchdog.ts` (counts its orders; oversized targets are not an issue),
+`src/bot/dry-run-executor.ts` (an injected partial fill is rounded down to the size step).
 
 **Interfaces:**
 - Produces: `collectScenario(seed, steps, opts?): Promise<{ violations: Violation[]; stats: Stats }>`;
@@ -356,7 +356,7 @@ Failure modes the spec implies but does not spell out. Each has a test in the ta
 
 ### Task 13: Live stub and approval decorator
 
-**Files:** Create `bot/live-executor.ts`, `bot/approving-executor.ts`, `bot/guards.test.ts`.
+**Files:** Create `src/bot/live-executor.ts`, `src/bot/approving-executor.ts`, `bot/guards.test.ts`.
 
 **Interfaces:**
 - Produces: `class LiveExecutor implements Executor` whose constructor always throws `Error("LiveExecutor is not implemented in iteration 1")`;
@@ -365,17 +365,17 @@ Failure modes the spec implies but does not spell out. Each has a test in the ta
 - [ ] **Step 1: Write failing tests:** constructing `LiveExecutor` always throws, even with `live_enabled: true`;
   `ApprovingExecutor` forwards an approved `placeOrder`, returns `{ ok: false, kind: "unknown" }` on a denied one,
   shows the reason text, and never gates `cancelOrder`, `cancelAll` or reads; the trader entry point refuses to start
-  when `mode: "live"`; a source scan finds no use of `tradingEnabled: true` anywhere in `bot/`.
+  when `mode: "live"`; a source scan finds no use of `tradingEnabled: true` anywhere in `src/bot/`.
 - [ ] **Step 2: Run** `node --test bot/guards.test.ts`. Expected: FAIL.
 - [ ] **Step 3: Implement.** **Step 4: Run.** Expected: PASS. **Step 5: Commit** `bot: add live stub and approval decorator`.
 
 ### Task 14: Report, CLI, launcher
 
-**Files:** Create `bot/report.ts`, `bot/cli.ts`, `bot/report.test.ts`. Modify `package.json` (add `"bot"`).
+**Files:** Create `src/bot/report.ts`, `src/bot/cli.ts`, `bot/report.test.ts`. Modify `package.json` (add `"bot"`).
 
 **Interfaces:**
 - Produces: `buildReport(store: BotStore, sinceMs: number): { policyAccuracy: ...; rejectedByReason: Record<string, number>; netPnl: number; incidents: number; calibration: { tercile: "low" | "mid" | "high"; avgR: number; n: number }[] }`;
-  CLI commands `node bot/cli.ts policy add <file>` (validates then stores a fixture policy and menu),
+  CLI commands `node src/bot/cli.ts policy add <file>` (validates then stores a fixture policy and menu),
   `report`, `ack-halt`, `run` (starts trader and watchdog as separate child processes).
 
 - [ ] **Step 1: Write failing tests:** the report counts rejected entries per reason; net PnL includes fees,

@@ -1,6 +1,6 @@
 # Speculation mode: hourly "probable next hour" report
 
-Status: **core code implemented in `speculation/` (check, screen, score, sessions, volume + 81 offline tests); see section 15 for the session-based design. Not yet done: the optional `speculation_context` MCP tool, a dry run against the real tools, and the scheduled tasks.**
+Status: **core code implemented in `src/speculation/` (check, screen, score, sessions, volume + 81 offline tests); see section 15 for the session-based design. Not yet done: the optional `speculation_context` MCP tool, a dry run against the real tools, and the scheduled tasks.**
 Revision 3: decisions from the user folded in: Claude Code routine, supervised use, XRP + screened symbols,
 English, `output/speculation/`; **scoring data comes from the Kraken Futures API (no manual upload)**; matching
 is automatic; limit entries; **the report is Markdown, JSON is only a small metadata sidecar**; no HTML dashboard
@@ -54,10 +54,10 @@ arithmetic) is deterministic code, so the model cannot get arithmetic wrong.
 |---|---|---|
 | `.claude/skills/speculate/SKILL.md` | skill | Hourly procedure: screen symbols, gather Known, write the report `.md` and its `.meta.json`, run the checker. |
 | `.claude/skills/speculation-score/SKILL.md` | skill | Daily: pull fills from the API, match to bets, score, write the scorecard. |
-| `speculation/types.ts` | code | Types of the metadata sidecar and the bets log. |
-| `speculation/screen.ts` | pure | Symbol screening: universe + metrics in, ranked candidates out (section 5). |
-| `speculation/check.ts` | pure + CLI | `node speculation/check.ts <report.meta.json>`: validates bets, drops bad ones with reasons, recomputes R:R and clock times, assigns ids, appends to the bets log, and **rewrites the report's final "Best bets" section** from the validated bets so that block is always exact. |
-| `speculation/score.ts` | pure + CLI | `resolveBet(bet, candles)`, matching, hit rate, mean R, calibration (section 9). |
+| `src/speculation/types.ts` | code | Types of the metadata sidecar and the bets log. |
+| `src/speculation/screen.ts` | pure | Symbol screening: universe + metrics in, ranked candidates out (section 5). |
+| `src/speculation/check.ts` | pure + CLI | `node src/speculation/check.ts <report.meta.json>`: validates bets, drops bad ones with reasons, recomputes R:R and clock times, assigns ids, appends to the bets log, and **rewrites the report's final "Best bets" section** from the validated bets so that block is always exact. |
+| `src/speculation/score.ts` | pure + CLI | `resolveBet(bet, candles)`, matching, hit rate, mean R, calibration (section 9). |
 | `speculation/*.test.ts` | tests | Offline, in `test:offline`: validation rules (plus a randomized check that no surviving bet violates ordering/deviation caps, like `futures-risk.test.ts`), report patching, matching, `resolveBet` edge cases. |
 | `mcp-server.ts` (small change) | wiring | Optional read-only tool `speculation_context` returning the Known layer in one call (cuts ~12 tool calls per run). |
 
@@ -90,7 +90,7 @@ Full definition in `.claude/skills/speculate/SKILL.md`. Procedure:
 5. **Speculate and write the report.** The skill states the task in the "most probable continuation" framing
    (section 6) and writes `HH00Z.md` in the section order of section 7, plus `HH00Z.meta.json` (symbols, last
    prices, 1h ATR, and the bet list).
-6. **Validate**: `node speculation/check.ts <meta.json>`. It drops invalid bets (reason shown in the note),
+6. **Validate**: `node src/speculation/check.ts <meta.json>`. It drops invalid bets (reason shown in the note),
    assigns ids and rewrites the "Best bets" block in the `.md`. If every bet is dropped the note says "no bet".
    On a script error the skill fixes the files once; on a second failure it keeps the Known/Unknown summary
    and adds a visible "generation failed" banner (the hour is never silently skipped).
@@ -102,7 +102,7 @@ labelled; the skill writes only under `output/speculation/`; chat in English.
 ## 5. Symbol universe
 
 Core: `BTC`, `ETH`, `XRP` (always analysed). The user also wants "any other symbols that give good chances":
-`speculation/screen.ts` ranks Kraken Futures linear perps (`PF_*`) that also have a Coinalyze market, keeps
+`src/speculation/screen.ts` ranks Kraken Futures linear perps (`PF_*`) that also have a Coinalyze market, keeps
 the top 3 non-core by a **setup score**, and the skill analyses those in the same depth.
 
 Filters first (a symbol that fails any is excluded, because a bet nobody can fill is worthless):
@@ -143,7 +143,7 @@ Sidecar `HH00Z.meta.json` (small; everything readable lives in the `.md`):
 }
 ```
 
-`speculation/check.ts` enforces (violating bets are dropped; reason printed in the note):
+`src/speculation/check.ts` enforces (violating bets are dropped; reason printed in the note):
 
 - `long`: `stop_loss < entry < take_profit`; `short`: reversed.
 - Entry within `SPECULATION_MAX_ENTRY_DEVIATION` (0.5%) of the symbol's `last`.
@@ -193,7 +193,7 @@ The skill `speculation-score` runs once a day (or on request). Inputs are all ma
 `kraken_futures_fills` and `kraken_futures_pnl` (which sync fills into the local DB past the API's 100-fill
 window), `kraken_ohlc` 1 m candles, and `bets-log.json`.
 
-1. **Match fills to bets automatically** (`speculation/score.ts`, pure): same futures symbol and side, fill time
+1. **Match fills to bets automatically** (`src/speculation/score.ts`, pure): same futures symbol and side, fill time
    inside `[window start, window end + TTL]`, price within `SPECULATION_MATCH_TOLERANCE` (0.3%) of the bet
    entry; the closest fill by (time, price) wins; each fill matches at most one bet. Unmatched fills are listed
    as "not from a report" and excluded from bet statistics; ambiguous matches are flagged, never guessed.
@@ -225,11 +225,11 @@ the new files, these vars, the skill names and the routine setup.
 
 ## 12. Implementation steps (each ends green: `npm run typecheck` + `npm run test:offline`)
 
-1. `speculation/types.ts`, `speculation/check.ts` + tests (validation, report patching, randomized no-violation check).
-2. `speculation/screen.ts` + tests (filters, scoring, core symbols always kept).
+1. `src/speculation/types.ts`, `src/speculation/check.ts` + tests (validation, report patching, randomized no-violation check).
+2. `src/speculation/screen.ts` + tests (filters, scoring, core symbols always kept).
 3. `speculation_context` MCP tool (read-only) + offline test with fakes.
 4. `.claude/skills/speculate` finalised against the real tools; one manual dry run; read the note in Obsidian.
-5. `speculation/score.ts` (matching, `resolveBet`, calibration) + tests; then run the `speculation-score` skill
+5. `src/speculation/score.ts` (matching, `resolveBet`, calibration) + tests; then run the `speculation-score` skill
    on a day of real fills.
 6. Create the scheduled task (hourly, :52) on the user's machine; run 24 consecutive hours supervised.
 7. Update CLAUDE.md.
@@ -262,7 +262,7 @@ Decisions after the first implementation (these supersede the hourly wording abo
 | US | 17:10 | 17:30-22:00 | 15:30-20:00 | 60 min | 210 min | 3 | 1.2 |
 | Night (Asia) | 21:40 | 22:00-08:00 | 20:00-06:00 | 180 min | 360 min | 2 | 1.5 |
 
-12:00-13:30 local (European midday lull) is deliberately not reported. Defined in `speculation/sessions.ts`; `node speculation/sessions.ts`
+12:00-13:30 local (European midday lull) is deliberately not reported. Defined in `src/speculation/sessions.ts`; `node src/speculation/sessions.ts`
 prints the session to report on (also for a manual mid-session run, whose bets then fill from the generation time). Stops must be wider for
 longer holds (minimum stop scales with the square root of the hold in hours). Bet ids carry the window start: `YYYYMMDD-HHMMZ-SYMBOL-n`.
 
@@ -272,7 +272,7 @@ and the cash open (15:30 local); the US session carries FOMC (about 20:00 local)
 range-bound, stop-hunt prone, with Tokyo (about 02:00 local) and Hong Kong/China (about 03:30 local) opens inside it.
 
 **World regions that generate the volume.** Every session lists which regions dominate, are significant, fading or low (Europe, US, Asia).
-`speculation/volume.ts` adds a **measured** part: from 7+ days of 1h candles it computes the share of daily volume in each session window and its
+`src/speculation/volume.ts` adds a **measured** part: from 7+ days of 1h candles it computes the share of daily volume in each session window and its
 rank per hour. The report states whether the coming session is a high- or low-volume one.
 
 **Investor profiles.** A catalogue of seven participant types (Asian retail, leveraged perp traders, US institutions, European institutions,
@@ -283,7 +283,7 @@ weights them high/medium/low. Footprints our tools cannot measure (ETF flows, Ko
 refuses a report without it, mirrors it into the frontmatter (`bias:`), and marks any bet against the symbol's lean as counter-bias. The
 scorecard now also breaks results down by session and by with/against-bias.
 
-New files: `speculation/sessions.ts`, `speculation/volume.ts` (+ tests). Changed: `check.ts` (session limits, bias, HHMM ids), `score.ts`
+New files: `src/speculation/sessions.ts`, `src/speculation/volume.ts` (+ tests). Changed: `check.ts` (session limits, bias, HHMM ids), `score.ts`
 (per-session and per-bias tables), `types.ts`, the `speculate` skill.
 
 Routine setup (on the user's machine, once): four scheduled tasks, or one task at 07:40, 13:10, 17:10 and 21:40 Europe/Warsaw, each running the
@@ -297,7 +297,7 @@ Routine setup (on the user's machine, once): four scheduled tasks, or one task a
   and EV. A rerun replaces the report's unscored bets in `bets-log.json`; scored bets are frozen.
 - **Scoring on futures data:** new public MCP tool `kraken_futures_candles`. The scorer CLI fetches 1m futures
   candles itself (paging past the 2000-candle limit) and syncs fills into the fill store with the read-only keys
-  (`speculation/fetch.ts`); `--input` keeps the offline mode. The fill store now keeps order id and maker/taker type
+  (`src/speculation/fetch.ts`); `--input` keeps the offline mode. The fill store now keeps order id and maker/taker type
   (with a migration for older databases). Fees are per leg: maker for the limit entry and take-profit, taker for
   stops and time-outs; actual trades use each fill's type (unknown counts as taker). Fills matched in an earlier run
   are not reported as stray again.

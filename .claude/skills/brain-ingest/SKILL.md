@@ -23,7 +23,7 @@ improvise a different layout: the format below is the contract.
 3. Every fact has a source link and a confidence label. No source, no fact.
 4. `output/` is built from the wiki only, never straight from `raw/`.
 5. Never invent. If a post does not say it, do not write it. If you are unsure, use `unverified`.
-6. Do not run `node x-sync.ts`: that file is a library and does nothing when run.
+6. Do not run `node src/brain/x-sync.ts`: that file is a library and does nothing when run.
 7. Do not ask the user questions during a normal run. Make the default choice and note it in the log.
 8. **Never create helper or scratch files in the repo or in `BRAIN`** (no `all_raw.txt`, `ingested_raw.txt`, lists of
    file names, notes). The repo is under git and the brain is a synced Obsidian vault; neither is a work area. Do set

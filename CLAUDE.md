@@ -6,39 +6,57 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 MCP server that exposes market data to Claude: crypto derivatives (Coinalyze, Coinglass), indices, currencies and stocks (Yahoo Finance), and Kraken spot market data. It also serves a "second brain" knowledge base fed with posts from curated X accounts about the Middle East. The brain lives outside this repo, in the user's Obsidian vault `C:\Users\mtchorze\OneDrive\Documents\pierdoly` (`BRAIN_DIR`); the vault's other folders are the user's own notes and not part of the brain. The Kraken client is also the intended base for a future trading bot. There is no lint setup. **All code, comments, logs and error messages are in English**, even though the user chats in Polish.
 
-| File | What it is |
-|---|---|
-| [coinalyze-client.ts](coinalyze-client.ts) | Free Coinalyze API (`https://api.coinalyze.net/v1`; OpenAPI spec at `/v1/doc/api-spec.json`). Needs `COINALYZE_API_KEY`. |
-| [coinglass-client.ts](coinglass-client.ts) | Coinglass Open API v4. The account's plan has no API access ("Upgrade plan"); its key is commented out in `.env`. |
-| [yahoo-client.ts](yahoo-client.ts) | Unofficial Yahoo Finance API, no key. Uses `/v8/finance/chart` for both history and quotes, because `/v7/finance/quote` needs a cookie crumb (401). |
-| [x-client.ts](x-client.ts) | X API v2, read-only (recent search, user lookup). Needs `X_BEARER_TOKEN`. |
-| [x-sync.ts](x-sync.ts) | Pulls new posts of the accounts in `<BRAIN_DIR>/x-accounts.json` into `<BRAIN_DIR>/raw/x/`; reads the archive back. |
-| [brain.ts](brain.ts) | Path-safe file access to the brain root (`BRAIN_DIR`) (list, read, search, write to `wiki/`/`output/` only, write-once to `raw/`). |
-| [kraken-client.ts](kraken-client.ts) | Kraken spot REST: public market data plus signed private account/trading calls. |
-| [kraken-futures-client.ts](kraken-futures-client.ts) | Kraken Futures (derivatives) REST: a separate exchange with its own keys. Market data, account, positions and trading for the planned bot. Not exposed through MCP yet. |
-| [futures-risk.ts](futures-risk.ts) | Pure pre-trade risk check for the futures bot: caps per-symbol and total exposure, leverage, open positions, order size and rate, and daily loss. |
-| [futures-pnl.ts](futures-pnl.ts), [trade-store.ts](trade-store.ts) | Realized PnL statistics for Kraken Futures: fills are synced into SQLite (`futures_fills`, with order id and maker/taker type; older databases are migrated on open), turned into closed trades by average-cost netting (`futures_trades`) and summarized. Gross of fees and funding; linear contracts (PF_/FF_) only. |
-| [liquidation-heatmap.ts](liquidation-heatmap.ts) | Pure model that ESTIMATES a liquidation heatmap from price bars, open interest and the long/short ratio (OI-delta cohorts over assumed leverage tiers; model OI follows real OI). Behind `coinalyze_liquidation_heatmap_estimate`. Not measured data. |
-| [bot/](bot/) | The Kraken Futures trading bot's deterministic core (state machine, sizing, simulated exchange, watchdog, reconciliation, property tests). **Cannot place real orders yet.** `npm run test:bot`. Architecture: [docs/bot-architecture.md](docs/bot-architecture.md). Status, deviations from the spec and unverified assumptions: [docs/superpowers/2026-10-03-trader-core-status.md](docs/superpowers/2026-10-03-trader-core-status.md). |
-| [speculation/](speculation/) | Speculation mode (four session reports a day: "most probable continuation" with an explicit LONG/SHORT/NEUTRAL bias, written by the `speculate` skill into `<BRAIN_DIR>/output/speculation/`). Code is deterministic support only: `check.ts` (validates bets, rewrites the report's Best bets block, appends `bets-log.json`), `screen.ts` (symbol screening), `sessions.ts` (the four sessions with regions, investor profiles and bet limits; DST-aware), `volume.ts` (measured volume share per session), `score.ts` (matches Kraken Futures fills to bets, resolves outcomes from futures 1m candles with maker/taker fees per leg, calibration, per-session/per-bias tables), `fetch.ts` (the scorer fetches futures candles and syncs fills itself). Advisory text only, no order placement. `npm run test:speculation`. Plan: [docs/superpowers/plans/2026-10-03-speculation-mode.md](docs/superpowers/plans/2026-10-03-speculation-mode.md). User guide: [docs/speculation-guide.md](docs/speculation-guide.md). |
-| [http-utils.ts](http-utils.ts) | Shared by all clients: `RequestQueue` (serialize + weighted spacing), `withRetry`, `TtlCache`. |
-| [history-store.ts](history-store.ts) | SQLite (`node:sqlite`) store of series points plus coverage ranges. |
-| [series-cache.ts](series-cache.ts) | Provider-independent read-through history cache on top of `HistoryStore`. |
-| [collector.ts](collector.ts) | Optional background jobs that keep filling the cache. |
-| [logger.ts](logger.ts) | Leveled logger; every module uses `createLogger(scope)`. |
-| [mcp-server.ts](mcp-server.ts) | MCP server over Streamable HTTP at `http://127.0.0.1:3000/mcp`. |
+Source lives in `src/`, grouped by module; unit tests sit next to the code (`*.test.ts`), end-to-end tests in
+`test/e2e/`. Imports between modules are relative with the `.ts` extension.
+
+```
+src/
+  server/       MCP server entry point and background collector
+  core/         shared infrastructure: HTTP pipeline, logger, SQLite history cache
+  providers/    one folder per data source: coinalyze, coinglass, yahoo, kraken (spot + futures), x
+  brain/        the second brain (vault file access) and the X-to-brain sync
+  analytics/    pure models on top of market data
+  trading/      Kraken Futures risk check, PnL statistics and the fill store
+  bot/          the trading bot's deterministic core
+  speculation/  speculation mode support code (checker, sessions, screen, volume, scorer)
+test/e2e/       end-to-end tests against the real APIs (spawn the server)
+docs/           architecture notes, guides, plans
+.claude/skills/ project skills (brain-ingest, speculate, speculation-score)
+```
+
+| Module | File | What it is |
+|---|---|---|
+| server | [mcp-server.ts](src/server/mcp-server.ts) | MCP server over Streamable HTTP at `http://127.0.0.1:3000/mcp`. |
+| server | [collector.ts](src/server/collector.ts) | Optional background jobs that keep filling the cache. |
+| core | [http-utils.ts](src/core/http-utils.ts) | Shared by all clients: `RequestQueue` (serialize + weighted spacing), `withRetry`, `TtlCache`. |
+| core | [logger.ts](src/core/logger.ts) | Leveled logger; every module uses `createLogger(scope)`. |
+| core | [history-store.ts](src/core/history-store.ts) | SQLite (`node:sqlite`) store of series points plus coverage ranges. |
+| core | [series-cache.ts](src/core/series-cache.ts) | Provider-independent read-through history cache on top of `HistoryStore`. |
+| providers | [coinalyze-client.ts](src/providers/coinalyze/coinalyze-client.ts) | Free Coinalyze API (`https://api.coinalyze.net/v1`; OpenAPI spec at `/v1/doc/api-spec.json`). Needs `COINALYZE_API_KEY`. |
+| providers | [coinglass-client.ts](src/providers/coinglass/coinglass-client.ts) | Coinglass Open API v4. The account's plan has no API access ("Upgrade plan"); its key is commented out in `.env`. |
+| providers | [yahoo-client.ts](src/providers/yahoo/yahoo-client.ts) | Unofficial Yahoo Finance API, no key. Uses `/v8/finance/chart` for both history and quotes, because `/v7/finance/quote` needs a cookie crumb (401). |
+| providers | [kraken-client.ts](src/providers/kraken/kraken-client.ts) | Kraken spot REST: public market data plus signed private account/trading calls. |
+| providers | [kraken-futures-client.ts](src/providers/kraken/kraken-futures-client.ts) | Kraken Futures (derivatives) REST: a separate exchange with its own keys. Market data, account, positions and trading for the planned bot. Not exposed through MCP yet. |
+| providers | [x-client.ts](src/providers/x/x-client.ts) | X API v2, read-only (recent search, user lookup). Needs `X_BEARER_TOKEN`. |
+| brain | [brain.ts](src/brain/brain.ts) | Path-safe file access to the brain root (`BRAIN_DIR`) (list, read, search, write to `wiki/`/`output/` only, write-once to `raw/`). |
+| brain | [x-sync.ts](src/brain/x-sync.ts) | Pulls new posts of the accounts in `<BRAIN_DIR>/x-accounts.json` into `<BRAIN_DIR>/raw/x/`; reads the archive back. |
+| analytics | [liquidation-heatmap.ts](src/analytics/liquidation-heatmap.ts) | Pure model that ESTIMATES a liquidation heatmap from price bars, open interest and the long/short ratio (OI-delta cohorts over assumed leverage tiers; model OI follows real OI). Behind `coinalyze_liquidation_heatmap_estimate`. Not measured data. |
+| trading | [futures-risk.ts](src/trading/futures-risk.ts) | Pure pre-trade risk check for the futures bot: caps per-symbol and total exposure, leverage, open positions, order size and rate, and daily loss. |
+| trading | [futures-pnl.ts](src/trading/futures-pnl.ts), [trade-store.ts](src/trading/trade-store.ts) | Realized PnL statistics for Kraken Futures: fills are synced into SQLite (`futures_fills`, with order id and maker/taker type; older databases are migrated on open), turned into closed trades by average-cost netting (`futures_trades`) and summarized. Gross of fees and funding; linear contracts (PF_/FF_) only. |
+| bot | [src/bot/](src/bot/) | The Kraken Futures trading bot's deterministic core (state machine, sizing, simulated exchange, watchdog, reconciliation, property tests). **Cannot place real orders yet.** `npm run test:bot`. Architecture: [docs/bot-architecture.md](docs/bot-architecture.md). Status, deviations from the spec and unverified assumptions: [docs/superpowers/2026-10-03-trader-core-status.md](docs/superpowers/2026-10-03-trader-core-status.md). |
+| speculation | [src/speculation/](src/speculation/) | Speculation mode (four session reports a day: "most probable continuation" with an explicit LONG/SHORT/NEUTRAL bias, written by the `speculate` skill into `<BRAIN_DIR>/output/speculation/`). Code is deterministic support only: `check.ts` (validates bets, rewrites the report's Best bets block, appends `bets-log.json`), `screen.ts` (symbol screening), `sessions.ts` (the four sessions with regions, investor profiles and bet limits; DST-aware), `volume.ts` (measured volume share per session), `score.ts` (matches Kraken Futures fills to bets, resolves outcomes from futures 1m candles with maker/taker fees per leg, calibration, per-session/per-bias tables), `fetch.ts` (the scorer fetches futures candles and syncs fills itself). Advisory text only, no order placement. `npm run test:speculation`. Plan: [docs/superpowers/plans/2026-10-03-speculation-mode.md](docs/superpowers/plans/2026-10-03-speculation-mode.md). User guide: [docs/speculation-guide.md](docs/speculation-guide.md). |
 
 ## Commands
 
-- **Start the server:** `npm start` (runs `node --env-file-if-exists=.env mcp-server.ts`).
+- **Start the server:** `npm start` (runs `node --env-file-if-exists=.env src/server/mcp-server.ts`).
 - **All tests:** `npm test`.
-- **Offline tests only:** `npm run test:offline`. These are [coinalyze-cache.test.ts](coinalyze-cache.test.ts), [yahoo-client.test.ts](yahoo-client.test.ts), [kraken-client.test.ts](kraken-client.test.ts), [kraken-futures-client.test.ts](kraken-futures-client.test.ts), [futures-risk.test.ts](futures-risk.test.ts) (with a randomized check that no allowed order breaks a cap), [futures-pnl.test.ts](futures-pnl.test.ts), [liquidation-heatmap.test.ts](liquidation-heatmap.test.ts) and [x-sync.test.ts](x-sync.test.ts). They stub `fetch` with fake APIs and need no keys or network.
-- **End-to-end tests against the real APIs:** `npm run test:coinalyze`, `npm run test:yahoo`, `npm run test:kraken`, `npm run test:x` or `npm run test:coinglass`.
-  - `test:x` always tests the brain tools (temporary `BRAIN_DIR`); its X part runs only with `X_BEARER_TOKEN` and syncs at most 10 posts per query from the last hour.
-  - Each spawns `mcp-server.ts` on a free port through [test-helpers.ts](test-helpers.ts), checks auth and `tools/list`, calls every tool and validates the data shape.
+- **Offline tests only:** `npm run test:offline`: every `src/**/*.test.ts` (unit tests next to their modules, including the bot's and speculation's; `futures-risk.test.ts` has a randomized check that no allowed order breaks a cap). `npm run test:bot` and `npm run test:speculation` run one module. They stub `fetch` with fake APIs and need no keys or network.
+- **End-to-end tests against the real APIs** (`test/e2e/`; all of them: `npm run test:e2e`): `npm run test:coinalyze`, `npm run test:yahoo`, `npm run test:kraken`, `npm run test:x` or `npm run test:coinglass`.
+  - `test:x` always tests the brain tools (temporary `BRAIN_DIR`, seeded with `x-accounts.json` from the real `BRAIN_DIR`); its X part runs only with `X_BEARER_TOKEN` and syncs at most 10 posts per query from the last hour.
+  - Each spawns `src/server/mcp-server.ts` on a free port through [test-helpers.ts](test/e2e/test-helpers.ts), checks auth and `tools/list`, calls every tool and validates the data shape.
   - A suite is skipped when its provider is not configured.
   - They use real API quota and are slow because of throttling.
-- **Run a single test:** `node --env-file-if-exists=.env --test --test-name-pattern="liquidation" coinalyze.test.ts`.
+- **Run a single test:** `node --env-file-if-exists=.env --test --test-name-pattern="liquidation" test/e2e/coinalyze.test.ts`.
 - **Type-check:** `npm run typecheck`. **Build** to `dist/`: `npm run build`.
 
 ## Configuration (`.env`)
@@ -54,7 +72,7 @@ MCP server that exposes market data to Claude: crypto derivatives (Coinalyze, Co
 
 **Optional:**
 - `PORT`, `HOST`.
-- `BRAIN_DIR`: the brain root, set to the Obsidian vault `pierdoly`. The fallback `brain/` next to the source files is gitignored.
+- `BRAIN_DIR`: the brain root, set to the Obsidian vault `pierdoly`. The fallback `brain/` in the repo root is gitignored.
 - Speculation mode (all optional): `SPECULATION_SYMBOLS` (core, `BTC,ETH,XRP`), `SPECULATION_SCREEN_EXTRA` (3), `SPECULATION_MIN_VOLUME_USD`, `SPECULATION_MIN_DEPTH_USD`, `SPECULATION_MAX_BETS` (3), `SPECULATION_MAX_ENTRY_DEVIATION` (0.005), `SPECULATION_FEE_BPS` (5, taker fee the checker assumes for both legs), `SPECULATION_MAKER_FEE_BPS` (2) / `SPECULATION_TAKER_FEE_BPS` (5) (scoring), `SPECULATION_MATCH_TOLERANCE` (0.003), `SPECULATION_TZ` (Europe/Warsaw), `SPECULATION_LEAD_MINUTES` (20).
 - `LOG_LEVEL`: `debug`, `info` (default), `warn` or `error`.
 - `CACHE_DB_PATH`: default `~/.krypto-kal/cache.db`, deliberately outside OneDrive because sync can lock SQLite files.
