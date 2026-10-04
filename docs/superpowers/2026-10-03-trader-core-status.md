@@ -5,7 +5,7 @@ Written 2026-10-03, after Task 12 of 14. Spec: `specs/2026-10-03-trader-core-des
 ## What exists
 
 An LLM-free, deterministic trader core for the Kraken Futures bot. **It cannot place a real order**: the only executor is a
-simulation, `LiveExecutor` does not exist yet, and the trader process is meant to hold read-only keys. All code is in `bot/`.
+simulation, `LiveExecutor` does not exist yet, and the trader process is meant to hold read-only keys. All code is in `src/bot/`.
 
 | Task | File(s) | What it does |
 |---|---|---|
@@ -31,7 +31,7 @@ simulation, `LiveExecutor` does not exist yet, and the trader process is meant t
 
 `npm run test:bot` runs 453 offline tests in about 22 s (`npm run typecheck` is clean). `SIM_SEEDS=1000 SIM_STEPS=800 npm run test:bot`
 runs a much deeper property run. Nearly every safety rule was **mutation-checked**: break the rule, confirm a test fails.
-A failing property prints its seed and step; replay it with `collectScenario(seed, steps, { trace: true })` from `bot/sim.ts`.
+A failing property prints its seed and step; replay it with `collectScenario(seed, steps, { trace: true })` from `src/bot/sim.ts`.
 
 ## Where the implementation deliberately differs from the spec (the spec was updated to match)
 

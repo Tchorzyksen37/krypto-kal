@@ -30,16 +30,16 @@ Schedule (local time Europe/Warsaw, routine fires 20 min before each window): 07
 
 ## Procedure
 
-1. **Session.** Run `node speculation/sessions.ts`. It returns the session to report on, its UTC and local
+1. **Session.** Run `node src/speculation/sessions.ts`. It returns the session to report on, its UTC and local
    window, limits (entry deadline, max TTL, max bets, min reward:risk, max entry deviation), the typical
    behaviour, what to watch, cautions, the regions that generate volume, and the investor types that matter
    with their footprints. Use these in steps 3-6. Today's weekday matters: weekends have no US equity data or
    open, so treat the overlap and US sessions as quiet.
 2. **Watch list.** Core: BTC, ETH, XRP. Add up to `SPECULATION_SCREEN_EXTRA` (3) screened symbols: write the
-   candidates (fields of `Candidate` in `speculation/screen.ts`) to a scratch JSON file and run
-   `node speculation/screen.ts <candidates.json>`. Record the `why` for each non-core pick.
+   candidates (fields of `Candidate` in `src/speculation/screen.ts`) to a scratch JSON file and run
+   `node src/speculation/screen.ts <candidates.json>`. Record the `why` for each non-core pick.
 3. **Who is trading (measured part).** Pull 7+ days of 1h `kraken_ohlc` for BTC into a scratch file and run
-   `node speculation/volume.ts <candles-1h.json>`: it gives each session's measured share of daily volume and
+   `node src/speculation/volume.ts <candles-1h.json>`: it gives each session's measured share of daily volume and
    its rank per hour. Say whether this session is a high- or low-volume one, which region dominates it, and
    which investor types (from step 1) are therefore most likely to be moving price. Footprints that our tools
    cannot measure (ETF flows, Korean premium, whale prints) go to UNKNOWN.
@@ -78,7 +78,7 @@ Schedule (local time Europe/Warsaw, routine fires 20 min before each window): 07
    (rolling scorecard line), then **Best bets** last. Write `HHMMZ.meta.json` next to it: `session`,
    `generated`, `window` (from step 1), `bias {direction, probability, summary}`, `symbols` (futures contract,
    last, 1h ATR, spread_bps, why, bias), and `bets`.
-9. **Validate:** `node speculation/check.ts <meta.json>`. It enforces the bias, applies the session's limits,
+9. **Validate:** `node src/speculation/check.ts <meta.json>`. It enforces the bias, applies the session's limits,
    drops invalid bets (reason printed), assigns ids, flags bets against the bias, inserts the Bias callout and
    rewrites the Best bets block. Do not hand-format those. On a script error, fix the files once and rerun. On
    a second failure, keep the KNOWN / UNKNOWN summary and add a "generation failed" banner.

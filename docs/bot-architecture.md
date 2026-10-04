@@ -1,6 +1,6 @@
 # Kraken Futures bot: architecture and design
 
-Reference for the trader core in `bot/`. The requirements and decisions are in `superpowers/specs/2026-10-03-trader-core-design.md`,
+Reference for the trader core in `src/bot/`. The requirements and decisions are in `superpowers/specs/2026-10-03-trader-core-design.md`,
 the build order in `superpowers/plans/2026-10-03-trader-core.md`, and what is done and unverified in
 `superpowers/2026-10-03-trader-core-status.md`. This document explains how the pieces fit and why.
 

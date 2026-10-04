@@ -3,7 +3,7 @@
 How to use the speculation reports, how to act on them, and what to expect from them.
 Design details: [superpowers/plans/2026-10-03-speculation-mode.md](superpowers/plans/2026-10-03-speculation-mode.md).
 
-> **Status (2026-10-04):** the support code (`speculation/`) and both skills exist and the offline tests pass. The
+> **Status (2026-10-04):** the support code (`src/speculation/`) and both skills exist and the offline tests pass. The
 > checker and scoring bugs found in review are fixed, but the mode has **not been run against the live tools yet**
 > and some limitations remain (see [Known limitations](#known-limitations)). Treat the first reports as a test run
 > and do not size positions on them.
@@ -99,7 +99,7 @@ session reports on the running session; its bets can only fill from the moment i
 ## 5. Scoring
 
 Once a day (or whenever you like), ask Claude "score the speculation bets" (skill `speculation-score`), or run it
-yourself: `node --env-file-if-exists=.env speculation/score.ts <vault>/output/speculation`. It fetches the futures
+yourself: `node --env-file-if-exists=.env src/speculation/score.ts <vault>/output/speculation`. It fetches the futures
 candles and your fills itself, and:
 
 - pulls your Kraken Futures fills and matches them to bets automatically (same contract and side, inside the bet's
@@ -134,7 +134,7 @@ How to read the scorecard:
 | `output/speculation/YYYY-MM-DD/_day.md` | daily scorecard |
 | `output/speculation/_scorecard.md` | rolling and all-time scorecard |
 
-In this repo: `speculation/` (checker, screen, sessions, volume, scorer; `npm run test:speculation`),
+In this repo: `src/speculation/` (checker, screen, sessions, volume, scorer; `npm run test:speculation`),
 `.claude/skills/speculate/` and `.claude/skills/speculation-score/`.
 
 ## 7. Known limitations
