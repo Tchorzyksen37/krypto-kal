@@ -37,7 +37,13 @@ all data comes from the Kraken Futures API through the MCP tools.
    If the network cannot reach Kraken, gather the data with the MCP tools (`kraken_futures_candles` per contract and
    window, `kraken_futures_fills`) into a JSON file `{ fills, candles: { "PF_...": [...] } }` and run
    `node src/speculation/score.ts <dir> --input <file>`.
-2. **Read** `YYYY-MM-DD/_day.md` and `_scorecard.md` (the script wrote them): hit rate, mean R, calibration buckets,
-   per session / symbol / side / vs bias, never-touched rate, taken vs skipped.
-3. **Reply** with: bets scored, win rate with N, mean R, the one pattern that stands out (or "nothing
-   significant yet"), and any fills that matched no bet.
+   It also scores each finished report's **bias** (`reports-log.json`, written by the checker): the session move of
+   each symbol from the first trade to the last close of the window, flat when smaller than 0.25 x 1h ATR x
+   sqrt(hours); the headline call is judged on BTC.
+2. **Read** `YYYY-MM-DD/_day.md` and `_scorecard.md` (the script wrote them). The key line is the edge line: how
+   often the take profit was reached (with its 95% interval) against the stated probability and the chance
+   baseline `1 / (1 + R:R)`, and the Brier skill against chance (above 0 = the stated probabilities beat chance).
+   Then the bias table (right vs chance, Brier), calibration (stated vs chance vs reached), per session / symbol
+   / side / vs bias, never-touched rate, taken vs skipped.
+3. **Reply** with: the edge line as written, the bias hit rate with N, mean net R with its interval, the one
+   pattern that stands out (or "nothing significant yet"), and any fills that matched no bet.

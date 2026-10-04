@@ -12,7 +12,7 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { Actual, Bet, Candle, ExitReason, Fill, Hypothetical, LoggedBet } from "./types.ts";
+import type { Actual, Bet, BiasOutcome, Candle, ExitReason, Fill, Hypothetical, LoggedBet, MoveResult, ReportLogEntry } from "./types.ts";
 
 const CANDLE_SEC = 60;
 const EPS = 1e-9;
@@ -201,13 +201,27 @@ export function actualOutcome(bet: Bet, m: Match, options: Partial<ScoreOptions>
 
 // ---- statistics ----
 
+export interface Interval {
+  lo: number;
+  hi: number;
+}
+
 export interface Stats {
   bets: number; // bets with a final hypothetical outcome
   touched: number;
   notTouched: number;
-  wins: number; // touched bets with net R > 0
+  wins: number; // touched bets with net R > 0 (profitable, including profitable time-outs)
   winRate?: number;
+  tp: number; // touched bets that reached their take profit: the event the stated probability is about
+  tpRate?: number;
+  tpRateCI?: Interval; // 95% Wilson interval
+  meanStated?: number; // mean stated probability of the touched bets
+  meanChance?: number; // mean chance baseline of the touched bets
+  brier?: number; // mean (stated P - hit)^2; lower is better
+  brierChance?: number; // the same with the chance baseline as the forecast
+  skill?: number; // 1 - brier / brierChance: > 0 means the stated P beat chance
   meanNetR?: number;
+  meanNetRCI?: Interval; // 95%, normal approximation
   taken: number;
   takenClosed: number;
   takenMeanNetR?: number;
@@ -215,22 +229,63 @@ export interface Stats {
 
 const mean = (xs: number[]) => (xs.length ? round(xs.reduce((s, x) => s + x, 0) / xs.length) : undefined);
 
+// Chance baseline: in a market without drift, price hits a level `risk` away before one `reward` away with
+// probability reward/(risk+reward), so the take profit comes first with probability risk/(risk+reward) = 1/(1+RR).
+// Time-outs lower both; this is the bar a stated probability has to clear to claim any edge.
+export const chanceOfTp = (b: Bet) => 1 / (1 + Math.abs(b.take_profit - b.entry) / riskOf(b));
+
+// 95% Wilson score interval of a proportion k/n.
+export function wilson(k: number, n: number, z = 1.96): Interval | undefined {
+  if (n === 0) return undefined;
+  const p = k / n;
+  const d = 1 + (z * z) / n;
+  const c = (p + (z * z) / (2 * n)) / d;
+  const h = (z * Math.sqrt((p * (1 - p)) / n + (z * z) / (4 * n * n))) / d;
+  return { lo: round(Math.max(0, c - h)), hi: round(Math.min(1, c + h)) };
+}
+
+// 95% interval of a mean (normal approximation; needs at least 2 values).
+export function meanCI(xs: number[], z = 1.96): Interval | undefined {
+  if (xs.length < 2) return undefined;
+  const m = xs.reduce((a, b) => a + b, 0) / xs.length;
+  const sd = Math.sqrt(xs.reduce((a, x) => a + (x - m) ** 2, 0) / (xs.length - 1));
+  const h = (z * sd) / Math.sqrt(xs.length);
+  return { lo: round(m - h), hi: round(m + h) };
+}
+
+const isTouched = (b: LoggedBet) => b.hypothetical !== undefined && ["tp", "sl", "ttl"].includes(b.hypothetical.status);
+
 export function summarize(log: LoggedBet[]): Stats {
   const final = log.filter((b) => b.hypothetical && b.hypothetical.status !== "open");
-  const touched = final.filter((b) => b.hypothetical!.status !== "not_touched");
+  const touched = final.filter(isTouched);
   const rs = touched.map((b) => b.hypothetical!.netR ?? 0);
+  const hits = touched.map((b) => (b.hypothetical!.status === "tp" ? 1 : 0));
   const closed = log.filter((b) => b.actual?.netR !== undefined);
   const s: Stats = {
     bets: final.length,
     touched: touched.length,
     notTouched: final.length - touched.length,
     wins: rs.filter((r) => r > 0).length,
+    tp: hits.reduce<number>((a, h) => a + h, 0),
     taken: log.filter((b) => b.actual).length,
     takenClosed: closed.length,
   };
-  if (touched.length) s.winRate = round(s.wins / touched.length);
+  if (touched.length) {
+    s.winRate = round(s.wins / touched.length);
+    s.tpRate = round(s.tp / touched.length);
+    s.tpRateCI = wilson(s.tp, touched.length);
+    s.meanStated = mean(touched.map((b) => b.probability));
+    s.meanChance = mean(touched.map(chanceOfTp));
+    const brier = touched.reduce((a, b, i) => a + (b.probability - hits[i]!) ** 2, 0) / touched.length;
+    const brierChance = touched.reduce((a, b, i) => a + (chanceOfTp(b) - hits[i]!) ** 2, 0) / touched.length;
+    s.brier = round(brier);
+    s.brierChance = round(brierChance);
+    if (brierChance > 0) s.skill = round(1 - brier / brierChance);
+  }
   const m = mean(rs);
   if (m !== undefined) s.meanNetR = m;
+  const ci = meanCI(rs);
+  if (ci) s.meanNetRCI = ci;
   const tm = mean(closed.map((b) => b.actual!.netR!));
   if (tm !== undefined) s.takenMeanNetR = tm;
   return s;
@@ -240,22 +295,131 @@ export interface CalibrationBucket {
   range: string;
   n: number;
   stated?: number; // mean stated probability
-  realized?: number; // fraction of touched bets with net R > 0
+  chance?: number; // mean chance baseline
+  realized?: number; // fraction of touched bets that reached take profit
 }
 
-// Stated probability vs realised win frequency, over touched bets only (the probability is conditional on the touch).
+// Stated probability vs how often the take profit was actually reached, over touched bets only (the probability
+// is conditional on the touch). The chance column is what a coin-flip market would have given these bets.
 export function calibration(log: LoggedBet[], edges = [0, 0.2, 0.4, 0.6, 0.8, 1.0001]): CalibrationBucket[] {
-  const touched = log.filter((b) => b.hypothetical && ["tp", "sl", "ttl"].includes(b.hypothetical.status));
+  const touched = log.filter(isTouched);
   return edges.slice(0, -1).map((lo, i) => {
     const hi = edges[i + 1]!;
     const inB = touched.filter((b) => b.probability >= lo - EPS && b.probability < hi);
     const bucket: CalibrationBucket = { range: `${Math.round(lo * 100)}-${Math.min(100, Math.round(hi * 100))}%`, n: inB.length };
     if (inB.length) {
       bucket.stated = mean(inB.map((b) => b.probability));
-      bucket.realized = round(inB.filter((b) => (b.hypothetical!.netR ?? 0) > 0).length / inB.length);
+      bucket.chance = mean(inB.map(chanceOfTp));
+      bucket.realized = round(inB.filter((b) => b.hypothetical!.status === "tp").length / inB.length);
     }
     return bucket;
   });
+}
+
+// ---- bias: was the stated lean right over the session? ----
+
+export const BIAS_DEAD_ZONE_ATR = 0.25; // a session move below 0.25 x 1h ATR x sqrt(hours) counts as flat
+
+// Session move of each symbol from the first trade of the window to the last close before it ends. Undefined
+// until the candles cover the whole window. The headline bias is judged on BTC (the market leader), or on the
+// first symbol when BTC is not in the report.
+export function resolveBias(entry: ReportLogEntry, candles: Record<string, Candle[]>): BiasOutcome | undefined {
+  const start = Date.parse(entry.window[0]) / 1000;
+  const end = Date.parse(entry.window[1]) / 1000;
+  const hours = (end - start) / 3600;
+  const symbols: BiasOutcome["symbols"] = [];
+  for (const sym of entry.symbols) {
+    const inWindow = (candles[sym.futures] ?? []).filter((c) => c.t >= start && c.t < end).sort((a, b) => a.t - b.t);
+    const first = inWindow[0];
+    const last = inWindow[inWindow.length - 1];
+    if (!first || !last || last.t + 60 < end) return undefined; // not covered yet
+    const deadZone = BIAS_DEAD_ZONE_ATR * sym.atr_1h * Math.sqrt(Math.max(1, hours));
+    const move = last.c - first.o;
+    const result: MoveResult = Math.abs(move) < deadZone ? "flat" : move > 0 ? "up" : "down";
+    const out: BiasOutcome["symbols"][number] = {
+      symbol: sym.symbol, open: first.o, close: last.c,
+      movePct: round((move / first.o) * 100), deadZonePct: round((deadZone / first.o) * 100), result,
+    };
+    if (sym.bias) {
+      out.lean = sym.bias;
+      out.correct = leanCorrect(sym.bias, result);
+    }
+    symbols.push(out);
+  }
+  const lead = symbols.find((x) => x.symbol === "BTC") ?? symbols[0];
+  if (!lead) return { symbols };
+  return {
+    symbols,
+    headline: {
+      symbol: lead.symbol, direction: entry.bias.direction,
+      ...(entry.bias.probability !== undefined ? { probability: entry.bias.probability } : {}),
+      result: lead.result, correct: leanCorrect(entry.bias.direction, lead.result),
+    },
+  };
+}
+
+const leanCorrect = (lean: string, result: MoveResult) => (lean === "long" ? result === "up" : lean === "short" ? result === "down" : result === "flat");
+
+export interface BiasStats {
+  reports: number; // scored reports
+  directional: number; // headline calls that were LONG or SHORT
+  correct: number;
+  hitRate?: number;
+  hitRateCI?: Interval;
+  flatShare?: number; // share of scored sessions that ended flat (a directional call cannot win those)
+  brier?: number; // directional calls with a probability: mean (p - correct)^2; 0.25 is a coin flip at 50%
+  neutral: number;
+  neutralCorrect: number;
+  leans: number; // per-symbol LONG/SHORT leans
+  leansCorrect: number;
+}
+
+export function biasStats(entries: ReportLogEntry[]): BiasStats {
+  const scored = entries.filter((e) => e.outcome?.headline);
+  const heads = scored.map((e) => e.outcome!.headline!);
+  const dir = heads.filter((h) => h.direction !== "neutral");
+  const neutral = heads.filter((h) => h.direction === "neutral");
+  const withP = dir.filter((h) => h.probability !== undefined);
+  const leans = scored.flatMap((e) => e.outcome!.symbols).filter((x) => x.lean === "long" || x.lean === "short");
+  const st: BiasStats = {
+    reports: scored.length, directional: dir.length, correct: dir.filter((h) => h.correct).length,
+    neutral: neutral.length, neutralCorrect: neutral.filter((h) => h.correct).length,
+    leans: leans.length, leansCorrect: leans.filter((x) => x.correct).length,
+  };
+  if (dir.length) {
+    st.hitRate = round(st.correct / dir.length);
+    st.hitRateCI = wilson(st.correct, dir.length);
+  }
+  if (heads.length) st.flatShare = round(heads.filter((h) => h.result === "flat").length / heads.length);
+  if (withP.length) st.brier = round(withP.reduce((a, h) => a + (h.probability! - (h.correct ? 1 : 0)) ** 2, 0) / withP.length);
+  return st;
+}
+
+export function scoreReports(entries: ReportLogEntry[], candles: Record<string, Candle[]>, nowSec: number): { entries: ReportLogEntry[]; scored: string[] } {
+  const scored: string[] = [];
+  const out = entries.map((e) => {
+    if (e.outcome || Date.parse(e.window[1]) / 1000 > nowSec) return e;
+    const outcome = resolveBias(e, candles);
+    if (!outcome) return e;
+    scored.push(e.report);
+    return { ...e, outcome };
+  });
+  return { entries: out, scored };
+}
+
+export function renderBias(st: BiasStats): string[] {
+  if (!st.reports) return ["### Bias", "", "No session has been scored yet.", ""];
+  const chance = st.flatShare === undefined ? "-" : pct((1 - st.flatShare) / 2);
+  return [
+    "### Bias (headline call, judged on BTC)",
+    "",
+    "| Scored sessions | LONG/SHORT calls | Right [95%] | Chance | Flat sessions | Brier (0.25 = coin flip) | NEUTRAL right | Per-symbol leans right |",
+    "|---|---|---|---|---|---|---|---|",
+    `| ${st.reports} | ${st.directional} | ${pct(st.hitRate)}${ci(st.hitRateCI, pct)} | ${chance} | ${pct(st.flatShare)} | ${st.brier === undefined ? "-" : st.brier.toFixed(3)} | ${st.neutralCorrect}/${st.neutral} | ${st.leansCorrect}/${st.leans} |`,
+    "",
+    `_A session counts as flat when it moved less than ${BIAS_DEAD_ZONE_ATR} x 1h ATR x sqrt(hours); a LONG or SHORT call loses a flat session. Chance = (1 - flat share) / 2._`,
+    "",
+  ];
 }
 
 // ---- applying everything to a log ----
@@ -272,6 +436,7 @@ export interface ScoreRun {
   matched: string[];
   unmatchedFills: Fill[];
   ambiguous: string[];
+  reportsScored?: string[]; // reports whose bias was scored in this run
 }
 
 export function scoreLog(logIn: LoggedBet[], input: ScoreInput, options: Partial<ScoreOptions> = {}): ScoreRun {
@@ -304,16 +469,29 @@ export function scoreLog(logIn: LoggedBet[], input: ScoreInput, options: Partial
 const pct = (x: number | undefined) => (x === undefined ? "-" : `${Math.round(x * 100)}%`);
 const rFmt = (x: number | undefined) => (x === undefined ? "-" : `${x >= 0 ? "+" : ""}${x.toFixed(2)}R`);
 
+const ci = (i: Interval | undefined, f: (x: number) => string) => (i ? ` [${f(i.lo)}, ${f(i.hi)}]` : "");
+
+// One line that answers "is there an edge?": take-profit rate against the stated P and the chance baseline.
+export function edgeLine(s: Stats): string {
+  if (!s.touched) return "No touched bets yet: nothing to compare with chance.";
+  const verdict =
+    s.touched < 30 ? "too few bets to conclude anything"
+      : s.tpRateCI && s.meanChance !== undefined && s.tpRateCI.lo > s.meanChance ? "take-profit rate is above chance (95%)"
+      : s.tpRateCI && s.meanChance !== undefined && s.tpRateCI.hi < s.meanChance ? "take-profit rate is BELOW chance (95%)"
+      : "not distinguishable from chance yet";
+  return `Take profit reached ${pct(s.tpRate)}${ci(s.tpRateCI, pct)} of ${s.touched} touched bets; stated ${pct(s.meanStated)}, chance ${pct(s.meanChance)}. Brier skill vs chance ${s.skill === undefined ? "-" : `${s.skill >= 0 ? "+" : ""}${s.skill.toFixed(2)}`}: ${verdict}.`;
+}
+
 function statsTable(label: string, s: Stats): string[] {
-  const note = s.touched < 30 ? " (too few bets to conclude anything)" : "";
   return [
     `### ${label}`,
     "",
-    "| Bets | Entry touched | Never touched | Win rate | Mean net R | Taken by you | Your mean net R |",
-    "|---|---|---|---|---|---|---|",
-    `| ${s.bets} | ${s.touched} | ${s.notTouched} | ${pct(s.winRate)} (N=${s.touched}) | ${rFmt(s.meanNetR)} | ${s.taken} | ${rFmt(s.takenMeanNetR)} (N=${s.takenClosed}) |`,
+    "| Bets | Entry touched | Never touched | TP rate [95%] | Stated P | Chance | Brier skill | Mean net R [95%] | Profitable | Taken by you | Your mean net R |",
+    "|---|---|---|---|---|---|---|---|---|---|---|",
+    `| ${s.bets} | ${s.touched} | ${s.notTouched} | ${pct(s.tpRate)}${ci(s.tpRateCI, pct)} (N=${s.touched}) | ${pct(s.meanStated)} | ${pct(s.meanChance)} | ${s.skill === undefined ? "-" : s.skill.toFixed(2)} | ${rFmt(s.meanNetR)}${ci(s.meanNetRCI, rFmt)} | ${pct(s.winRate)} | ${s.taken} | ${rFmt(s.takenMeanNetR)} (N=${s.takenClosed}) |`,
     "",
-    ...(note ? [`_${note.trim()}_`, ""] : []),
+    `_${edgeLine(s)}_`,
+    "",
   ];
 }
 
@@ -342,13 +520,17 @@ export function renderDay(log: LoggedBet[], day: string, run?: Pick<ScoreRun, "u
   return `${lines.join("\n")}\n`;
 }
 
-export function renderScorecard(log: LoggedBet[], nowSec: number): string {
+export function renderScorecard(log: LoggedBet[], nowSec: number, reports: ReportLogEntry[] = []): string {
   const weekAgo = nowSec - 7 * 86_400;
   const recent = log.filter((b) => Date.parse(b.fill_from) / 1000 >= weekAgo);
-  const lines = ["# Speculation scorecard", "", ...statsTable("Last 7 days", summarize(recent)), ...statsTable("All time", summarize(log))];
+  const lines = [
+    "# Speculation scorecard", "",
+    ...statsTable("Last 7 days", summarize(recent)), ...statsTable("All time", summarize(log)),
+    ...renderBias(biasStats(reports)),
+  ];
 
-  lines.push("### Calibration (touched bets)", "", "| Stated P | N | Mean stated | Realised win rate |", "|---|---|---|---|");
-  for (const c of calibration(log)) lines.push(`| ${c.range} | ${c.n} | ${pct(c.stated)} | ${pct(c.realized)} |`);
+  lines.push("### Calibration (touched bets)", "", "| Stated P | N | Mean stated | Chance | Take profit reached |", "|---|---|---|---|---|");
+  for (const c of calibration(log)) lines.push(`| ${c.range} | ${c.n} | ${pct(c.stated)} | ${pct(c.chance)} | ${pct(c.realized)} |`);
   lines.push("");
 
   const groups: [string, (b: LoggedBet) => string][] = [
@@ -358,10 +540,10 @@ export function renderScorecard(log: LoggedBet[], nowSec: number): string {
     ["Vs bias", (b) => b.vs_bias ?? "(none)"],
   ];
   for (const [title, key] of groups) {
-    lines.push(`### By ${title.toLowerCase()}`, "", `| ${title} | Touched | Win rate | Mean net R |`, "|---|---|---|---|");
+    lines.push(`### By ${title.toLowerCase()}`, "", `| ${title} | Touched | TP rate | Chance | Mean net R |`, "|---|---|---|---|---|");
     for (const k of [...new Set(log.map(key))].sort()) {
       const s = summarize(log.filter((b) => key(b) === k));
-      lines.push(`| ${k} | ${s.touched} | ${pct(s.winRate)} | ${rFmt(s.meanNetR)} |`);
+      lines.push(`| ${k} | ${s.touched} | ${pct(s.tpRate)} | ${pct(s.meanChance)} | ${rFmt(s.meanNetR)} |`);
     }
     lines.push("");
   }
@@ -412,15 +594,23 @@ export async function scoreFiles(dir: string, inputPath: string, day?: string, o
 }
 
 // Scores the log in `dir` with `input` and writes the log, the day note and the scorecard.
+export const readReports = async (dir: string): Promise<ReportLogEntry[]> => {
+  const path = join(dir, "reports-log.json");
+  return existsSync(path) ? (JSON.parse(await readFile(path, "utf8")) as ReportLogEntry[]) : [];
+};
+
 export async function scoreDir(dir: string, input: ScoreInput, day?: string, options: Partial<ScoreOptions> = {}): Promise<ScoreRun> {
   const logPath = join(dir, "bets-log.json");
   const log = await readLog(dir);
   const run = scoreLog(log, input, options);
+  const reports = scoreReports(await readReports(dir), input.candles, input.nowSec);
+  run.reportsScored = reports.scored;
+  if (reports.entries.length) await writeFile(join(dir, "reports-log.json"), `${JSON.stringify(reports.entries, null, 2)}\n`, "utf8");
   await writeFile(logPath, `${JSON.stringify(run.log, null, 2)}\n`, "utf8");
   const d = day ?? new Date(input.nowSec * 1000).toISOString().slice(0, 10);
   await mkdir(join(dir, d), { recursive: true });
   await writeFile(join(dir, d, "_day.md"), renderDay(run.log, d, run), "utf8");
-  await writeFile(join(dir, "_scorecard.md"), renderScorecard(run.log, input.nowSec), "utf8");
+  await writeFile(join(dir, "_scorecard.md"), renderScorecard(run.log, input.nowSec, reports.entries), "utf8");
   return run;
 }
 
@@ -458,10 +648,11 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     if (input) r = await scoreFiles(dir, input, day, scoreOptionsFromEnv());
     else {
       const { liveInput } = await import("./fetch.ts");
-      const live = await liveInput(await readLog(dir), Math.floor(Date.now() / 1000));
+      const live = await liveInput(await readLog(dir), Math.floor(Date.now() / 1000), process.env, await readReports(dir));
       for (const w of live.warnings) console.warn(`warning: ${w}`);
       r = await scoreDir(dir, live.input, day, scoreOptionsFromEnv());
     }
+    console.log(`bias scored for ${r.reportsScored?.length ?? 0} report(s)`);
     console.log(`resolved ${r.resolved.length}, matched to your fills ${r.matched.length}, unmatched fills ${r.unmatchedFills.length}, ambiguous ${r.ambiguous.length}`);
     const s = summarize(r.log);
     console.log(`all time: ${s.bets} bets, ${s.touched} touched, win rate ${pct(s.winRate)} (N=${s.touched}), mean net R ${rFmt(s.meanNetR)}`);

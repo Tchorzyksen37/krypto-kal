@@ -30,27 +30,35 @@ Schedule (local time Europe/Warsaw, routine fires 20 min before each window): 07
 
 ## Procedure
 
-1. **Session.** Run `node src/speculation/sessions.ts`. It returns the session to report on, its UTC and local
-   window, limits (entry deadline, max TTL, max bets, min reward:risk, max entry deviation), the typical
-   behaviour, what to watch, cautions, the regions that generate volume, and the investor types that matter
-   with their footprints. Use these in steps 3-6. Today's weekday matters: weekends have no US equity data or
-   open, so treat the overlap and US sessions as quiet.
-2. **Watch list.** Core: BTC, ETH, XRP. Add up to `SPECULATION_SCREEN_EXTRA` (3) screened symbols: write the
-   candidates (fields of `Candidate` in `src/speculation/screen.ts`) to a scratch JSON file and run
-   `node src/speculation/screen.ts <candidates.json>`. Record the `why` for each non-core pick.
-3. **Who is trading (measured part).** Pull 7+ days of 1h `kraken_ohlc` for BTC into a scratch file and run
-   `node src/speculation/volume.ts <candles-1h.json>`: it gives each session's measured share of daily volume and
-   its rank per hour. Say whether this session is a high- or low-volume one, which region dominates it, and
-   which investor types (from step 1) are therefore most likely to be moving price. Footprints that our tools
-   cannot measure (ETF flows, Korean premium, whale prints) go to UNKNOWN.
-4. **KNOWN**, per symbol: `kraken_futures_candles` of the **PF_ contract** you would trade (1m / 5m / 1h): this is
-   the price for `last`, the 1h ATR and every level (entry, SL, TP), because bets are scored on futures prices, not
-   spot; `coinalyze_current`; 5m and 1h OI, funding, predicted funding, long/short ratio, liquidations;
-   `kraken_order_book` (imbalance, spread). Global: `yahoo_quote`
-   for ES, NQ, DXY, US10Y, oil, and for the Asian session Nikkei, Hang Seng, USDJPY; `x_recent` for the last
-   6 h; `brain_search` / `brain_read` of the wiki timeline; `kraken_futures_positions` for what the user holds.
-5. **UNKNOWN.** Always include: real liquidation levels, whale / market-maker intent, spoofed depth, news not
-   yet posted, and the investor footprints you cannot measure. Add every failed or stale source (> 15 min for 5m data).
+1. **Measured inputs: one call to `speculation_context`.** It returns, all measured by code:
+   - `session`: the session to report on (UTC and local window, limits, typical behaviour, what to watch,
+     cautions, regions, investor types);
+   - `symbols`: core BTC, ETH, XRP plus up to `SPECULATION_SCREEN_EXTRA` screened extras (`why` says why), each
+     with Kraken Futures last / bid / ask, spread, 1h ATR and ATR ratio, 24h volume, open interest, funding
+     (% per 8h), order-book depth, and Coinalyze OI change 1h/4h, long/short ratio and liquidation burst;
+   - `metaSymbols`: the rows for the meta file, copy them as they are;
+   - `volume`: each session's measured share of daily volume (several exchanges, or Kraken only, as labelled);
+   - `notMeasured` and `warnings`: copy both into UNKNOWN.
+   Use only these numbers for prices and levels; never type a price from memory. If the tool fails, say so in
+   the report and stop after the KNOWN / UNKNOWN summary: a report without measured prices has no bets.
+   Weekday matters: on weekends there is no US equity data or cash open, so treat the overlap and US sessions as quiet.
+2. **Who is trading.** From `session.regions`, `session.investors` and `volume`: say whether this session is a
+   high- or low-volume one, which region dominates it, and which investor types are therefore most likely to be
+   moving price. Footprints our tools cannot measure (ETF flows, Korean premium, whale prints) go to UNKNOWN.
+3. **More KNOWN** (each with its timestamp):
+   - Shorter-term price action of the picked symbols: `kraken_futures_candles` 5m / 15m of the PF_ contract.
+     Never the spot `kraken_ohlc`: bets are scored on futures prices.
+   - Macro: `yahoo_quote` for `ES=F`, `NQ=F` (CME futures: they trade from Sunday 23:00/00:00 Warsaw time to
+     Friday night, unlike the cash indices), `DX-Y.NYB`, `^TNX`, `CL=F`; for the night session also `^N225`,
+     `^HSI`, `JPY=X`. **Check each quote's time:** a quote from the last close (weekends, holidays, outside
+     trading hours) is stale. List it as "last close <day>", do not treat it as a fresh signal, and do not let it
+     drive the bias.
+   - News: if `x_sync` is available, run it first (it is budget-capped) so the archive is current, then
+     `x_recent` for the last 6 h. If `x_sync` is not available or the archive's newest post is old, say how old it
+     is under UNKNOWN ("no posts since <time>"); an empty archive is not "no news".
+   - Context: `brain_search` / `brain_read` of the wiki timeline; `kraken_futures_positions` for what the user holds.
+4. **UNKNOWN.** Everything in `notMeasured` and `warnings`, stale quotes, an old X archive, plus news not yet posted.
+5. (Removed: the screen and the volume profile are part of step 1.)
 6. **POSSIBLE.** Scheduled releases inside the window (say "calendar unknown" if you cannot source it),
    ESTIMATE liquidation clusters, unverified X claims, squeeze setups. Plausibility: low / med / high.
 7. **Speculate** with this framing, literally, as your own task statement:
@@ -76,9 +84,11 @@ Schedule (local time Europe/Warsaw, routine fires 20 min before each window): 07
    investors, measured volume share), regime and scenarios (table with probability and unicode bar), catalysts
    (time-ordered table), risks, KNOWN / UNKNOWN / POSSIBLE digest (ESTIMATE labels visible), track record
    (rolling scorecard line), then **Best bets** last. Write `HHMMZ.meta.json` next to it: `session`,
-   `generated`, `window` (from step 1), `bias {direction, probability, summary}`, `symbols` (futures contract,
-   last, 1h ATR, spread_bps, why, bias), and `bets`.
-9. **Validate:** `node src/speculation/check.ts <meta.json>`. It enforces the bias, applies the session's limits,
+   `generated`, `window` (`session.startUtc` / `session.endUtc` from step 1), `bias {direction, probability,
+   summary}`, `symbols` (the `metaSymbols` rows from step 1, plus `bias` per symbol), and `bets`.
+9. **Validate:** `node src/speculation/check.ts <meta.json>`. It re-measures last price, spread and ATR on Kraken
+   Futures and validates the bets against those (a level from a stale or wrong price is dropped and flagged in the
+   note), records the bias for scoring, enforces the bias, applies the session's limits,
    drops invalid bets (reason printed), assigns ids, flags bets against the bias, inserts the Bias callout and
    rewrites the Best bets block. Do not hand-format those. On a script error, fix the files once and rerun. On
    a second failure, keep the KNOWN / UNKNOWN summary and add a "generation failed" banner.
