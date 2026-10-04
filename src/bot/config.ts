@@ -48,6 +48,7 @@ export const ConfigSchema = z
     trail_start_r: z.number().nonnegative(), // trailing starts once the trade is this many R in profit
     max_hold_hours: z.number().positive(),
     watchdog_interval_sec: z.number().positive(),
+    cycle_interval_sec: z.number().positive(), // the launcher's trader loop: one price feed and one cycle per interval
     db_path: z.string().min(1), // "~" is expanded by the code that opens the database
   })
   .refine((c) => c.mode !== "live" || c.live_enabled, { message: 'mode "live" requires live_enabled: true' });
@@ -92,6 +93,7 @@ const DEFAULTS: BotConfig = {
   trail_start_r: 1,
   max_hold_hours: 48,
   watchdog_interval_sec: 5,
+  cycle_interval_sec: 5,
   db_path: "~/.krypto-kal/bot.db",
 };
 
