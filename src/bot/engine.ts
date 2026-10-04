@@ -93,6 +93,7 @@ export function reduceOnlyReason(s: Snapshot, config: BotConfig): string | null 
   if (s.priceAgeSec > config.stale_data_max_age_sec) return "stale_data";
   if (!s.policy) return "no_policy";
   if (Date.parse(s.policy.policy.valid_until) <= s.nowMs) return "policy_expired";
+  if (s.policy.policy.not_before !== undefined && Date.parse(s.policy.policy.not_before) > s.nowMs) return "policy_not_yet_active";
   return null;
 }
 

@@ -96,6 +96,14 @@ session reports on the running session; its bets can only fill from the moment i
 6. **Trade on Kraken Futures** (the PF_ contracts the report names). Scoring matches your fills from that account
    automatically; you do not need to tag trades or upload anything.
 
+## 4b. Letting the dry-run bot trade a bet
+
+To see how a bet would play out without placing it yourself, hand it to the bot (dry-run, simulated fills on real
+prices): skill `speculation-to-bot`, or `npm run bot -- policy from-speculation <HHMMZ.meta.json>`. The bot then trades
+only inside the bet's window (entries from the session start until "Fill by", closed after "Hold max") and with its own,
+stricter risk rules, which can refuse a bet the speculation accepted. Follow it with `npm run bot -- status` or
+`bot_status`. Its results are in the bot's report, separate from the speculation scorecard.
+
 ## 5. Scoring
 
 Once a day (or whenever you like), ask Claude "score the speculation bets" (skill `speculation-score`, which calls
