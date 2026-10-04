@@ -22,6 +22,8 @@ export interface PnlFill {
   size: number;
   price: number;
   ts: number; // epoch ms
+  orderId?: string; // partial fills of one order share it
+  fillType?: string; // "maker", "taker", "liquidation", ... (decides the fee)
 }
 
 export interface ClosedTrade {
@@ -182,6 +184,8 @@ export function report(trades: ClosedTrade[]): PnlReport {
 
 export const toPnlFill = (f: FuturesFill): PnlFill => ({
   id: f.fill_id, symbol: f.symbol, side: f.side, size: Number(f.size), price: Number(f.price), ts: Date.parse(f.fillTime),
+  ...(f.order_id ? { orderId: f.order_id } : {}),
+  ...(f.fillType ? { fillType: f.fillType } : {}),
 });
 
 export interface FillSource {

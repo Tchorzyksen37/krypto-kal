@@ -33,6 +33,10 @@ export class TradeStore {
       );
       CREATE INDEX IF NOT EXISTS futures_trades_closed ON futures_trades (closed_at);
     `);
+    // Added later (speculation scoring needs the order id and the maker/taker type); older databases lack them.
+    const cols = new Set((this.db.prepare("PRAGMA table_info(futures_fills)").all() as { name: string }[]).map((c) => c.name));
+    if (!cols.has("order_id")) this.db.exec("ALTER TABLE futures_fills ADD COLUMN order_id TEXT");
+    if (!cols.has("fill_type")) this.db.exec("ALTER TABLE futures_fills ADD COLUMN fill_type TEXT");
   }
 
   // Returns how many fills were new.
@@ -40,9 +44,17 @@ export class TradeStore {
     let inserted = 0;
     this.transaction(() => {
       const insert = this.db.prepare(
-        "INSERT OR IGNORE INTO futures_fills (fill_id, ts, symbol, side, size, price) VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT OR IGNORE INTO futures_fills (fill_id, ts, symbol, side, size, price, order_id, fill_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
       );
-      for (const f of fills) inserted += Number(insert.run(f.id, f.ts, f.symbol, f.side, f.size, f.price).changes);
+      // Fills stored before the columns existed get them filled in when the API returns them again.
+      const backfill = this.db.prepare(
+        "UPDATE futures_fills SET order_id = COALESCE(order_id, ?), fill_type = COALESCE(fill_type, ?) WHERE fill_id = ?",
+      );
+      for (const f of fills) {
+        const changes = Number(insert.run(f.id, f.ts, f.symbol, f.side, f.size, f.price, f.orderId ?? null, f.fillType ?? null).changes);
+        inserted += changes;
+        if (changes === 0 && (f.orderId || f.fillType)) backfill.run(f.orderId ?? null, f.fillType ?? null, f.id);
+      }
     });
     return inserted;
   }
@@ -50,9 +62,15 @@ export class TradeStore {
   fills(filter: TimeFilter = {}, limit?: number): PnlFill[] {
     const { where, params } = whereClause(filter, "ts");
     const rows = this.db
-      .prepare(`SELECT fill_id, ts, symbol, side, size, price FROM futures_fills ${where} ORDER BY ts DESC, fill_id DESC${limit ? " LIMIT ?" : ""}`)
-      .all(...params, ...(limit ? [limit] : [])) as { fill_id: string; ts: number; symbol: string; side: "buy" | "sell"; size: number; price: number }[];
-    return rows.map((r) => ({ id: r.fill_id, ts: r.ts, symbol: r.symbol, side: r.side, size: r.size, price: r.price }));
+      .prepare(`SELECT fill_id, ts, symbol, side, size, price, order_id, fill_type FROM futures_fills ${where} ORDER BY ts DESC, fill_id DESC${limit ? " LIMIT ?" : ""}`)
+      .all(...params, ...(limit ? [limit] : [])) as {
+      fill_id: string; ts: number; symbol: string; side: "buy" | "sell"; size: number; price: number; order_id: string | null; fill_type: string | null;
+    }[];
+    return rows.map((r) => ({
+      id: r.fill_id, ts: r.ts, symbol: r.symbol, side: r.side, size: r.size, price: r.price,
+      ...(r.order_id ? { orderId: r.order_id } : {}),
+      ...(r.fill_type ? { fillType: r.fill_type } : {}),
+    }));
   }
 
   newestFillTs(): number | undefined {
