@@ -1,6 +1,6 @@
 # Kraken Futures bot: trader core, status
 
-Written 2026-10-03, after Task 12 of 14. Spec: `specs/2026-10-03-trader-core-design.md`. Plan: `plans/2026-10-03-trader-core.md`.
+Written 2026-10-03, after Task 12 of 14; updated 2026-10-04 after Tasks 13 and 14 (all 14 done). Spec: `specs/2026-10-03-trader-core-design.md`. Plan: `plans/2026-10-03-trader-core.md`.
 
 ## What exists
 
@@ -21,11 +21,14 @@ simulation, `LiveExecutor` does not exist yet, and the trader process is meant t
 | 11 | `watchdog.ts` | Independent check and backstop: re-places a missing stop once, then closes; reduce-only only |
 | 12 | `sim.ts`, `invariants.test.ts` | Random-scenario property harness for the spec's safety properties, with a tripwire |
 
+| 13 | `live-executor.ts`, `approving-executor.ts`, `guards.test.ts` | `LiveExecutor` always throws; `assertDryRunOnly`; the approval decorator; guard tests (no `tradingEnabled: true`, no `new LiveExecutor`, empty keys on the launcher's client) |
+| 14 | `market-data.ts`, `report.ts`, `alerts.ts`, `runner.ts`, `cli.ts` | Real public market data feeding the simulator; the report; alerts to the log and the vault; the trader and watchdog loops; the CLI (`policy template/add`, `status`, `report`, `ack-halt`, `run`, `trader`, `watchdog`); MCP tool `bot_status` |
+
+How to test it: [../bot-testing.md](../bot-testing.md).
+
 **Not built yet**
-- Task 13: `LiveExecutor` stub (always throws) and `ApprovingExecutor` (y/n per order), plus guard tests.
-- Task 14: report, CLI (`policy add`, `report`, `ack-halt`, `run`), and the launcher that runs the loops. No process wires `trader.ts`,
-  `watchdog.ts` and `reconcile.ts` together or feeds `onPrice` and `accrueFunding` yet. `ack-halt` must re-run reconcile.
-- The analyst (`claude -p` reading `output/`) and the Ollama ingest are separate sub-projects, not started.
+- The analyst (`claude -p` reading `output/`) and the Ollama ingest are separate sub-projects, not started. Policies come from
+  `npm run bot -- policy add` until then.
 
 ## Tests
 
@@ -42,6 +45,13 @@ A failing property prints its seed and step; replay it with `collectScenario(see
 - A backwards clock blocks everything time-dependent but not the protection of an open position.
 - New config keys: `max_menu_age_min`, `entry_confirm_sec`, `trail_atr_multiple`, `trail_start_r`, `maintenance_margin_rate`.
 - `Executor.getOrderHistory` was added (fills alone cannot rebuild the daily order count).
+- `ApprovingExecutor` asks only before orders that open exposure; reduce-only orders (stops, targets, closes), edits,
+  cancels and reads pass without a question, so a fresh position never waits unprotected for an answer.
+- New config key `cycle_interval_sec` (default 5): the trader loop's price feed and cycle interval.
+- `BotStore` sets `busy_timeout` (5 s): the trader and watchdog processes write the same file.
+- The report's funding for a window uses hourly `funding_mark` documents written by the trader loop; slippage is inside
+  the fill prices and shown separately only for stops.
+- Only the trader process sends alerts (cursor in the store); the watchdog's incidents reach them through the store.
 
 ## Bugs the property harness found in the bot (all fixed)
 
@@ -50,6 +60,12 @@ A failing property prints its seed and step; replay it with `collectScenario(see
 3. The simulated partial fill produced sizes that are not a multiple of the size step.
 4. An exchange outage wrote a journal row and an incident every cycle.
 5. (Earlier) A HALTED bot would have closed a position it had no trade record for.
+
+Found while building Tasks 13 and 14 (fixed):
+
+6. The contract's size step was computed as `10 ** -precision`, which is `0.00009999999999999999` for 4 decimals.
+7. `BotStore` had no busy timeout: two processes writing at once would fail with "database is locked".
+8. An unreachable funding endpoint recorded an incident every cycle (seen in a real launch with no network).
 
 ## Assumptions that dry-run cannot verify (stage 2: tiny live orders)
 
@@ -70,6 +86,6 @@ A failing property prints its seed and step; replay it with `collectScenario(see
 
 ## Next steps
 
-1. Task 13, then Task 14 (report, CLI, launcher), then run the bot in dry-run against live read-only data.
+1. Run the bot in dry-run against live data for one to two weeks ([../bot-testing.md](../bot-testing.md)).
 2. Sub-project 2 (analyst) and 3 (Ollama ingest), as in the plan.
 3. Stage 2: verify the assumptions above with minimum-size live orders, approved separately.

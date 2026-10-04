@@ -3,11 +3,12 @@
 // Run: npm run test:x  (X reads are paid: the sync is limited to 10 posts per query from the last hour)
 
 import assert from "node:assert/strict";
-import { copyFileSync, existsSync, mkdtempSync, rmSync } from "node:fs";
+import { copyFileSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, test } from "node:test";
 import { DEFAULT_BRAIN_DIR } from "../../src/brain/brain.ts";
+import { BotStore } from "../../src/bot/bot-store.ts";
 import { call, serverTests, useMcpServer } from "./test-helpers.ts";
 
 const BRAIN_TOOLS = ["x_recent", "brain_list", "brain_read", "brain_search", "brain_write"];
@@ -17,7 +18,9 @@ const dir = mkdtempSync(join(tmpdir(), "brain-e2e-"));
 copyFileSync(join(process.env.BRAIN_DIR ?? DEFAULT_BRAIN_DIR, "x-accounts.json"), join(dir, "x-accounts.json"));
 after(() => rmSync(dir, { recursive: true, force: true }));
 
-const env = { CACHE_DB_PATH: ":memory:", BRAIN_DIR: dir, X_BACKFILL_HOURS: "1", X_MAX_POSTS_PER_QUERY: "10" };
+const botDb = join(dir, "bot.db");
+writeFileSync(join(dir, "bot-config.json"), JSON.stringify({ db_path: botDb }));
+const env = { CACHE_DB_PATH: ":memory:", BRAIN_DIR: dir, X_BACKFILL_HOURS: "1", X_MAX_POSTS_PER_QUERY: "10", BOT_CONFIG: join(dir, "bot-config.json") };
 
 describe("Second brain", () => {
   const ctx = useMcpServer(env);
@@ -42,6 +45,19 @@ describe("Second brain", () => {
     assert.deepEqual(data.changed.betsResolved, []);
     assert.ok(existsSync(join(dir, "output", "speculation", "_scorecard.md")));
     assert.ok(existsSync(join(dir, "output", "speculation", "2026-10-04", "_day.md")));
+  });
+
+  test("bot_status says when the bot has not run, then shows its state and incidents", async () => {
+    const before = (await call(ctx, "bot_status", {})) as { running: boolean; note: string };
+    assert.equal(before.running, false);
+    const store = new BotStore(botDb);
+    store.addIncident({ tMs: Date.now(), kind: "no_sl", detail: "long 0.004 without a stop" });
+    store.close();
+    const after = (await call(ctx, "bot_status", { days: 1 })) as { status: string; report: string; summary: { state: string; incidents: number } };
+    assert.equal(after.summary.state, "FLAT");
+    assert.equal(after.summary.incidents, 1);
+    assert.match(after.status, /no_sl: long 0.004 without a stop/);
+    assert.match(after.report, /# Bot report \(dry-run\)/);
   });
 
   test("raw/ cannot be written", async () => {
