@@ -46,6 +46,7 @@ export class BotStore {
     this.db = new DatabaseSync(file);
     this.db.exec(`
       PRAGMA journal_mode = WAL;
+      PRAGMA busy_timeout = 5000; -- the trader and watchdog processes write the same file; wait instead of failing
       CREATE TABLE IF NOT EXISTS menus (
         id TEXT PRIMARY KEY, data TEXT NOT NULL
       );
@@ -199,6 +200,14 @@ export class BotStore {
       .prepare("SELECT t_ms, kind, detail FROM incidents WHERE t_ms >= ? ORDER BY t_ms, id")
       .all(sinceMs) as unknown as { t_ms: number; kind: string; detail: string }[];
     return rows.map((r) => ({ tMs: r.t_ms, kind: r.kind, detail: r.detail }));
+  }
+
+  // Incidents with an id above `afterId`, oldest first (the alerting cursor).
+  incidentsAfter(afterId: number): (Incident & { id: number })[] {
+    const rows = this.db
+      .prepare("SELECT id, t_ms, kind, detail FROM incidents WHERE id > ? ORDER BY id")
+      .all(afterId) as unknown as { id: number; t_ms: number; kind: string; detail: string }[];
+    return rows.map((r) => ({ id: r.id, tMs: r.t_ms, kind: r.kind, detail: r.detail }));
   }
 
   close(): void {

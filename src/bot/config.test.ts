@@ -56,6 +56,7 @@ describe("defaultConfig", () => {
       trail_start_r: 1,
       max_hold_hours: 48,
       watchdog_interval_sec: 5,
+      cycle_interval_sec: 5,
       db_path: "~/.krypto-kal/bot.db",
     };
     assert.deepEqual(defaultConfig(), expected);

@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, test } from "node:test";
 import { DEFAULT_BRAIN_DIR } from "../../src/brain/brain.ts";
+import { BotStore } from "../../src/bot/bot-store.ts";
 import { call, serverTests, useMcpServer } from "./test-helpers.ts";
 
 const BRAIN_TOOLS = ["x_recent", "brain_list", "brain_read", "brain_search", "brain_write", "brain_triage", "brain_ingest_mark"];
@@ -17,7 +18,9 @@ const dir = mkdtempSync(join(tmpdir(), "brain-e2e-"));
 copyFileSync(join(process.env.BRAIN_DIR ?? DEFAULT_BRAIN_DIR, "x-accounts.json"), join(dir, "x-accounts.json"));
 after(() => rmSync(dir, { recursive: true, force: true }));
 
-const env = { CACHE_DB_PATH: ":memory:", BRAIN_DIR: dir, X_BACKFILL_HOURS: "1", X_MAX_POSTS_PER_QUERY: "10" };
+const botDb = join(dir, "bot.db");
+writeFileSync(join(dir, "bot-config.json"), JSON.stringify({ db_path: botDb }));
+const env = { CACHE_DB_PATH: ":memory:", BRAIN_DIR: dir, X_BACKFILL_HOURS: "1", X_MAX_POSTS_PER_QUERY: "10", BOT_CONFIG: join(dir, "bot-config.json") };
 
 describe("Second brain", () => {
   const ctx = useMcpServer(env);
@@ -57,6 +60,19 @@ describe("Second brain", () => {
     assert.deepEqual(t.noise.map((x) => x.path), ["raw/x/2026-10-04/Reuters-112.md"]);
     await call(ctx, "brain_ingest_mark", { ingested: ["raw/x/2026-10-04/Reuters-111.md"], skipped: [{ path: "raw/x/2026-10-04/Reuters-112.md", reason: "noise" }] });
     assert.equal(((await call(ctx, "brain_triage", {})) as { pending: number }).pending, 0);
+  });
+
+  test("bot_status says when the bot has not run, then shows its state and incidents", async () => {
+    const before = (await call(ctx, "bot_status", {})) as { running: boolean; note: string };
+    assert.equal(before.running, false);
+    const store = new BotStore(botDb);
+    store.addIncident({ tMs: Date.now(), kind: "no_sl", detail: "long 0.004 without a stop" });
+    store.close();
+    const after = (await call(ctx, "bot_status", { days: 1 })) as { status: string; report: string; summary: { state: string; incidents: number } };
+    assert.equal(after.summary.state, "FLAT");
+    assert.equal(after.summary.incidents, 1);
+    assert.match(after.status, /no_sl: long 0.004 without a stop/);
+    assert.match(after.report, /# Bot report \(dry-run\)/);
   });
 
   test("raw/ cannot be written", async () => {

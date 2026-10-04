@@ -30,6 +30,11 @@ import { KRAKEN_OHLC_INTERVALS, KrakenClient } from "../providers/kraken/kraken-
 import { KRAKEN_FUTURES_RESOLUTIONS, KrakenFuturesClient } from "../providers/kraken/kraken-futures-client.ts";
 import { buildContext, contextOptionsFromEnv } from "../speculation/context.ts";
 import { gatherInput } from "../speculation/fetch.ts";
+import { existsSync } from "node:fs";
+import { BotStore, expandHome } from "../bot/bot-store.ts";
+import { resolveConfig, statusText } from "../bot/cli.ts";
+import { dayStartMs } from "../bot/limits.ts";
+import { buildReport, renderReport } from "../bot/report.ts";
 import { biasStats, edgeLine, readLog, readReports, scoreDir, scoreOptionsFromEnv, summarize } from "../speculation/score.ts";
 import { report as pnlReport, syncFills } from "../trading/futures-pnl.ts";
 import { TradeStore } from "../trading/trade-store.ts";
@@ -738,6 +743,40 @@ function registerSpeculation(server: McpServer, futures: KrakenFuturesClient, cz
   );
 }
 
+// --- Trading bot (read-only view of its store) ---
+
+function registerBot(server: McpServer) {
+  server.registerTool(
+    "bot_status",
+    {
+      description:
+        "[Bot] Read-only view of the Kraken Futures bot (dry-run; it cannot place real orders): engine state and any " +
+        "halt, simulated position, open orders and account, recent incidents and decisions, and the report for the " +
+        "window (net PnL with fees and funding, closed trades with R, conviction calibration, entries not taken by " +
+        "reason). Reads the bot's SQLite file (BOT_CONFIG's db_path, default ~/.krypto-kal/bot.db).",
+      inputSchema: { days: z.number().int().min(1).max(90).default(1).describe("Report window: 1 = the current trading day") },
+    },
+    (args) =>
+      toResult("bot_status", args, async () => {
+        const { config } = resolveConfig(process.env.BOT_CONFIG);
+        const file = expandHome(config.db_path);
+        if (!existsSync(file)) return { running: false, note: `no bot database at ${file}: the bot has not been started yet` };
+        const store = new BotStore(config.db_path);
+        try {
+          const now = Date.now();
+          const since = args.days === 1 ? dayStartMs(now, config.day_reset_utc_hour) : now - args.days * 86_400_000;
+          const report = buildReport(store, since, config, now);
+          return { status: await statusText(store, config, now), report: renderReport(report), summary: {
+            state: report.state, halt: report.halt, netPnl: report.netPnl, equity: report.equity, trades: report.trades.length,
+            incidents: report.incidents, incidentsByKind: report.incidentsByKind,
+          } };
+        } finally {
+          store.close();
+        }
+      }),
+  );
+}
+
 // --- X ---
 
 function registerX(server: McpServer, client: XClient) {
@@ -882,6 +921,7 @@ function buildServer(): McpServer {
   if (krakenFutures?.hasCredentials) registerKrakenFutures(server, krakenFutures, tradeStore);
   if (x) registerX(server, x);
   registerBrain(server);
+  registerBot(server);
   return server;
 }
 
