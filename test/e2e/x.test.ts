@@ -3,14 +3,14 @@
 // Run: npm run test:x  (X reads are paid: the sync is limited to 10 posts per query from the last hour)
 
 import assert from "node:assert/strict";
-import { copyFileSync, existsSync, mkdtempSync, rmSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, test } from "node:test";
 import { DEFAULT_BRAIN_DIR } from "../../src/brain/brain.ts";
 import { call, serverTests, useMcpServer } from "./test-helpers.ts";
 
-const BRAIN_TOOLS = ["x_recent", "brain_list", "brain_read", "brain_search", "brain_write"];
+const BRAIN_TOOLS = ["x_recent", "brain_list", "brain_read", "brain_search", "brain_write", "brain_triage", "brain_ingest_mark"];
 const X_TOOLS = ["x_sync", "x_accounts"];
 
 const dir = mkdtempSync(join(tmpdir(), "brain-e2e-"));
@@ -42,6 +42,21 @@ describe("Second brain", () => {
     assert.deepEqual(data.changed.betsResolved, []);
     assert.ok(existsSync(join(dir, "output", "speculation", "_scorecard.md")));
     assert.ok(existsSync(join(dir, "output", "speculation", "2026-10-04", "_day.md")));
+  });
+
+  test("brain_triage ranks pending raw posts and brain_ingest_mark takes them off the list", async () => {
+    const day = join(dir, "raw", "x", "2026-10-04");
+    mkdirSync(day, { recursive: true });
+    const raw = (author: string, text: string) =>
+      ["---", "source: x", `author: "@${author}"`, "category: wire", "kind: post", 'created_at: "2026-10-04T10:00:00.000Z"', "---", "", text, ""].join("\n");
+    writeFileSync(join(day, "Reuters-111.md"), raw("Reuters", "Iranian missiles hit a tanker near the Strait of Hormuz"));
+    writeFileSync(join(day, "Reuters-112.md"), raw("Reuters", "Thanks for reading."));
+    const t = (await call(ctx, "brain_triage", { max_posts: 10 })) as { pending: number; selected: { read: string[] }[]; noise: { path: string }[] };
+    assert.equal(t.pending, 2);
+    assert.deepEqual(t.selected[0]!.read, ["raw/x/2026-10-04/Reuters-111.md"]);
+    assert.deepEqual(t.noise.map((x) => x.path), ["raw/x/2026-10-04/Reuters-112.md"]);
+    await call(ctx, "brain_ingest_mark", { ingested: ["raw/x/2026-10-04/Reuters-111.md"], skipped: [{ path: "raw/x/2026-10-04/Reuters-112.md", reason: "noise" }] });
+    assert.equal(((await call(ctx, "brain_triage", {})) as { pending: number }).pending, 0);
   });
 
   test("raw/ cannot be written", async () => {

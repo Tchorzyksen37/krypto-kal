@@ -1,12 +1,14 @@
 ---
 name: brain-ingest
-description: Ingest new raw X posts into the second brain wiki (events, actors, people, places, themes, markets, sources, timeline, index, log) and optionally write a Polish market briefing to output/. Use when the user says ingest, "zaingestuj", "wczytaj nowe posty", update the brain/wiki, or asks for a briefing built from the wiki.
+description: Ingest the most market-moving new X posts into the second brain, end to end - raw/ -> wiki/ (events, actors, people, places, themes, markets, sources, timeline, index, log) -> output/ (a Polish briefing of what changed). Posts are ranked by impact and grouped into events by the brain_triage tool, so the strongest, corroborated news is read first and noise is skipped. Use when the user says ingest, "zaingestuj", "wczytaj nowe posty", update the brain/wiki, or asks for a briefing built from the wiki.
 ---
 
 # Brain ingest
 
-Turns new raw X posts into linked wiki pages. Follow the steps in order. Do not skip steps and do not
-improvise a different layout: the format below is the contract.
+Turns the most impactful new raw X posts into linked wiki pages, then into a Polish briefing:
+**raw/ -> wiki/ -> output/**, every run. Which posts to read, and in what order, is decided by code (`brain_triage`), not
+by file age. Follow the steps in order. Do not skip steps and do not improvise a different layout: the format below is
+the contract.
 
 ## 0. Where things are
 
@@ -30,37 +32,42 @@ improvise a different layout: the format below is the contract.
    arithmetic in memory (step 2 shows how). If you really need a scratch file, put it in the OS temp directory
    (`$env:TEMP` in PowerShell, `$TEMP` or `/tmp` in bash) under `krypto-kal-ingest/`, and delete it before you report.
 
-## 1. Sync (optional)
+## 1. Sync
 
-- If the tool `x_sync` is available, call it once. It saves new posts to `BRAIN/raw/x/<YYYY-MM-DD>/` and
-  reports the spend. If it fails with a budget error, continue without it and say so in the log.
+- If the tool `x_sync` is available, call it once. It saves new posts to `BRAIN/raw/x/<YYYY-MM-DD>/` and reports the
+  spend. It syncs the most important accounts first (officials and wires, then markets, OSINT, commentary; see
+  `weight` in `x-accounts.json`), so a tight budget cuts the least important ones. If it fails with a budget error,
+  continue and say so in the log.
 - If `x_sync` is not available, skip this step and ingest what is already in `raw/`. Say so in the log.
 
-## 2. Find the posts that are not ingested yet
+## 2. Triage: what to read, in what order
 
-A raw post is "ingested" when its file name appears in the `sources:` line of some wiki page.
+Call `brain_triage` (default `max_posts: 40`). If the MCP tool is not available, run
+`node --env-file-if-exists=.env src/brain/triage.ts 40` from the repo; it prints the same JSON. Do **not** list or
+diff files yourself.
 
-1. Subtract the two sets **in memory, with no files** (hard rule 8). Raw file names look like `<user>-<id>.md`, and the
-   wiki names them in links and `sources:` lines, so one pattern finds every ingested name. In PowerShell, with
-   `$BRAIN` set to the brain root, this prints the new sources oldest first (the date folder sorts chronologically):
+It returns (all paths are `raw/x/<date>/<user>-<id>.md`):
 
-   ```powershell
-   $done = Get-ChildItem "$BRAIN\wiki" -Recurse -Filter *.md |
-     Select-String -Pattern '[A-Za-z0-9_]+-\d+\.md' -AllMatches | ForEach-Object { $_.Matches.Value } | Sort-Object -Unique
-   $new = @(Get-ChildItem "$BRAIN\raw\x" -Recurse -Filter *.md | Sort-Object FullName | Where-Object { $_.Name -notin $done })
-   "new sources: $($new.Count)"
-   $new | Select-Object -First 40 | ForEach-Object { $_.FullName }
-   ```
+| Field | Meaning | What you do |
+|---|---|---|
+| `pending` | raw posts not cited in the wiki and not marked before | report the number |
+| `selected` | events to ingest now, **highest impact first**. Each has `read` (posts to open), `alsoInEvent` (same event: cite in `sources:`, no need to open), `authors`, `corroborated`, `label`, `score` | steps 3-4, in this order |
+| `deferred` | weaker events left for a later run | nothing; say how many in the log |
+| `noise` | promotion, short posts or replies without market-moving terms | skim the list; mark them skipped in step 5 unless one is clearly news |
+| `stale` | deferred posts older than 72 h | mark skipped as `stale` in step 5 |
+| `accounts` | per account: pending, noise, average score, ingested and skipped so far | source suggestions in step 6 |
 
-   In bash, the count is `comm -23 <(ls -1 "$BRAIN"/raw/x/*/ | grep '\.md$' | sort -u) <(grep -rhoE '[A-Za-z0-9_]+-[0-9]+\.md' "$BRAIN/wiki" | sort -u) | wc -l`.
-   (Or Glob `raw/x/**/*.md` and Grep the wiki, if you prefer the tools to the shell.)
-2. The files that are not named anywhere in the wiki are the **new sources**. Count them.
-3. If there are none, say "nothing new to ingest" and stop (still offer a briefing, step 6).
-4. If there are more than 40, ingest the 40 oldest and tell the user how many remain.
+The score favours: officials and wires over commentary (and the `reliability:` you set on source pages), kinetic,
+energy/chokepoint, escalation/diplomacy and macro/crypto terms, original posts over replies, unusual engagement, and
+**corroboration** (several independent accounts on one event). It is a reading order, not a truth rating: you still
+judge each post.
+
+If `selected` is empty, say "nothing new worth ingesting", mark noise and stale (step 5), and still write the briefing
+(step 7) only if the wiki changed since the last one; otherwise stop.
 
 ## 3. Read and classify
 
-Read each new source once. Each file has YAML frontmatter (`url`, `author`, `verified_type`, `kind`, `metrics`,
+Work through `selected` in order. Open each post in `read` once (never the `alsoInEvent` ones). Each file has YAML frontmatter (`url`, `author`, `verified_type`, `kind`, `metrics`,
 `links`) and the post text. For each post decide exactly one class:
 
 | Class | What it is | What you do |
@@ -69,8 +76,9 @@ Read each new source once. Each file has YAML frontmatter (`url`, `author`, `ver
 | **market** | Mentions a price, a move or a data release | Goes into an event page, with the market reaction |
 | **noise** | Opinion without news, promotion, duplicate of another post, domestic politics unrelated to the region or markets | Skip. Count it for the log. |
 
-Group the news and market posts by **event**: posts about the same thing within a few hours are ONE event.
-Never make one page per post.
+Each `selected` entry is already one candidate event: posts about the same thing within a few hours. Merge two entries
+if they are clearly the same event, and split one if it mixes two. Never make one page per post. A post you read and
+judge as noise is marked skipped in step 5.
 
 ## 4. Write the wiki
 
@@ -91,6 +99,8 @@ sources: [raw/x/YYYY-MM-DD/user-ID.md, raw/x/YYYY-MM-DD/user2-ID2.md]
 
 Two to four sentences: what happened, who said it first, why it matters for markets.
 
+**Market impact:** high | medium | low, and one line why (energy supply, escalation path, macro, crypto-specific).
+
 ## Facts
 - HH:MM UTC: the claim, in your own words. ([user](../../raw/x/YYYY-MM-DD/user-ID.md), YYYY-MM-DD) – confidence: reported
 
@@ -101,7 +111,8 @@ Two to four sentences: what happened, who said it first, why it matters for mark
 [[page-slug]] · [[another-slug]]
 ```
 
-- Time: take it from the post (`created` in the frontmatter or the post URL's snowflake time); always UTC.
+- `sources:` lists every post of the event: the ones you read **and** its `alsoInEvent` posts.
+- Time: take it from the post (`created_at` in the frontmatter); always UTC.
 - The link inside `Facts` is a relative path from `wiki/events/` and looks like `../../raw/x/<date>/<file>.md`.
 - Confidence labels (use exactly these words):
   - `confirmed`: an official source, or two independent wires (e.g. Reuters and Bloomberg) agree.
@@ -141,8 +152,10 @@ or `source`. To update an existing page:
 - if the new fact contradicts an old one, keep both and add a line under `## Open questions / contradictions`;
 - add `[[event-slug]]` to `## Related`.
 
-Source pages (`wiki/sources/<username>.md`) hold reliability, bias and track record: after ingesting, add one line
-per account about what it gave (accurate, late, one-sided, noise). Do not rate an account from one post.
+Source pages (`wiki/sources/<username>.md`, slug = lowercase username) hold reliability, bias and track record: after
+ingesting, add one line per account about what it gave (accurate, first, late, one-sided, noise). Once an account has
+5 or more ingested posts, set `reliability: high | medium | low` in its frontmatter; `brain_triage` uses it to rank that
+account's next posts (high x1.3, low x0.6). Do not rate an account from one post.
 
 Slugs: lowercase kebab-case, unique, file name = slug + `.md`. Create a new page for a name only if it appears in
 a source and no page exists. Do not create empty stub pages.
@@ -160,39 +173,55 @@ Set `updated:` in its frontmatter to today.
 Every page you created must be listed in `wiki/index.md` under its section (Themes, Actors, People, Places,
 Events, Markets, Sources), as `[[slug]]`. Never leave a new page unlisted.
 
-## 5. Log
+## 5. Mark what was done
+
+Call `brain_ingest_mark` once with:
+- `ingested`: every post now cited in the wiki (all `read` and `alsoInEvent` paths of the events you wrote);
+- `skipped`: `{ path, reason }` for the triage's `noise` and `stale` posts and every post you read and judged noise
+  (reasons: `noise`, `duplicate`, `stale`, `off-topic`).
+Without the tool, say in the log that marking was not possible (the next triage will still skip cited posts).
+
+## 6. Log
 
 Add a new entry right below the intro line of `wiki/log.md` (newest on top). Use this shape:
 
 ```markdown
 ## YYYY-MM-DD – ingest (HH:MM UTC)
-- **Sources ingested:** N X posts in `raw/x/<date>/` (per account: 13 @IDF, 4 @Reuters).
+- **Sources ingested:** N X posts (read M, cited without reading K) in `raw/x/<date>/` (per account: 13 @IDF, 4 @Reuters).
+- **Triage:** pending P, events selected E (corroborated C), deferred D, skipped as noise/stale S.
 - **Pages created (N):** list by type. **Updated:** list.
 - **Skipped as noise:** count and one-line reason.
 - **Contradictions flagged:** list, or "none".
 - **Summary:** exactly three sentences on what changed in our picture of the world.
-- **Source suggestions (not applied):** changes to `x-accounts.json` you recommend, or "none".
+- **Source suggestions (not applied):** changes to `x-accounts.json` you recommend, from the triage's `accounts`
+  statistics, or "none". Typical: an account with mostly noise (10+ posts, over 60% noise or never ingested) gets
+  `"filter": true` or `"enabled": false`; an account that keeps being first on high-impact events gets a higher
+  `weight`; an account whose reports the wiki marks wrong gets `reliability: low` on its source page.
 - **Tools:** which tools were unavailable (`x_sync`, market data), or "all available".
 ```
 
 Never edit `x-accounts.json` yourself: only suggest changes.
 
-## 6. Briefing (only if the user asked for one, or says "briefing" / "analiza")
+## 7. Briefing (every run that changed the wiki)
 
-Write `output/YYYY-MM-DD-<topic>.md` **in Polish**, using only wiki pages (list which ones at the bottom).
-Use this exact analysis frame and keep each point short:
+Write `output/YYYY-MM-DD-HHMM-briefing.md` **in Polish** (UTC time of the run), using only wiki pages (list which ones
+at the bottom); never raw files. Order:
 
-1. **Symetria** – compare how aggressive the public rhetoric is with what private diplomacy shows. Cite pages.
-2. **Łańcuch transmisji** – event → energy/macro → inflation/rates → asset price. Say which link is weakest.
-3. **Wyzwalacze zmienności** – the specific dated events or signs that would move the market from priced-in to
-   panic.
-4. **Pewność** – mark `confirmed` only when the wiki marks it so. Single accounts and OSINT stay `unverified`.
-5. **Reakcja rynku** – only reactions recorded in the wiki, with times. No reaction recorded: say so.
+1. **Co się zmieniło** – the events of this run, highest market impact first, one or two lines each, with time (UTC),
+   confidence and a link `[[event-slug]]`.
+2. **Symetria** – how aggressive the public rhetoric is compared with what private diplomacy shows. Cite pages.
+3. **Łańcuch transmisji** – event → energy/macro → inflation/rates → asset price (BTC, ETH, oil, dollar). Say which link
+   is weakest.
+4. **Wyzwalacze zmienności** – the specific dated events or signs that would move the market from priced-in to panic.
+5. **Pewność** – mark `confirmed` only when the wiki marks it so. Single accounts and OSINT stay `unverified`.
+6. **Reakcja rynku** – only reactions recorded in the wiki, with times. None recorded: say so.
+7. **Czego nie wiemy** – open questions copied from the wiki.
 
-End with a "Czego nie wiemy" list (open questions copied from the wiki) and the list of wiki pages used.
-Add the output file to `wiki/index.md` under an `Output` line only if the index already has that section.
+End with the list of wiki pages used. Add the briefing to `wiki/index.md` under an `Output` section (create the section
+if it is missing) and note its path in the log entry. If the user asked for a briefing on a specific topic, write that
+instead, with the same frame.
 
-## 7. Final check, then report
+## 8. Final check, then report
 
 Before reporting, verify and fix anything that fails:
 
@@ -201,7 +230,9 @@ Before reporting, verify and fix anything that fails:
 - [ ] Every new page is in `wiki/index.md`; every new event is in `wiki/timeline.md`.
 - [ ] Every `[[link]]` you wrote points to a file that exists in `wiki/`.
 - [ ] The log entry is written. Nothing in `raw/` was changed.
+- [ ] `brain_ingest_mark` was called (or its absence is logged).
+- [ ] The briefing exists in `output/` and cites only wiki pages.
 
-Report to the user in Polish, five lines at most: how many posts ingested and skipped, pages created/updated,
-the most important thing that changed, contradictions found, and anything you could not do (tools missing,
-budget, posts left over).
+Report to the user in Polish, six lines at most: how many posts ingested and skipped (and how many events deferred),
+pages created/updated, the most important thing that changed, contradictions found, the briefing path, and anything
+you could not do (tools missing, budget, posts left over).
