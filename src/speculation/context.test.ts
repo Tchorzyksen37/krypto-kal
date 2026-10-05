@@ -24,6 +24,18 @@ const candles = (price: number, hours: number, range: (i: number) => number = ()
   });
 };
 
+// 15-minute candles: range 0.2% of price, 0.6% in the hour after the US cash open (13:30-14:30 UTC while New York is on summer time).
+const quarterCandles = (price: number, from: number, to: number): FuturesCandle[] => {
+  const out: FuturesCandle[] = [];
+  for (let t = Math.ceil(from / 900) * 900; t < to; t += 900) {
+    const d = new Date(t * 1000);
+    const minutes = d.getUTCHours() * 60 + d.getUTCMinutes();
+    const r = price * (minutes >= 13 * 60 + 30 && minutes < 14 * 60 + 30 ? 0.006 : 0.002);
+    out.push({ t, o: price, h: price + r / 2, l: price - r / 2, c: price, v: 10 });
+  }
+  return out;
+};
+
 function fakeFutures(tickers: FuturesTicker[], over: { hot?: string; failCandles?: string } = {}): FuturesSource & { calls: string[] } {
   const calls: string[] = [];
   return {
@@ -32,10 +44,11 @@ function fakeFutures(tickers: FuturesTicker[], over: { hot?: string; failCandles
       calls.push("tickers");
       return tickers;
     },
-    async candles(symbol, _res, range) {
-      calls.push(`candles ${symbol}`);
+    async candles(symbol, res, range) {
+      calls.push(res === "15m" ? `candles15 ${symbol}` : `candles ${symbol}`);
       if (symbol === over.failCandles) throw new Error("HTTP 503");
       const t = tickers.find((x) => x.symbol === symbol)!;
+      if (res === "15m") return { candles: quarterCandles(t.last, range.from ?? NOW - 20 * 86_400, range.to ?? NOW) };
       const hours = Math.round(((range.to ?? NOW) - (range.from ?? NOW)) / 3600);
       return { candles: candles(t.last, hours, (i) => (symbol === over.hot && i >= hours - 4 ? 0.02 : 0.004)) };
     },
@@ -147,5 +160,94 @@ describe("buildContext", () => {
     const before = cz.requests.filter((r) => r.symbols.includes("BTCUSDT_PERP.6")).length;
     await buildContext({ futures: fakeFutures(universe), coinalyze: cz }, { nowSec: NOW + 3600, screen: { extra: 0 } });
     assert.equal(cz.requests.filter((r) => r.symbols.includes("BTCUSDT_PERP.6")).length, before);
+  });
+});
+
+// Hourly Coinalyze market data for the positioning block: open interest builds at 12 UTC and unwinds at 14 UTC,
+// and the price makes four 3% jumps that stay (so none of the move is given back).
+function marketCoinalyze(): CoinalyzeSource & { requests: HistoryParams[] } {
+  const cz = fakeCoinalyze();
+  const volumeOhlcv = cz.ohlcvHistory.bind(cz);
+  const grid = (p: HistoryParams) => Array.from({ length: Math.round((p.to - p.from) / 3600) }, (_, i) => ({ i, t: p.from + i * 3600 }));
+  const jumps = [100, 250, 400, 550];
+  cz.openInterestHistory = async (p) => {
+    cz.requests.push(p);
+    return p.symbols.map((symbol) => {
+      let v = 1000;
+      return {
+        symbol,
+        history: grid(p).map(({ i, t }) => {
+          const h = new Date(t * 1000).getUTCHours();
+          v *= 1 + (h === 12 ? 0.01 : h === 14 ? -0.02 : 0.001 * (i % 2 ? 1 : -1));
+          return { t, o: v, h: v, l: v, c: v };
+        }),
+      };
+    });
+  };
+  cz.ohlcvHistory = async (p) => {
+    if (p.symbols.some((s) => s.endsWith(".6"))) return volumeOhlcv(p); // the volume profile
+    cz.requests.push(p);
+    return p.symbols.map((symbol) => ({
+      symbol,
+      history: grid(p).map(({ i, t }) => {
+        const c = 100 * 1.03 ** jumps.filter((s) => i >= s).length;
+        const o = i === 0 ? 100 : 100 * 1.03 ** jumps.filter((s) => i - 1 >= s).length;
+        return { t, o, h: Math.max(o, c) + 0.1, l: Math.min(o, c) - 0.1, c, v: 10, bv: 0, tx: 0, btx: 0 };
+      }),
+    }));
+  };
+  return cz;
+}
+
+describe("opening seasonality and positioning rhythm", () => {
+  test("measures the opening hour from 15-minute futures candles of the core symbols", async () => {
+    const ctx = await buildContext({ futures: fakeFutures(universe), coinalyze: fakeCoinalyze() }, { nowSec: NOW, screen: { extra: 0 } });
+    assert.ok(!("error" in ctx.seasonality), JSON.stringify(ctx.seasonality));
+    const s = ctx.seasonality as { days: number; rows: { symbol: string; anchor: string; days: number; range_ratio: number }[] };
+    assert.deepEqual([...new Set(s.rows.map((r) => r.symbol))].sort(), ["BTC", "ETH", "XRP"]);
+    const us = s.rows.find((r) => r.symbol === "BTC" && r.anchor === "us_open")!;
+    assert.equal(us.days, 15);
+    assert.equal(us.range_ratio, 3); // 0.6% in the open hour against 0.2% before it
+  });
+
+  test("a failing 15-minute request is a warning and that symbol has no seasonality rows", async () => {
+    const ctx = await buildContext({ futures: fakeFutures(universe, { failCandles: "PF_ETHUSD" }), coinalyze: fakeCoinalyze() }, { nowSec: NOW, screen: { extra: 0 } });
+    assert.ok(ctx.warnings.some((w) => /seasonality candles PF_ETHUSD: HTTP 503/.test(w)));
+    const s = ctx.seasonality as { rows: { symbol: string }[] };
+    assert.ok(!s.rows.some((r) => r.symbol === "ETH"));
+    assert.ok(s.rows.some((r) => r.symbol === "BTC"));
+  });
+
+  test("names the hours where open interest is built and unwound, and what follows a sharp move", async () => {
+    const ctx = await buildContext({ futures: fakeFutures(universe), coinalyze: marketCoinalyze() }, { nowSec: NOW, screen: { extra: 0 } });
+    assert.ok(!("error" in ctx.positioning), JSON.stringify(ctx.positioning));
+    const p = ctx.positioning as {
+      symbols: { symbol: string; oi_rhythm?: { build_hours_utc: { hour: number }[]; unwind_hours_utc: { hour: number }[] }; after_shock?: { events: number; up_events: number; retraced_24h?: number } }[];
+    };
+    assert.deepEqual(p.symbols.map((x) => x.symbol), ["BTC", "ETH", "XRP"]);
+    const btc = p.symbols[0]!;
+    assert.equal(btc.oi_rhythm!.build_hours_utc[0]!.hour, 12);
+    assert.equal(btc.oi_rhythm!.unwind_hours_utc[0]!.hour, 14);
+    assert.equal(btc.after_shock!.events, 4);
+    assert.equal(btc.after_shock!.up_events, 4);
+    assert.equal(btc.after_shock!.retraced_24h, 0);
+  });
+
+  test("without Coinalyze the positioning block is an error and lands under notMeasured", async () => {
+    const ctx = await buildContext({ futures: fakeFutures(universe) }, { nowSec: NOW, screen: { extra: 0 } });
+    assert.ok("error" in ctx.positioning);
+    assert.ok(ctx.notMeasured.some((n) => /open-interest rhythm/.test(n)));
+  });
+
+  test("both blocks are cached for six hours", async () => {
+    const cz = marketCoinalyze();
+    const futures = fakeFutures(universe);
+    await buildContext({ futures, coinalyze: cz }, { nowSec: NOW, screen: { extra: 0 } });
+    const longRequests = () => cz.requests.filter((r) => r.to - r.from > 20 * 86_400).length;
+    const quarter = () => futures.calls.filter((c) => c.startsWith("candles15")).length;
+    const before = [longRequests(), quarter()];
+    assert.ok(before[0]! > 0 && before[1]! > 0);
+    await buildContext({ futures, coinalyze: cz }, { nowSec: NOW + 3600, screen: { extra: 0 } });
+    assert.deepEqual([longRequests(), quarter()], before);
   });
 });
