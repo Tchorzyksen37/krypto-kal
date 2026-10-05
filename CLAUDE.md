@@ -21,7 +21,7 @@ src/
   speculation/  speculation mode support code (checker, sessions, screen, volume, scorer)
 test/e2e/       end-to-end tests against the real APIs (spawn the server)
 docs/           architecture notes, guides, plans
-.claude/skills/ project skills (brain-ingest, speculate, speculation-score, speculation-to-bot)
+.claude/skills/ project skills (brain-ingest, speculate, speculation-score, speculation-to-bot, position-review)
 ```
 
 | Module | File | What it is |
