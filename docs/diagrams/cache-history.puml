@@ -1,0 +1,34 @@
+@startuml cache-history
+title cache.db: history cache (HistoryStore)
+hide circle
+skinparam linetype ortho
+skinparam shadowing false
+
+entity "SERIES (logical key, no table)" as series {
+  kind : TEXT
+  symbol : TEXT
+  interval : TEXT
+}
+
+entity points <<WITHOUT ROWID>> {
+  * kind : TEXT <<PK>>
+  * symbol : TEXT <<PK>>
+  * interval : TEXT <<PK>>
+  * t : INTEGER <<PK>> -- epoch s, bar start
+  --
+  * data : TEXT -- point as JSON
+}
+
+entity coverage {
+  * kind : TEXT
+  * symbol : TEXT
+  * interval : TEXT
+  * from_t : INTEGER -- epoch s, inclusive
+  * to_t : INTEGER -- epoch s, inclusive
+  --
+  <<index>> coverage_series (kind, symbol, interval)
+}
+
+series ||--o{ points : "closed bars"
+series ||--o{ coverage : "complete ranges\n(disjoint, merged)"
+@enduml

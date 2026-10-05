@@ -117,7 +117,7 @@ docs/           architecture notes, guides, plans
 
 ## History cache (the key design)
 
-`cachedSeries()` in `series-cache.ts` is used by Coinalyze and Yahoo.
+`cachedSeries()` in `series-cache.ts` is used by Coinalyze and Yahoo. Schemas of all SQLite files and vault state files, and who accesses them: [docs/database-design.md](docs/database-design.md) (PlantUML diagrams in `docs/diagrams/`).
 
 - **Coverage:** `HistoryStore` keeps `points`, keyed by (kind, symbol, interval, t), and `coverage`, the merged time ranges known to be complete. `kind` separates providers and variants: Coinalyze uses the endpoint path plus `:usd` when `convert_to_usd` is on, and Yahoo uses `yahoo-chart`.
 - **Closed vs. open:** points with `t <= closedUntil` are final and come from the store. Only ranges missing from coverage are fetched and saved, and symbols missing the same range share one fetch. The open tail after `closedUntil` is always fetched live and never stored.

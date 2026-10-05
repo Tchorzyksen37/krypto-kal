@@ -1,0 +1,38 @@
+@startuml cache-fills
+title cache.db: Kraken Futures fills and trades (TradeStore)
+hide circle
+skinparam linetype ortho
+skinparam shadowing false
+
+entity futures_fills <<source of truth, append-only>> {
+  * fill_id : TEXT <<PK>>
+  --
+  * ts : INTEGER -- epoch ms
+  * symbol : TEXT
+  * side : TEXT -- buy | sell
+  * size : REAL
+  * price : REAL
+  order_id : TEXT -- added by ALTER TABLE
+  fill_type : TEXT -- maker | taker | liquidation ...
+  --
+  <<index>> futures_fills_ts (symbol, ts)
+}
+
+entity futures_trades <<derived, rebuilt on every sync>> {
+  * id : INTEGER <<PK, AUTOINCREMENT>>
+  --
+  * symbol : TEXT
+  * direction : TEXT -- long | short
+  * opened_at : INTEGER -- epoch ms
+  * closed_at : INTEGER -- epoch ms
+  * size : REAL
+  * entry_price : REAL
+  * exit_price : REAL
+  * pnl : REAL -- gross of fees and funding
+  * fills : INTEGER
+  --
+  <<index>> futures_trades_closed (closed_at)
+}
+
+futures_fills }|..o| futures_trades : "average-cost netting\n(computed, no FK)"
+@enduml

@@ -1,0 +1,21 @@
+@startuml fill-sync
+title Access: Kraken Futures fill sync (syncFills)
+skinparam shadowing false
+participant "MCP tool / scorer" as caller
+participant "syncFills\n(futures-pnl.ts)" as sync
+participant "Kraken Futures API" as api
+database "cache.db\nTradeStore" as db
+
+caller -> sync : syncFills(client, store)
+sync -> db : newestFillTs()
+db --> sync : newest ts (or none)
+loop until a page reaches newest - 1 min, cursor stops, or 50 pages
+  sync -> api : GET fills (cursor), 100 per page
+  api --> sync : page of fills
+  sync -> db : saveFills(page)\nBEGIN; INSERT OR IGNORE;\nCOALESCE back-fill; COMMIT
+end
+sync -> db : fills() (all)
+sync -> sync : buildTrades (average cost)
+sync -> db : replaceTrades\nBEGIN; DELETE all; INSERT; COMMIT
+sync --> caller : pages, inserted, totals
+@enduml

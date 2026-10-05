@@ -1,0 +1,23 @@
+@startuml bot-concurrency
+title Access: bot processes sharing bot.db (WAL, busy_timeout 5 s)
+skinparam shadowing false
+participant "Trader process" as trader
+participant "Watchdog process" as wd
+database "bot.db" as db
+participant "Kraken Futures\npublic API" as api
+participant "bot_status\n(MCP server)" as status
+
+== every cycle_interval_sec ==
+trader -> api : ticker, candles (no transaction open)
+trader -> db : latestPolicies(n), kv engine:record
+trader -> db : BEGIN\nsim_* docs (orders, fill, position, account)\nkv engine:record\njournal INSERT\nCOMMIT
+trader -> db : incidentsAfter(alerts:cursor), set cursor
+== every watchdog_interval_sec ==
+wd -> db : read sim_position, sim_order_open
+alt protection missing or mis-sized
+  wd -> db : BEGIN repair order, incident, journal, watchdog:state COMMIT
+  note right of db : a writer waits up to 5 s\nfor the other's lock
+end
+== any time ==
+status -> db : open, read-only queries\n(state, incidents, journal, docs), close
+@enduml

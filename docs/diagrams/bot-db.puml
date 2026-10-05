@@ -1,0 +1,69 @@
+@startuml bot-db
+title bot.db (BotStore)
+hide circle
+skinparam linetype ortho
+skinparam shadowing false
+
+entity menus <<immutable>> {
+  * id : TEXT <<PK>>
+  --
+  * data : TEXT -- LevelMenu JSON
+}
+
+entity policies <<append-only>> {
+  * id : INTEGER <<PK, AUTOINCREMENT>>
+  --
+  * created_at : INTEGER -- epoch ms
+  * data : TEXT -- Policy JSON (menu_id inside)
+  --
+  <<index>> policies_created (created_at, id)
+}
+
+entity journal <<append-only>> {
+  * id : INTEGER <<PK, AUTOINCREMENT>>
+  --
+  * t_ms : INTEGER
+  * config_hash : TEXT
+  * kind : TEXT
+  policy_id : INTEGER
+  * decision : TEXT
+  * reason : TEXT
+  * snapshot : TEXT -- engine input JSON
+  --
+  <<index>> journal_time (t_ms, id)
+}
+
+entity incidents <<append-only>> {
+  * id : INTEGER <<PK, AUTOINCREMENT>>
+  --
+  * t_ms : INTEGER
+  * kind : TEXT
+  * detail : TEXT
+}
+
+entity kv {
+  * key : TEXT <<PK>>
+  --
+  * value : TEXT -- e.g. engine:record JSON
+}
+
+entity counters <<WITHOUT ROWID>> {
+  * day : TEXT <<PK>>
+  * name : TEXT <<PK>>
+  --
+  * value : REAL
+}
+
+entity docs <<WITHOUT ROWID>> {
+  * kind : TEXT <<PK>> -- sim_order_open, sim_fill, ...
+  * key : TEXT <<PK>>
+  --
+  * t_ms : INTEGER
+  * data : TEXT -- JSON
+  --
+  <<index>> docs_time (kind, t_ms)
+}
+
+menus ||..o{ policies : "data.menu_id\n(in JSON, no FK)"
+policies |o..o{ journal : "policy_id\n(no FK)"
+@enduml
