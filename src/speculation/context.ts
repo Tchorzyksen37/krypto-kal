@@ -7,7 +7,11 @@
 //    open-interest change over 1h and 4h, long/short ratio, liquidation burst;
 //  * the symbol screen (screen.ts) run on those measured values;
 //  * the measured share of daily volume per session, summed over several exchanges' BTC perpetuals
-//    (Coinalyze), or Kraken alone as a fallback (labelled as such).
+//    (Coinalyze), or Kraken alone as a fallback (labelled as such);
+//  * opening seasonality (seasonality.ts): how big the first hour after the Tokyo, Europe and US opens usually is,
+//    from 15-minute Kraken Futures candles of the core symbols;
+//  * the positioning rhythm (positioning.ts): in which hours open interest is built and unwound, and what follows a
+//    sharp move (Coinalyze hourly open interest and prices of the core symbols).
 // Used by the MCP tool `speculation_context` and by the CLI `node --env-file-if-exists=.env src/speculation/context.ts`.
 
 import { fileURLToPath } from "node:url";
@@ -17,12 +21,14 @@ import {
   baseOf, candlesOk, depthUsd, fundingPct8h, isLinearPerp, openInterestUsd, spreadBps, volatility, volumeUsd24h,
 } from "./market.ts";
 import { type Candidate, DEFAULT_SCREEN, type ScreenOptions, filterReason, screen, screenOptionsFromEnv, setupScore } from "./screen.ts";
+import { type HourlyOiProfile, type ShockStats, hourlyOiProfile, postShockStats } from "./positioning.ts";
+import { type SeasonalityReport, seasonalityReport } from "./seasonality.ts";
 import { DEFAULT_LEAD_MINUTES, DEFAULT_TZ, describeWindow, pickSession, sessionOptionsFromEnv } from "./sessions.ts";
 import { type VolumeBar, volumeReport } from "./volume.ts";
 
 export interface FuturesSource {
   tickers(): Promise<FuturesTicker[]>;
-  candles(symbol: string, resolution: "1h", range: { from?: number; to?: number }): Promise<{ candles: FuturesCandle[] }>;
+  candles(symbol: string, resolution: "1h" | "15m", range: { from?: number; to?: number }): Promise<{ candles: FuturesCandle[] }>;
   orderBook(symbol: string, depth?: number): Promise<FuturesOrderBook>;
 }
 
@@ -75,6 +81,8 @@ export interface SpeculationContext {
   metaSymbols: { symbol: string; futures: string; last: number; atr_1h: number; spread_bps: number; why: string }[]; // ready for HHMMZ.meta.json
   excluded: { symbol: string; reason: string }[];
   volume: { source: string; days: number; shares: unknown } | { source: string; error: string };
+  seasonality: ({ source: string } & SeasonalityReport) | { source: string; error: string };
+  positioning: { source: string; days: number; symbols: { symbol: string; coinalyze: string; oi_rhythm?: HourlyOiProfile; after_shock?: ShockStats }[] } | { source: string; error: string };
   notMeasured: string[]; // goes to UNKNOWN in the report
   warnings: string[];
 }
@@ -84,9 +92,15 @@ const pctChange = (from: number | undefined, to: number | undefined) =>
   from !== undefined && to !== undefined && from !== 0 ? Math.round(((to - from) / from) * 10_000) / 100 : undefined;
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
-// Volume profile results change slowly: kept for 6 hours per process so repeated runs cost no API calls.
+// Volume profile, seasonality and positioning change slowly: kept for 6 hours per process so repeated runs cost no API calls.
 let volumeCache: { at: number; value: SpeculationContext["volume"] } | undefined;
-export const clearVolumeCache = () => (volumeCache = undefined);
+let seasonalityCache: { at: number; value: SpeculationContext["seasonality"] } | undefined;
+let positioningCache: { at: number; value: SpeculationContext["positioning"] } | undefined;
+export const clearVolumeCache = () => {
+  volumeCache = undefined;
+  seasonalityCache = undefined;
+  positioningCache = undefined;
+};
 
 export async function buildContext(deps: { futures: FuturesSource; coinalyze?: CoinalyzeSource }, options: Partial<ContextOptions> = {}): Promise<SpeculationContext> {
   const o: ContextOptions = { ...DEFAULT_CONTEXT, nowSec: Math.floor(Date.now() / 1000), ...options };
@@ -228,9 +242,74 @@ export async function buildContext(deps: { futures: FuturesSource; coinalyze?: C
   // 5. Volume share per session.
   const volume = await volumeProfile(deps, o, warnings);
   if ("error" in volume) notMeasured.push(`session volume share (${volume.error})`);
+  // 6. Opening seasonality and positioning rhythm of the core symbols.
+  const seasonality = await seasonalityBlock(deps, coreTickers.map((t) => t.symbol), o, warnings);
+  if ("error" in seasonality) notMeasured.push(`opening seasonality (${seasonality.error})`);
+  const positioning = await positioningBlock(deps, coreTickers.map((t) => baseOf(t.symbol)), o, warnings);
+  if ("error" in positioning) notMeasured.push(`open-interest rhythm and post-shock behaviour (${positioning.error})`);
   notMeasured.push("real liquidation levels, whale and market-maker intent, spoofed depth, ETF flows, Korean premium");
 
-  return { measuredAt: new Date(o.nowSec * 1000).toISOString(), session, symbols, metaSymbols, excluded: result.excluded, volume, notMeasured, warnings };
+  return { measuredAt: new Date(o.nowSec * 1000).toISOString(), session, symbols, metaSymbols, excluded: result.excluded, volume, seasonality, positioning, notMeasured, warnings };
+}
+
+const SEASONALITY_DAYS = 20; // 20 days of 15-minute candles fit one Kraken page (2000)
+const POSITIONING_DAYS = 29;
+
+// How big the first hour after each market open is, from 15-minute futures candles (core symbols only).
+async function seasonalityBlock(
+  deps: { futures: FuturesSource }, futuresSymbols: string[], o: ContextOptions, warnings: string[],
+): Promise<SpeculationContext["seasonality"]> {
+  const source = `Kraken Futures 15-minute trade candles of the core symbols, last ${SEASONALITY_DAYS} days, Monday-Friday`;
+  if (seasonalityCache && o.nowSec - seasonalityCache.at < 6 * HOUR) return seasonalityCache.value;
+  const bars: Record<string, { t: number; o: number; h: number; l: number; c: number }[]> = {};
+  let failed = false;
+  for (const symbol of futuresSymbols) {
+    try {
+      const { candles } = await deps.futures.candles(symbol, "15m", { from: o.nowSec - SEASONALITY_DAYS * 86_400, to: o.nowSec });
+      bars[baseOf(symbol)] = candles.map((c) => ({ t: c.t, o: c.o, h: c.h, l: c.l, c: c.c }));
+    } catch (e) {
+      failed = true;
+      warnings.push(`seasonality candles ${symbol}: ${errText(e)}`);
+    }
+  }
+  const report = seasonalityReport(bars, o.nowSec * 1000, undefined, SEASONALITY_DAYS);
+  const value: SpeculationContext["seasonality"] = report.rows.length
+    ? { source, ...report }
+    : { source, error: "not enough complete weekdays of 15-minute candles" };
+  if (!failed && !("error" in value)) seasonalityCache = { at: o.nowSec, value };
+  return value;
+}
+
+// When open interest is built and unwound, and what follows a sharp move: hourly Coinalyze data (Binance USDT perpetual).
+async function positioningBlock(
+  deps: { coinalyze?: CoinalyzeSource }, bases: string[], o: ContextOptions, warnings: string[],
+): Promise<SpeculationContext["positioning"]> {
+  const source = `Coinalyze hourly open interest and prices (Binance USDT perpetuals), last ${POSITIONING_DAYS} days`;
+  if (!deps.coinalyze) return { source, error: "no COINALYZE_API_KEY" };
+  if (positioningCache && o.nowSec - positioningCache.at < 6 * HOUR) return positioningCache.value;
+  try {
+    const markets = new Set((await deps.coinalyze.futureMarkets()).map((m) => m.symbol));
+    const czOf = new Map(bases.map((b) => [b, `${b}USDT_PERP.A`]).filter(([, cz]) => markets.has(cz!)) as [string, string][]);
+    if (!czOf.size) return { source, error: "no Coinalyze markets for the core symbols" };
+    const p: HistoryParams = { symbols: [...czOf.values()], interval: "1hour", from: o.nowSec - POSITIONING_DAYS * 86_400, to: o.nowSec };
+    const [oi, ohlcv] = await Promise.all([deps.coinalyze.openInterestHistory({ ...p, convertToUsd: true }), deps.coinalyze.ohlcvHistory(p)]);
+    const symbols = [...czOf].map(([symbol, cz]) => {
+      const oiPoints = (oi.find((x) => x.symbol === cz)?.history ?? []).map((x) => ({ t: x.t, c: x.c }));
+      const prices = (ohlcv.find((x) => x.symbol === cz)?.history ?? []).map((x) => ({ t: x.t, o: x.o, h: x.h, l: x.l, c: x.c, v: x.v }));
+      const entry: SpeculationContext["positioning"] extends infer R ? (R extends { symbols: (infer S)[] } ? S : never) : never = { symbol, coinalyze: cz };
+      const rhythm = hourlyOiProfile(oiPoints);
+      if (rhythm) entry.oi_rhythm = rhythm;
+      const shocks = postShockStats(prices, oiPoints);
+      if (shocks) entry.after_shock = shocks;
+      return entry;
+    });
+    const value: SpeculationContext["positioning"] = { source, days: POSITIONING_DAYS, symbols };
+    positioningCache = { at: o.nowSec, value };
+    return value;
+  } catch (e) {
+    warnings.push(`positioning: ${errText(e)}`);
+    return { source, error: "Coinalyze request failed" };
+  }
 }
 
 // BTC hourly volume over 8 days summed across several exchanges' stablecoin-margined perpetuals (Coinalyze; USD =

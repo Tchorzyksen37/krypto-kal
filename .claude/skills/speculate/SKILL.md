@@ -38,6 +38,15 @@ Schedule (local time Europe/Warsaw, routine fires 20 min before each window): 07
      (% per 8h), order-book depth, and Coinalyze OI change 1h/4h, long/short ratio and liquidation burst;
    - `metaSymbols`: the rows for the meta file, copy them as they are;
    - `volume`: each session's measured share of daily volume (several exchanges, or Kraken only, as labelled);
+   - `seasonality`: per core symbol and market open (Tokyo, Europe, US cash open; local clock, DST-aware), over the
+     last 20 days, Monday-Friday: median range of the first hour after the open against the hour before it
+     (`range_ratio`), the widest such hour, median absolute move, days the hour closed up, and how often the first
+     15 minutes continued over the next 30 (`first15`);
+   - `positioning`: per core symbol (Coinalyze, Binance perpetual, 29 days): `oi_rhythm` = UTC hours (weekdays) where
+     open interest is built (`build_hours_utc`), unwound (`unwind_hours_utc`) and moves most / least; `after_shock` =
+     what followed the sharpest 1h moves: open interest at the shock and after 4h / 24h / 48h (split into up and down
+     shocks), how much of the move was given back after 24h / 48h (`retraced_*`: 1 = all, 0 = none, negative = it went
+     on), and how range and volume decayed afterwards;
    - `notMeasured` and `warnings`: copy both into UNKNOWN.
    Use only these numbers for prices and levels; never type a price from memory. If the tool fails, say so in
    the report and stop after the KNOWN / UNKNOWN summary: a report without measured prices has no bets.
@@ -45,6 +54,14 @@ Schedule (local time Europe/Warsaw, routine fires 20 min before each window): 07
 2. **Who is trading.** From `session.regions`, `session.investors` and `volume`: say whether this session is a
    high- or low-volume one, which region dominates it, and which investor types are therefore most likely to be
    moving price. Footprints our tools cannot measure (ETF flows, Korean premium, whale prints) go to UNKNOWN.
+   **Seasonality and positioning are base rates from a short sample, not signals.** Quote the number of days (`days`,
+   `n`, `events`) next to every figure; a handful of events (3-9) cannot carry a call alone. Use them to say what the
+   window usually looks like (is the opening hour typically wider than the hour before? are positions usually built
+   before it and unwound after it?) and where today's state sits against that (OI change over the last hour, the
+   long/short ratio, how far into the shock cycle the market is: just after a sharp move, in the recovery, or in the
+   compression that usually follows). When a base rate contradicts a heuristic in the session profile (for example
+   "the first 15 minutes often reverse" against a `first15` that continues about half the time), say so in the report.
+   The profile text is not a measurement; the numbers are.
 3. **More KNOWN** (each with its timestamp):
    - Shorter-term price action of the picked symbols: `kraken_futures_candles` 5m / 15m of the PF_ contract.
      Never the spot `kraken_ohlc`: bets are scored on futures prices.
@@ -78,7 +95,8 @@ Schedule (local time Europe/Warsaw, routine fires 20 min before each window): 07
      A breakout entry is not supported; express it as a pullback limit instead.
    **Night session:** the window is 10 hours, so each bet names the phase it targets (US wind-down, Asia open,
    HK/China open, Europe pre-open); prefer few, high reward:risk, limit-at-range-edge bets, wide stops.
-8. **Write the report** to `BRAIN/output/speculation/YYYY-MM-DD/HHMMZ.md` (HHMM = window start in UTC), with
+8. **Write the report** to `BRAIN/output/speculation/YYYY-MM-DD/HHMMZ.md` (HHMM = window start in UTC); the KNOWN
+   digest carries an "Opening and positioning base rates" line per core symbol (with `days` / `events`), with
    frontmatter (`type: speculation`, `session`, `generated`, `valid_until`, `symbols`, `sources_failed`), a
    disclaimer callout, then in order: **Direction** (bias) and session profile, **Who is trading** (regions,
    investors, measured volume share), regime and scenarios (table with probability and unicode bar), catalysts

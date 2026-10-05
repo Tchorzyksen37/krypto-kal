@@ -723,8 +723,10 @@ function registerSpeculation(server: McpServer, futures: KrakenFuturesClient, cz
         "profile, regions, investors), the screened symbols with Kraken Futures last/bid/ask, spread, 1h ATR and ATR " +
         "ratio, 24h volume, open interest, funding (% per 8h), order-book depth, plus Coinalyze OI change 1h/4h, " +
         "long/short ratio and liquidation burst (when a key is set), `metaSymbols` ready for the report's meta file, " +
-        "and the measured share of daily volume per session across several exchanges. `notMeasured` lists what goes " +
-        "to UNKNOWN. Takes up to about a minute because of Coinalyze's rate limit.",
+        "the measured share of daily volume per session across several exchanges, the opening seasonality of the core " +
+        "symbols (first hour after the Tokyo, Europe and US opens against the hour before) and their positioning " +
+        "rhythm (UTC hours where open interest is built or unwound, and what follows a sharp move). `notMeasured` " +
+        "lists what goes to UNKNOWN. Takes up to about a minute because of Coinalyze's rate limit.",
       inputSchema: {
         core: z.array(z.string()).optional().describe('Core symbols, default from SPECULATION_SYMBOLS or ["BTC","ETH","XRP"]'),
         extra: z.number().int().min(0).max(5).optional().describe("Screened extra symbols, default SPECULATION_SCREEN_EXTRA or 3"),
