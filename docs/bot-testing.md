@@ -38,6 +38,12 @@ npm run bot -- policy add policy.json
 npm run bot -- run                                   # trader + watchdog; Ctrl+C stops both
 ```
 
+**From a speculation report:** `npm run bot -- policy from-speculation <vault>/output/speculation/<day>/<HHMMZ>.meta.json`
+(add `--dry` first to see it), or the skill `speculation-to-bot` in Claude Code. It takes the best checked bet on the
+bot's symbol and lets the bot trade it only inside the bet's time: no entry before the session window opens or after
+the bet's fill-by time, and the time-stop closes the position after the bet's hold time. For the night session's 3-hour
+entry window, set `"max_policy_ttl_min": 180` in the bot config.
+
 A policy is valid for at most `max_policy_ttl_min` (60 min) and its level menu must be fresh, so add new ones when they
 expire. With `"manual_approval": true` the trader asks `Approve BUY ...? [y/N]` in the terminal before every entry
 (stops, targets and closes are never asked, so a position is never left waiting unprotected).

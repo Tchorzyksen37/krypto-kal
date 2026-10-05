@@ -43,6 +43,7 @@ export const PolicySchema = z.strictObject({
     })
     .nullable(),
   valid_until: z.iso.datetime({ offset: true }),
+  not_before: z.iso.datetime({ offset: true }).optional(), // no entry before this time (e.g. a speculation's window start)
   rationale: z.string().max(1000), // journal only, never parsed
   sources: z.array(z.string()),
 });
@@ -93,6 +94,7 @@ export function validatePolicy(raw: unknown, ctx: PolicyContext): PolicyResult {
 
   const untilMs = Date.parse(policy.valid_until);
   if (untilMs <= nowMs) return reject("valid_until is not in the future");
+  if (policy.not_before !== undefined && Date.parse(policy.not_before) >= untilMs) return reject("not_before is not before valid_until");
   const ttlEndMs = nowMs + config.max_policy_ttl_min * 60_000;
   const out: Policy = untilMs > ttlEndMs ? { ...policy, valid_until: new Date(ttlEndMs).toISOString() } : policy;
 
@@ -174,8 +176,13 @@ export function effectivePolicy(history: Policy[], n: number): Policy | null {
   const earliest = window.reduce((a, b) => (Date.parse(b.valid_until) < Date.parse(a.valid_until) ? b : a));
   const sameScenario = window.every((p) => p.scenario && p.scenario.direction === newest.scenario?.direction);
 
+  // The latest start of the window: an entry waits until every policy in it allows one.
+  const starts = window.map((p) => p.not_before).filter((t): t is string => t !== undefined);
+  const notBefore = starts.length ? starts.reduce((a, b) => (Date.parse(b) > Date.parse(a) ? b : a)) : undefined;
+
   return {
     ...newest,
+    ...(notBefore !== undefined ? { not_before: notBefore } : {}),
     bias,
     conviction: Math.min(...window.map((p) => p.conviction)),
     risk_budget_pct: Math.min(...window.map((p) => p.risk_budget_pct)),

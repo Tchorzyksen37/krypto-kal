@@ -2,6 +2,10 @@
 //
 //   npm run bot -- policy template long|short   prints a policy fixture around the current price (edit, then add it)
 //   npm run bot -- policy add <file.json>        validates and stores a fixture policy (and its level menu)
+//   npm run bot -- policy from-speculation <HHMMZ.meta.json> [--dry]
+//                                                the best checked speculation bet on the bot's symbol, as a policy that
+//                                                trades only inside the bet's window (entry from window start to "fill by",
+//                                                closed after the bet's hold time)
 //   npm run bot -- status                        state, position, orders, account, recent incidents and decisions
 //   npm run bot -- report [--days N] [--write]   the report (and, with --write, the vault note output/bot/report-<day>.md)
 //   npm run bot -- ack-halt                      clears a halt that needs acknowledgement, then reconciles again
@@ -26,6 +30,8 @@ import type { MarketData } from "./executor.ts";
 import { atr } from "./indicators.ts";
 import { dayStartMs, tradingDay } from "./limits.ts";
 import { assertDryRunOnly } from "./live-executor.ts";
+import { fixturesFromSpeculation } from "./from-speculation.ts";
+import type { ReportMeta } from "../speculation/types.ts";
 import { FeedingMarket, KrakenMarketData } from "./market-data.ts";
 import { type LevelMenu, type Policy, validatePolicy } from "./policy.ts";
 import { buildReport, renderReport } from "./report.ts";
@@ -114,6 +120,39 @@ export async function policyTemplate(market: MarketData, config: BotConfig, dire
       rationale: "manual test fixture", sources: [],
     },
   };
+}
+
+// ---- from a speculation report -------------------------------------------------------------------------------------
+
+// Converts the report's best bet on the bot's symbol and stores it loosen_confirm_cycles times: one checked
+// speculation bet is one decision, and the engine acts only once that many agreeing policies exist.
+export function addFromSpeculation(
+  store: BotStore, config: BotConfig, meta: ReportMeta, nowMs: number, opts: { dry?: boolean; source?: string } = {},
+): { added: number; text: string } {
+  const conv = fixturesFromSpeculation(meta, config, nowMs, opts.source ?? "speculation");
+  const lines: string[] = [];
+  let added = 0;
+  for (const f of conv.fixtures) {
+    lines.push(`bet ${f.betId}: ${f.fixture.policy.scenario?.direction} ${config.symbol}, entry zone ${f.fixture.menu!.levels[0]!.price}-${f.fixture.menu!.levels[1]!.price}, stop ${f.fixture.menu!.levels[2]!.price}, target ${f.fixture.menu!.levels[3]!.price}`);
+    lines.push(`  window: entries from ${f.window.notBefore} until ${f.window.entryUntil}; a position is closed by ${f.window.closeBy} at the latest`);
+    if (opts.dry) continue;
+    for (let i = 0; i < config.loosen_confirm_cycles; i++) {
+      const r = addPolicy(store, config, f.fixture, nowMs);
+      if (!r.ok) {
+        lines.push(`  rejected: ${r.reason}`);
+        break;
+      }
+      if (i === config.loosen_confirm_cycles - 1) {
+        lines.push(`  stored as policy ${r.id} (${config.loosen_confirm_cycles} agreeing copies): the bot acts on it now`);
+        added++;
+      }
+    }
+  }
+  for (const s of conv.skipped) lines.push(`skipped ${s.betId}: ${s.reason}`);
+  for (const w of conv.warnings) lines.push(`warning: ${w}`);
+  if (!conv.fixtures.length) lines.push("nothing for the bot from this report");
+  else if (opts.dry) lines.push("dry run: nothing stored");
+  return { added, text: lines.join("\n") };
 }
 
 // ---- halt acknowledgement ------------------------------------------------------------------------------------------
@@ -222,6 +261,12 @@ async function main(argv: string[]): Promise<number> {
         console.log(r.ok ? r.note : `rejected: ${r.reason}`);
         return r.ok ? 0 : 1;
       }
+      if (sub === "from-speculation" && arg) {
+        const meta = JSON.parse(readFileSync(arg, "utf8")) as ReportMeta;
+        const r = addFromSpeculation(new BotStore(config.db_path), config, meta, now(), { dry: args.includes("--dry"), source: arg });
+        console.log(r.text);
+        return r.added || args.includes("--dry") ? 0 : 1;
+      }
       if (sub === "template" && (arg === "long" || arg === "short")) {
         const market = new KrakenMarketData(new KrakenFuturesClient({ apiKey: "", apiSecret: "" }), config.symbol, new SystemClock());
         console.log(JSON.stringify(await policyTemplate(market, config, arg, now()), null, 2));
@@ -277,7 +322,8 @@ async function main(argv: string[]): Promise<number> {
     case "run":
       return runBoth(configPath);
   }
-  console.error(readFileSync(fileURLToPath(import.meta.url), "utf8").split("\n").slice(2, 11).map((l) => l.replace(/^\/\/ ?/, "")).join("\n"));
+  const header = readFileSync(fileURLToPath(import.meta.url), "utf8").split("\n");
+  console.error(header.slice(2, header.findIndex((l) => !l.startsWith("//"))).map((l) => l.replace(/^\/\/ ?/, "")).join("\n"));
   return 2;
 }
 

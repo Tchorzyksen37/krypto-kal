@@ -110,4 +110,5 @@ Schedule (local time Europe/Warsaw, routine fires 20 min before each window): 07
    drops invalid bets (reason printed), assigns ids, flags bets against the bias, inserts the Bias callout and
    rewrites the Best bets block. Do not hand-format those. On a script error, fix the files once and rerun. On
    a second failure, keep the KNOWN / UNKNOWN summary and add a "generation failed" banner.
-10. **Reply** in three lines: bias, top bet (or "no bet") with levels, report path.
+10. **Reply** in three lines: bias, top bet (or "no bet") with levels, report path. If the top bet is on the bot's
+    symbol, add one line offering to hand it to the dry-run bot (skill `speculation-to-bot`).
