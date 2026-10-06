@@ -40,6 +40,7 @@ import { biasStats, edgeLine, readLog, readReports, scoreDir, scoreOptionsFromEn
 import { report as pnlReport, syncFills } from "../trading/futures-pnl.ts";
 import { TradeStore } from "../trading/trade-store.ts";
 import { createLogger } from "../core/logger.ts";
+import { renderSnapshot, runStats, statsLogPathFromEnv } from "../core/run-stats.ts";
 import { XClient } from "../providers/x/x-client.ts";
 import { accountsOverview, recentRawPosts, syncX, type SyncOptions } from "../brain/x-sync.ts";
 import { YAHOO_INTERVAL_SECONDS, YahooClient, type YahooInterval } from "../providers/yahoo/yahoo-client.ts";
@@ -61,6 +62,8 @@ function authorized(req: IncomingMessage): boolean {
 // Persistent history cache shared by all providers. Defaults to a path outside OneDrive
 // (sync can lock SQLite files).
 const CACHE_DB_PATH = process.env.CACHE_DB_PATH ?? join(homedir(), ".krypto-kal", "cache.db");
+const STATS_LOG_PATH = statsLogPathFromEnv();
+runStats.configure({ logPath: STATS_LOG_PATH });
 const store = new HistoryStore(CACHE_DB_PATH);
 
 const enabled = (name: string) => process.env[name]?.toLowerCase() !== "false";
@@ -96,21 +99,48 @@ const xSyncOptions: SyncOptions = {
 };
 
 // Runs a tool, logs the outcome and turns errors into `isError` results instead of throwing.
+// Every result is measured (size, points, duration) into runStats, so `server_stats` and the stats log show what
+// the model actually reads; history requests made inside `fn` are attributed to this tool.
 async function toResult(tool: string, args: unknown, fn: () => Promise<unknown>): Promise<CallToolResult> {
   const started = Date.now();
   log.debug("tool call", { tool, args });
   try {
-    const data = await fn();
-    log.info("tool ok", { tool, ms: Date.now() - started });
-    return { content: [{ type: "text", text: JSON.stringify(data) }] };
+    const data = await runStats.inTool(tool, fn);
+    const text = JSON.stringify(data);
+    const ms = Date.now() - started;
+    runStats.recordTool({ tool, ok: true, ms, text, data, args });
+    log.info("tool ok", { tool, ms, chars: text.length });
+    return { content: [{ type: "text", text }] };
   } catch (e) {
     const err = e as Error & { kind?: string; status?: number; code?: string };
     const msg = err.kind
       ? `${err.kind}${err.status ? ` ${err.status}` : ""}${err.code ? ` (code ${err.code})` : ""}: ${err.message}`
       : String(e);
-    log.warn("tool failed", { tool, ms: Date.now() - started, error: msg });
+    const ms = Date.now() - started;
+    runStats.recordTool({ tool, ok: false, ms, text: msg, args, error: msg });
+    log.warn("tool failed", { tool, ms, error: msg });
     return { content: [{ type: "text", text: msg }], isError: true };
   }
+}
+
+function registerStats(server: McpServer) {
+  server.registerTool(
+    "server_stats",
+    {
+      description:
+        "[Server] Statistics of this server process since it started: per tool calls, errors, duration (p50/p95), " +
+        "size of the result the model read (characters, ~tokens) and series points; per history series how many " +
+        "points came from the SQLite cache vs the API and how many API requests that took. The same events are " +
+        "appended to the stats log (STATS_LOG_PATH) for longer analysis.",
+      inputSchema: { reset: z.boolean().default(false).describe("Start counting again after returning the current figures") },
+    },
+    (args) =>
+      toResult("server_stats", args, async () => {
+        const snapshot = runStats.snapshot();
+        if (args.reset) runStats.reset();
+        return { log: STATS_LOG_PATH ?? "disabled (STATS_LOG=false)", text: renderSnapshot(snapshot), ...snapshot };
+      }),
+  );
 }
 
 // --- Coinglass ---
@@ -930,6 +960,7 @@ function buildServer(): McpServer {
   if (x) registerX(server, x);
   registerBrain(server);
   registerBot(server);
+  registerStats(server);
   return server;
 }
 
@@ -1001,6 +1032,7 @@ http.listen(PORT, HOST, () => {
   ].filter(Boolean).join(",");
   log.info("MCP server listening", { url: `http://${HOST}:${PORT}/mcp`, providers });
   log.info("history cache", { path: CACHE_DB_PATH });
+  log.info("run statistics", { log: STATS_LOG_PATH ?? "disabled" });
   log.info("second brain", { path: brain.root });
   if (jobs.length > 0) startCollector(jobs, Number(process.env.COLLECT_EVERY_MINUTES ?? 60));
   // X reads are paid, so the background sync is opt-in and has its own schedule.

@@ -30,7 +30,7 @@ const SERVER_ENTRY = fileURLToPath(new URL("../../src/server/mcp-server.ts", imp
 function startServer(port: number, env: Record<string, string>): Promise<ChildProcess> {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [SERVER_ENTRY], {
-      env: { ...process.env, ...env, PORT: String(port) },
+      env: { ...process.env, STATS_LOG: "false", ...env, PORT: String(port) }, // test calls stay out of the real stats log
       stdio: ["ignore", "pipe", "pipe"],
     });
     let output = "";

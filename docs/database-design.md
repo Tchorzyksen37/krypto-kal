@@ -22,6 +22,7 @@ There is no database server. Persistent state is split between two kinds of stor
 |---|---|---|---|---|
 | `cache.db` | `~/.krypto-kal/cache.db` | `CACHE_DB_PATH` | MCP server (`HistoryStore`, `TradeStore`); the speculation scorer CLI (`TradeStore`) | the same |
 | `bot.db` | `~/.krypto-kal/bot.db` | `db_path` in the bot config (`BOT_CONFIG`) | bot trader and watchdog processes, bot CLI | MCP tool `bot_status` |
+| Run statistics log | `~/.krypto-kal/tool-stats.jsonl` | `STATS_LOG_PATH`, off with `STATS_LOG=false` | MCP server (`runStats`, append-only JSON lines) | `server_stats` (in-memory copy), `node src/core/run-stats.ts` |
 | Vault state files | `<BRAIN_DIR>/.*.json` | `BRAIN_DIR` | X sync, triage (`brain_ingest_mark`) | X sync, triage |
 | Vault speculation logs | `<BRAIN_DIR>/output/speculation/` | `BRAIN_DIR` | speculation checker and scorer | scorer, `speculation-to-bot`, Claude skills |
 

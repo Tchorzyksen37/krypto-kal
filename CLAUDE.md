@@ -32,6 +32,7 @@ docs/           architecture notes, guides, plans
 | core | [logger.ts](src/core/logger.ts) | Leveled logger; every module uses `createLogger(scope)`. |
 | core | [history-store.ts](src/core/history-store.ts) | SQLite (`node:sqlite`) store of series points plus coverage ranges. |
 | core | [series-cache.ts](src/core/series-cache.ts) | Provider-independent read-through history cache on top of `HistoryStore`. |
+| core | [run-stats.ts](src/core/run-stats.ts) | Statistics collected while the server runs: per tool call duration, errors, size of the result the model reads (chars, ~tokens) and series points; per history request points from the SQLite cache vs the API. In memory for the MCP tool `server_stats`, and one JSON line per event in `STATS_LOG_PATH`; `node src/core/run-stats.ts [file] [--since ISO]` summarises a log. |
 | providers | [coinalyze-client.ts](src/providers/coinalyze/coinalyze-client.ts) | Free Coinalyze API (`https://api.coinalyze.net/v1`; OpenAPI spec at `/v1/doc/api-spec.json`). Needs `COINALYZE_API_KEY`. |
 | providers | [coinglass-client.ts](src/providers/coinglass/coinglass-client.ts) | Coinglass Open API v4. The account's plan has no API access ("Upgrade plan"); its key is commented out in `.env`. |
 | providers | [yahoo-client.ts](src/providers/yahoo/yahoo-client.ts) | Unofficial Yahoo Finance API, no key. Uses `/v8/finance/chart` for both history and quotes, because `/v7/finance/quote` needs a cookie crumb (401). |
@@ -96,6 +97,7 @@ rules live in one place and the others link to them: the macro calendar in
 - Speculation mode (all optional): `SPECULATION_SYMBOLS` (core, `BTC,ETH,XRP`), `SPECULATION_SCREEN_EXTRA` (3), `SPECULATION_MIN_VOLUME_USD`, `SPECULATION_MIN_DEPTH_USD`, `SPECULATION_MAX_BETS` (3), `SPECULATION_MAX_ENTRY_DEVIATION` (0.005), `SPECULATION_FEE_BPS` (5, taker fee the checker assumes for both legs), `SPECULATION_MAKER_FEE_BPS` (2) / `SPECULATION_TAKER_FEE_BPS` (5) (scoring), `SPECULATION_MATCH_TOLERANCE` (0.003), `SPECULATION_TZ` (Europe/Warsaw), `SPECULATION_LEAD_MINUTES` (20), `SPECULATION_VERIFY` (true; `false` stops the checker from re-measuring prices).
 - `BOT_CONFIG`: path of the bot's JSON config (merged over its defaults; `cycle_interval_sec`, `db_path` default `~/.krypto-kal/bot.db`, ...). Used by `npm run bot` and `bot_status`.
 - `LOG_LEVEL`: `debug`, `info` (default), `warn` or `error`.
+- `STATS_LOG_PATH`: the run statistics log, default `~/.krypto-kal/tool-stats.jsonl` (sizes, counts and timings only, never results or secrets); `STATS_LOG=false` keeps the statistics in memory only. The e2e tests turn it off.
 - `CACHE_DB_PATH`: default `~/.krypto-kal/cache.db`, deliberately outside OneDrive because sync can lock SQLite files.
 - Collector (runs only when at least one symbol list is set):
   - Coinalyze: `COLLECT_SYMBOLS`, `COLLECT_INTERVALS`.
@@ -129,6 +131,7 @@ rules live in one place and the others link to them: the macro calendar in
   - `kraken_futures_candles`: public trade-price candles of a futures contract (no keys; registered whenever Kraken Futures is enabled). Use it, not spot `kraken_ohlc`, for PF_ prices and older ranges.
   - `kraken_futures_*` account tools (registered only with `KRAKEN_FUTURES_RO_API_KEY`/`_SECRET`; `KRAKEN_FUTURES_ENABLED=false` turns them off): `positions` (open positions + margin account), `open_orders`, `fills` and `pnl`. The last two first sync new fills into the local DB (`CACHE_DB_PATH`), so history goes past the API's 100-fill window. The MCP client never has `tradingEnabled`.
   - `x_*`: `sync` (fetch new posts into `brain/raw/x/`) and `accounts` (curated list + live profiles); `x_recent` reads the local archive and works without a token.
+  - `server_stats`: run statistics of this server process (see `run-stats.ts`); `reset: true` starts counting again.
   - `bot_status`: read-only view of the bot's SQLite file (state, halt, simulated position and account, incidents, decisions, report). Always registered; says so when the bot has not run.
   - `brain_*`: `list`, `read`, `search`, `write`, plus `triage` (what to ingest next, by impact) and `ingest_mark` (record ingested/skipped posts). Always registered, so Claude Desktop can run the brain workflow. `raw/` is never writable through MCP.
 - **Future plan** (not started): server-side processing of data before tools return it. Keep raw points in the cache and put processing in a separate layer between the cache and tool output.
