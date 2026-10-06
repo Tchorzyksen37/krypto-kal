@@ -1,6 +1,6 @@
 ---
 name: position-review
-description: Evaluate the user's open Kraken Futures positions - protection (stop, targets), liquidation distance, PnL in R, funding cost, the market around each position (ATR, trend, open interest, funding, long/short crowding, liquidation clusters), possible scenarios with probabilities, catalysts and risks in the holding horizon, and a conditional plan (hold, tighten, take partial, close). Read-only, never places orders. Use when the user asks about "my position", "moja pozycja", "oceń pozycję", "co z moim longiem/shortem", "should I hold", "czy trzymać", or wants scenarios and catalysts for what they hold on Kraken Futures.
+description: Evaluate the user's open Kraken Futures positions - protection (stop, targets), liquidation distance, PnL in R, funding cost, the market around each position (ATR, trend, open interest, funding, long/short crowding, liquidation clusters), possible scenarios with probabilities, catalysts and risks in the holding horizon, and a conditional plan (hold, tighten, take partial, close). Read-only, never places orders. Use when the user asks about "my position", "moja pozycja", "oceń pozycję", "co z moim longiem/shortem", "should I hold", "czy trzymać", or wants scenarios and catalysts for what they hold on Kraken Futures. Not for new trade ideas or a general market read (speculate), and not for checking whether one headline is true or already priced in (social-check-before-trade).
 ---
 
 # Position review
@@ -65,7 +65,8 @@ the situation, not advice and not an order: the user decides and acts by hand.
      differ from it (positioning, catalysts, trend); a difference without a reason is not allowed.
 
 5. **Catalysts and risks** in the horizon:
-   - catalysts, time-ordered with UTC and Warsaw time: scheduled macro releases and speakers, session opens (from
+   - catalysts, time-ordered with UTC and Warsaw time: scheduled macro releases and speakers (sourced as in the
+     `speculate` skill, step 6: web search against official calendars, otherwise "calendar unknown"), session opens (from
      `speculation_context.session`), funding times, options expiry, events from the brain (`brain_search` the symbol and
      the region, `wiki/timeline.md`) and fresh X posts (`x_sync` if available, then `x_recent` 6 h; if none, say how old
      the newest post is);

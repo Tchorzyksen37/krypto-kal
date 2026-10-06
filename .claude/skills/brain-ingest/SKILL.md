@@ -1,6 +1,6 @@
 ---
 name: brain-ingest
-description: Ingest the most market-moving new X posts into the second brain, end to end - raw/ -> wiki/ (events, actors, people, places, themes, markets, sources, timeline, index, log) -> output/ (a Polish briefing of what changed). Posts are ranked by impact and grouped into events by the brain_triage tool, so the strongest, corroborated news is read first and noise is skipped. Use when the user says ingest, "zaingestuj", "wczytaj nowe posty", update the brain/wiki, or asks for a briefing built from the wiki.
+description: Ingest the most market-moving new X posts into the second brain, end to end - raw/ -> wiki/ (events, actors, people, places, themes, markets, sources, timeline, index, log) -> output/ (a Polish briefing of what changed). Posts are ranked by impact and grouped into events by the brain_triage tool, so the strongest, corroborated news is read first and noise is skipped. Use when the user says ingest, "zaingestuj", "wczytaj nowe posty", update the brain/wiki, or asks for a briefing built from the wiki. The only skill that writes to the wiki; other skills that find news hand it over here instead of writing wiki pages themselves.
 ---
 
 # Brain ingest
