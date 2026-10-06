@@ -21,7 +21,7 @@ src/
   speculation/  speculation mode support code (checker, sessions, screen, volume, scorer)
 test/e2e/       end-to-end tests against the real APIs (spawn the server)
 docs/           architecture notes, guides, plans
-.claude/skills/ project skills (brain-ingest, speculate, speculation-score, speculation-to-bot, position-review)
+.claude/skills/ project skills (one job each, see Skills below)
 ```
 
 | Module | File | What it is |
@@ -46,6 +46,24 @@ docs/           architecture notes, guides, plans
 | trading | [futures-pnl.ts](src/trading/futures-pnl.ts), [trade-store.ts](src/trading/trade-store.ts) | Realized PnL statistics for Kraken Futures: fills are synced into SQLite (`futures_fills`, with order id and maker/taker type; older databases are migrated on open), turned into closed trades by average-cost netting (`futures_trades`) and summarized. Gross of fees and funding; linear contracts (PF_/FF_) only. |
 | bot | [src/bot/](src/bot/) | The Kraken Futures trading bot (state machine, sizing, simulated exchange, watchdog, reconciliation, property tests) and its dry-run launcher: `npm run bot -- run` (trader + watchdog processes on real public market data), `policy template/add/from-speculation`, `status`, `report`, `ack-halt`; `policy from-speculation <meta.json>` (`from-speculation.ts`, skill `speculation-to-bot`) turns the best checked speculation bet on the bot's symbol into a policy that trades only inside the bet's window (`not_before` = window start, `valid_until` = fill-by, horizon = hold time); alerts and daily reports go to `<BRAIN_DIR>/output/bot/`. **Cannot place real orders** (`LiveExecutor` always throws, guard tests). `npm run test:bot`. Testing guide: [docs/bot-testing.md](docs/bot-testing.md). Architecture: [docs/bot-architecture.md](docs/bot-architecture.md). Status, deviations from the spec and unverified assumptions: [docs/superpowers/2026-10-03-trader-core-status.md](docs/superpowers/2026-10-03-trader-core-status.md). |
 | speculation | [src/speculation/](src/speculation/) | Speculation mode (four session reports a day: "most probable continuation" with an explicit LONG/SHORT/NEUTRAL bias, written by the `speculate` skill into `<BRAIN_DIR>/output/speculation/`). Code is deterministic support only: `context.ts` + `market.ts` (the measured KNOWN layer behind the MCP tool `speculation_context`: futures prices, ATR, spread, depth, funding, Coinalyze OI/long-short/liquidations, the screen and the multi-exchange volume share), `check.ts` (re-measures last price and ATR on Kraken Futures, validates bets, rewrites the report's Best bets block, appends `bets-log.json` and `reports-log.json`), `screen.ts` (symbol screening), `sessions.ts` (the four sessions with regions, investor profiles and bet limits; DST-aware), `volume.ts` (measured volume share per session), `seasonality.ts` (opening-hour range, direction and first-15-minute continuation after the Tokyo, Europe and US opens from 15m futures candles, DST-aware) and `positioning.ts` (UTC hours where open interest is built or unwound, and what follows a sharp 1h move: OI, giveback, range and volume decay), both exposed by `speculation_context` as base rates from a short sample (cached 6 h), `score.ts` (matches Kraken Futures fills to bets, resolves outcomes from futures 1m candles with maker/taker fees per leg, calibration on take-profit hits against the chance baseline `1/(1+RR)` with Brier skill and 95% intervals, bias scoring on the session move, per-session/per-bias tables), `fetch.ts` (the scorer fetches futures candles and syncs fills itself). Advisory text only, no order placement. `npm run test:speculation`. Plan: [docs/superpowers/plans/2026-10-03-speculation-mode.md](docs/superpowers/plans/2026-10-03-speculation-mode.md). User guide: [docs/speculation-guide.md](docs/speculation-guide.md). |
+
+## Skills
+
+Each skill answers one question; when a request belongs to another skill, say so instead of doing its job. Shared
+rules live in one place and the others link to them: the macro calendar in
+`crypto-market-sentiment/references/macro-checklist.md` (section 4), the squeeze score and the price/OI quadrant in
+`crypto-market-sentiment/references/derivatives-playbook.md` (sections 3 and 5), and the post-vs-price timing in
+`social-check-before-trade/references/market-alignment.md`. Sessions everywhere are the four of `src/speculation/sessions.ts`.
+
+| Skill | Question it answers | Horizon | Writes |
+|---|---|---|---|
+| `speculate` | Where does the next session go, and which bets? (bias, scenarios, checked bets) | one session | `output/speculation/` |
+| `crypto-market-sentiment` | What is the market regime? (macro, derivatives phase, squeeze risk, range) | days | chat; `output/sentiment/` on request |
+| `position-review` | What about the position I hold? (protection, R, liquidation, scenarios, plan) | the position's | `output/positions/` |
+| `social-check-before-trade` | Is this news true, and is it already priced in? | hours | chat only |
+| `brain-ingest` | Update the second brain from X (raw -> wiki -> briefing) | since the last run | `wiki/`, `output/` (the only wiki writer) |
+| `speculation-score` | How did the bets and biases do? | history | `output/speculation/` scorecards |
+| `speculation-to-bot` | Let the dry-run bot trade a bet inside its window | one bet | bot policies (via the CLI) |
 
 ## Commands
 

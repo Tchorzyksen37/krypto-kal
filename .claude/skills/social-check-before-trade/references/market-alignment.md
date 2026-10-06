@@ -6,6 +6,7 @@ Cel: ustalić, czy post wyprzedził ruch, go wywołał, czy rynek poruszył się
 
 | Co | Narzędzie | Parametry |
 |---|---|---|
+| Kontrakt użytkownika | `kraken_futures_candles` | `resolution` `1m` lub `5m`, `from`/`to` w ISO; ceny, na których naprawdę handluje (PF_) |
 | Aktywo (perpetual) | `coinalyze_ohlcv_history` | `5min`, okno od 30 min przed pierwszym postem do 1h po ostatnim; `from`/`to` w sekundach UNIX |
 | Lewar | `coinalyze_open_interest_history`, `coinalyze_liquidation_history` | `5min` lub `1hour` |
 | Ropa | `yahoo_history` | `BZ=F` (Brent, kontrakt grudniowy od 1.10), `CL=F` (WTI), `5m` |

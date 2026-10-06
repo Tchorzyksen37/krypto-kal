@@ -1,6 +1,6 @@
 ---
 name: position-review
-description: Evaluate the user's open Kraken Futures positions - protection (stop, targets), liquidation distance, PnL in R, funding cost, the market around each position (ATR, trend, open interest, funding, long/short crowding, liquidation clusters), possible scenarios with probabilities, catalysts and risks in the holding horizon, and a conditional plan (hold, tighten, take partial, close). Read-only, never places orders. Use when the user asks about "my position", "moja pozycja", "oceń pozycję", "co z moim longiem/shortem", "should I hold", "czy trzymać", or wants scenarios and catalysts for what they hold on Kraken Futures.
+description: Evaluate the user's open Kraken Futures positions - protection (stop, targets), liquidation distance, PnL in R, funding cost, the market around each position (ATR, trend, open interest, funding, long/short crowding, liquidation clusters), possible scenarios with probabilities, catalysts and risks in the holding horizon, and a conditional plan (hold, tighten, take partial, close). Read-only, never places orders. Use when the user asks about "my position", "moja pozycja", "oceń pozycję", "co z moim longiem/shortem", "should I hold", "czy trzymać", or wants scenarios and catalysts for what they hold on Kraken Futures. Not for new trade ideas (speculate), the multi-day market regime (crypto-market-sentiment), or checking whether one headline is true or already priced in (social-check-before-trade).
 ---
 
 # Position review
@@ -51,8 +51,10 @@ the situation, not advice and not an order: the user decides and acts by hand.
      the stop and targets sit relative to them (a stop just beyond an obvious level is a stop-hunt target);
    - `coinalyze_liquidation_heatmap_estimate` with `symbols: ["<BASE>USDT_PERP.A"]`, `interval: "4hour"`, `limit: 500`:
      ESTIMATED liquidation clusters near the stop or targets (skipped without a Coinalyze key: say so under Unknown);
-   - **crowding against or with the position:** funding and long/short ratio on the same side as the position, plus
-     rising OI, mean the trade is crowded (squeeze risk against it); the opposite side crowded means fuel for it.
+   - **crowding against or with the position:** score the squeeze against the position (a long faces a long squeeze, a
+     short a short squeeze) and the one in its favour with section 5 of
+     `.claude/skills/crypto-market-sentiment/references/derivatives-playbook.md` (points met out of 6, from this run's
+     data only), and read the last 4h with its price / OI quadrant (section 3);
    - macro (`yahoo_quote`: `ES=F`, `NQ=F`, `DX-Y.NYB`, `^TNX`, `CL=F`), each with its time; stale quotes (weekend, closed
      market) are labelled "last close <day>" and do not drive conclusions.
 
@@ -65,10 +67,14 @@ the situation, not advice and not an order: the user decides and acts by hand.
      differ from it (positioning, catalysts, trend); a difference without a reason is not allowed.
 
 5. **Catalysts and risks** in the horizon:
-   - catalysts, time-ordered with UTC and Warsaw time: scheduled macro releases and speakers, session opens (from
+   - catalysts, time-ordered with UTC and Warsaw time: scheduled macro releases and speakers (sourced as in
+     `.claude/skills/crypto-market-sentiment/references/macro-checklist.md`, section 4: web search against official
+     calendars, otherwise "calendar unknown"), session opens (from
      `speculation_context.session`), funding times, options expiry, events from the brain (`brain_search` the symbol and
      the region, `wiki/timeline.md`) and fresh X posts (`x_sync` if available, then `x_recent` 6 h; if none, say how old
-     the newest post is);
+     the newest post is). A fresh headline that could hit the position is checked with the method of
+     `.claude/skills/social-check-before-trade/references/market-alignment.md` (did the move come before or after it,
+     is it already priced in); for a full news check offer the `social-check-before-trade` skill;
    - risks: what would hurt the position most (squeeze, gap through the stop over a weekend or an event, liquidation
      cascade, funding drag on a long hold), each with what would signal it early.
    - If a speculation report covers this symbol and session (`BRAIN/output/speculation/<today>/`), quote its bias and

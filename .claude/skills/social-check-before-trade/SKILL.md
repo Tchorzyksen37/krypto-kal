@@ -1,6 +1,6 @@
 ---
 name: social-check-before-trade
-description: Sprawdza social media (głównie X) i nagłówki agencji przed otwarciem, zmianą lub utrzymaniem pozycji spekulacyjnej na krypto lub surowcach. Zbiera posty z zaufanych kont (agencje, oficjalne konta, politycy, OSINT), ocenia ich wiarygodność, ustala czas publikacji i sprawdza, czy i kiedy rynek (BTC, ETH, ropa, dolar, rentowności) już zareagował. Zwraca werdykt, tabelę zdarzeń z poziomem pewności i listę luk w pokryciu. Używaj ZAWSZE, gdy użytkownik pyta o to, co się dzieje na X lub Twitterze, czy są nowe informacje przed wejściem w pozycję, o nagłówki z Bliskiego Wschodu, Iranu, Ormuzu, Trumpa, o "news przed sesją azjatycką", "sprawdź media społecznościowe", "czy coś wyciekło", albo gdy chce zweryfikować plotkę lub ruch rynku - nawet jeśli nie wspomni o skillu. English triggers - check social media before trading, X/Twitter headlines, news check before entry, verify rumor, geopolitical headlines vs price reaction.
+description: Sprawdza X i nagłówki agencji przed otwarciem, zmianą lub utrzymaniem pozycji na krypto lub surowcach - posty zaufanych kont (agencje, oficjalne konta, politycy, OSINT), ich wiarygodność, czas publikacji i to, czy rynek (BTC, ETH, ropa, dolar, rentowności) już zareagował. Zwraca werdykt, tabelę zdarzeń z poziomem pewności i luki w pokryciu. Używaj ZAWSZE, gdy użytkownik pyta, co się dzieje na X lub Twitterze, czy są nowe informacje przed wejściem w pozycję, o nagłówki z Bliskiego Wschodu, Iranu, Ormuzu, Trumpa, o "news przed sesją azjatycką", "sprawdź media społecznościowe", "czy coś wyciekło", albo chce zweryfikować plotkę lub ruch rynku. English triggers - check social media before trading, X/Twitter headlines, news check before entry, verify rumor, headlines vs price reaction. Nie do - zapisu do wiki (brain-ingest), biasu i zakładów na sesję (speculate), przeglądu nastroju rynku (crypto-market-sentiment), pełnej oceny trzymanej pozycji (position-review).
 ---
 
 # Sprawdzenie social mediów przed spekulacją
@@ -24,7 +24,7 @@ Ustal: aktywa lub pozycje użytkownika, kierunek (long/short), okno czasowe (dom
 
 ## Krok 1: zbierz źródła (w tej kolejności)
 
-1. **Vault Obsidian ("second brain").** Jeśli dostępne są narzędzia `mcp-tools-istefox` (załaduj przez `tool_search`): przeczytaj `CLAUDE.md`, wylistuj `raw/x/<dzisiejsza data>/`, sprawdź `fetched_at` w frontmatter najnowszego pliku. Przeszukaj `wiki/` (`search_vault_smart` lub `search_vault_simple`) pod kątem tematu: strony `events/`, `themes/`, `sources/`. Surowych plików w `raw/` **nigdy nie edytuj ani nie usuwaj**.
+1. **Vault Obsidian ("second brain").** Kolejność dostępu: narzędzia `brain_*` serwera krypto-kal (`brain_list`, `brain_read`, `brain_search`), w Claude Desktop ewentualnie `mcp-tools-istefox` (załaduj przez `tool_search`), w Claude Code bezpośrednio pliki w `BRAIN_DIR` z `.env`. Przeczytaj `CLAUDE.md` vaultu, wylistuj `raw/x/<dzisiejsza data>/`, sprawdź `fetched_at` w frontmatter najnowszego pliku. Przeszukaj `wiki/` pod kątem tematu: strony `events/`, `themes/`, `sources/` (rzetelność kont jest w `wiki/sources/`). Gdy postów w oknie jest dużo, `brain_triage` pokaże najważniejsze jeszcze nieprzetworzone posty i zgrupuje je w zdarzenia. Surowych plików w `raw/` **nigdy nie edytuj ani nie usuwaj**.
 2. **Narzędzia serwera krypto-kal.** Sprawdź przez `tool_search`, czy są `x_recent`, `x_sync`, `brain_*`. Jeśli są, użyj `x_recent` do ostatnich postów. `x_sync` kosztuje (ok. $0,005 za post, z dziennym i łącznym limitem), więc uruchamiaj go tylko gdy dane są starsze niż ok. 60 minut i użytkownik się na to zgadza lub prosi o "świeże dane".
 3. **Wyszukiwanie w sieci** dla nagłówków agencji z ostatnich godzin, gdy dane z X są stare lub rzadkie, albo do weryfikacji plotki.
 4. **Przeglądarka Claude in Chrome** tylko do odczytu publicznych stron (jeśli rozszerzenie jest połączone). Nigdy nie loguj się, nie publikuj, nie klikaj w linki z postów prowadzące do pobrań.
@@ -37,7 +37,7 @@ Dla każdego istotnego posta użyj `references/source-triage.md`: kategoria kont
 
 ## Krok 3: dopasuj do rynku
 
-Dla każdego istotnego posta pobierz dane rynkowe z okna 15 minut przed i 30 minut po (narzędzia: `coinalyze_ohlcv_history` 5min dla aktywa, `yahoo_history` 5m dla Brent `BZ=F`, `DX-Y.NYB`, kontraktów na obligacje `ZN=F`/`ZB=F`, `kraken_ticker` jako kontrola). Postępuj według `references/market-alignment.md`: wyznacz, czy ruch był **przed** postem (już wyceniony), **po** (reakcja) czy **brak**. Wskaż luki: ruchy bez pasującego posta oznaczaj jako "niewyjaśnione".
+Dla każdego istotnego posta pobierz dane rynkowe z okna 15 minut przed i 30 minut po (narzędzia: `kraken_futures_candles` 1m lub 5m dla kontraktu PF_, na którym handluje użytkownik, `coinalyze_ohlcv_history` 5min dla aktywa (wolumen kupna taker), `yahoo_history` 5m dla Brent `BZ=F`, `DX-Y.NYB`, kontraktów na obligacje `ZN=F`/`ZB=F`, `kraken_ticker` jako kontrola). Postępuj według `references/market-alignment.md`: wyznacz, czy ruch był **przed** postem (już wyceniony), **po** (reakcja) czy **brak**. Wskaż luki: ruchy bez pasującego posta oznaczaj jako "niewyjaśnione".
 
 ## Krok 4: wniosek i raport
 
@@ -52,9 +52,9 @@ Werdykt wybierz spośród:
 
 Odnieś się do pozycji użytkownika tylko opisowo ("ten komunikat zwiększa ryzyko dla shorta, bo zwykle podbija ropę"), bez poleceń wejścia/wyjścia.
 
-## Krok 5 (opcjonalnie): zapis do wiki
+## Krok 5 (opcjonalnie): przekazanie do wiki
 
-Jeśli użytkownik jest w kontekście second brain i prosi o zapis, wykonaj **Ingest** zgodnie z jego `CLAUDE.md`: strony po angielsku, link `[[slug]]`, cytowanie źródła i pewność przy każdym twierdzeniu, wpis w `wiki/timeline.md` i `wiki/log.md`. Wiele postów o tym samym zdarzeniu = jedna strona zdarzenia. Pomijaj szum (opinie bez newsów, duplikaty, powtórzone nagłówki). Sugerując zmiany w `x-accounts.json`, podaj konto, które należy zastąpić, jeśli budżet jest ograniczony, i zapisz uzasadnienie w `wiki/sources/`.
+Ten skill nie pisze do wiki. Jeśli użytkownik chce zapisać zdarzenia, uruchom skill `brain-ingest`: on wybiera posty przez `brain_triage`, oznacza je w `.ingest-state.json` i pilnuje formatu stron, więc nic nie zostanie przetworzone dwa razy. Przekaż mu w jednym zdaniu, które zdarzenia uznałeś za istotne i jaką reakcję rynku zmierzyłeś (z godzinami), żeby trafiła do sekcji `Facts`. Sugestie zmian w `x-accounts.json` podaj w odpowiedzi, nie zmieniaj pliku.
 
 ## Pułapki
 

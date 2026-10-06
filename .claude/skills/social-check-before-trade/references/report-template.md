@@ -39,12 +39,6 @@ Co nie zostało sprawdzone i dlaczego: konta wyłączone, posty w innych języka
 
 ---
 
-## Jeśli użytkownik prosi o zapis w wiki (Ingest)
+## Jeśli użytkownik prosi o zapis w wiki
 
-1. Przeczytaj `CLAUDE.md` w vaultcie i `wiki/log.md` (ostatni ingest).
-2. Przetwórz tylko pliki `raw/x/` nowsze od ostatniego wpisu. Każdy czytaj raz.
-3. Wiele postów o tym samym zdarzeniu = jedna strona w `wiki/events/YYYY-MM-DD-slug.md`. Reakcję rynku dołącz z narzędzi rynkowych.
-4. Uaktualnij strony `actors/`, `people/`, `places/`, `themes/`, `markets/`, `sources/`; wszystko po angielsku, z `[[slug]]`, cytatem źródła i pewnością.
-5. Dopisz wpisy do `wiki/timeline.md` (najnowsze na górze) i `wiki/index.md`.
-6. Zakończ wpisem w `wiki/log.md`: data, liczba i zakres źródeł, strony utworzone i zaktualizowane, trzy zdania podsumowania.
-7. Nie edytuj `raw/`. Sugestie zmian w `x-accounts.json` zapisz w `wiki/sources/<konto>.md`, nie zmieniaj pliku.
+Nie zapisuj sam: uruchom skill `brain-ingest` (patrz SKILL.md, Krok 5). Ma jedną procedurę ingestu dla całego vaultu.

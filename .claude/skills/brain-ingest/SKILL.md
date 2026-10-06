@@ -1,6 +1,6 @@
 ---
 name: brain-ingest
-description: Ingest the most market-moving new X posts into the second brain, end to end - raw/ -> wiki/ (events, actors, people, places, themes, markets, sources, timeline, index, log) -> output/ (a Polish briefing of what changed). Posts are ranked by impact and grouped into events by the brain_triage tool, so the strongest, corroborated news is read first and noise is skipped. Use when the user says ingest, "zaingestuj", "wczytaj nowe posty", update the brain/wiki, or asks for a briefing built from the wiki.
+description: Ingest the most market-moving new X posts into the second brain, end to end - raw/ -> wiki/ (events, actors, people, places, themes, markets, sources, timeline, index, log) -> output/ (a Polish briefing of what changed). Posts are ranked by impact and grouped into events by the brain_triage tool, so the strongest, corroborated news is read first and noise is skipped. Use when the user says ingest, "zaingestuj", "wczytaj nowe posty", update the brain/wiki, or asks for a briefing built from the wiki. The only skill that writes to the wiki; other skills that find news hand it over here instead of writing wiki pages themselves.
 ---
 
 # Brain ingest
@@ -129,7 +129,9 @@ If the krypto-kal MCP tools are available, check the price around the post time 
 event's `Facts`, e.g. `BTC -0.8% between 07:15 and 07:30 UTC`. Use:
 - `yahoo_history` with interval `5m` or `1h` for oil (`BZ=F`, `CL=F`), dollar (`DX-Y.NYB`), US 10y (`^TNX`).
 - `coinalyze_ohlcv_history` (symbol like `BTCUSDT_PERP.A`, interval `5min`) for BTC.
-Say "no visible reaction" when the move is within normal noise. If the tools are not available, write
+Classify the timing as in `.claude/skills/social-check-before-trade/references/market-alignment.md` (move before the
+post = already priced, after it = likely reaction, none, or an unexplained move). Say "no visible reaction" when the
+move is within normal noise. If the tools are not available, write
 "market reaction not checked". Never guess a price move.
 
 ### 4c. Other pages touched by the event
