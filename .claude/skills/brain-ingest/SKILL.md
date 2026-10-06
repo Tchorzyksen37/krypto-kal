@@ -129,7 +129,9 @@ If the krypto-kal MCP tools are available, check the price around the post time 
 event's `Facts`, e.g. `BTC -0.8% between 07:15 and 07:30 UTC`. Use:
 - `yahoo_history` with interval `5m` or `1h` for oil (`BZ=F`, `CL=F`), dollar (`DX-Y.NYB`), US 10y (`^TNX`).
 - `coinalyze_ohlcv_history` (symbol like `BTCUSDT_PERP.A`, interval `5min`) for BTC.
-Say "no visible reaction" when the move is within normal noise. If the tools are not available, write
+Classify the timing as in `.claude/skills/social-check-before-trade/references/market-alignment.md` (move before the
+post = already priced, after it = likely reaction, none, or an unexplained move). Say "no visible reaction" when the
+move is within normal noise. If the tools are not available, write
 "market reaction not checked". Never guess a price move.
 
 ### 4c. Other pages touched by the event

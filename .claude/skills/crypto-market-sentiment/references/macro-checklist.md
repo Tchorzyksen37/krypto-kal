@@ -71,10 +71,10 @@ Wyciągnij: wartość Fear & Greed z etykietą, przepływy netto do ETF na BTC/E
 
 Zapytania: `Asian markets today Nikkei Hang Seng`, `European stocks close STOXX DAX`, `Wall Street close`, `BoJ RBA PBOC decision`, `ECB BoE decision`
 
-Zbierz osobno dla każdej sesji (godziny UTC w SKILL.md, Krok 2b):
-- **Azja (00-08 UTC):** zamknięcie Nikkei 225, Hang Seng, CSI 300, Kospi; kurs jena (USD/JPY) i juana; decyzje i komunikaty BoJ, PBoC, RBA; dane z Chin (PMI, inflacja, handel), dane z Japonii. Jen i decyzje BoJ potrafią wywołać ruch na całym rynku ryzyka (np. odwijanie carry trade).
-- **Europa (08-14 UTC):** zamknięcie DAX, STOXX 600, FTSE; EUR/USD, GBP/USD; dane strefy euro i Wielkiej Brytanii (inflacja, PMI, ZEW/Ifo), decyzje i wystąpienia EBC/BoE.
-- **USA (14-22 UTC):** otwarcie i zamknięcie S&P 500 i Nasdaq; publikacje o 8:30 ET (12:30 UTC) i 10:00 ET (14:00 UTC); wystąpienia członków Fed; przepływy ETF na BTC/ETH (publikowane po zamknięciu USA).
+Zbierz osobno dla każdej sesji (godziny w SKILL.md, Krok 2b):
+- **Noc / Azja (22:00-08:00 czasu warszawskiego):** zamknięcie Nikkei 225, Hang Seng, CSI 300, Kospi; kurs jena (USD/JPY) i juana; decyzje i komunikaty BoJ, PBoC, RBA; dane z Chin (PMI, inflacja, handel), dane z Japonii. Jen i decyzje BoJ potrafią wywołać ruch na całym rynku ryzyka (np. odwijanie carry trade).
+- **Europa (08:00-17:30 czasu warszawskiego):** zamknięcie DAX, STOXX 600, FTSE; EUR/USD, GBP/USD; dane strefy euro i Wielkiej Brytanii (inflacja, PMI, ZEW/Ifo), decyzje i wystąpienia EBC/BoE.
+- **USA (13:30-22:00 czasu warszawskiego, z nakładką):** otwarcie i zamknięcie S&P 500 i Nasdaq; publikacje o 8:30 ET i 10:00 ET (przelicz na UTC i czas warszawski według bieżącej strefy USA); wystąpienia członków Fed; przepływy ETF na BTC/ETH (publikowane po zamknięciu USA).
 
 Dla każdej sesji napisz jednym zdaniem: **kierunek apetytu na ryzyko w tej sesji** i jaki czynnik go wyznaczył. Wskaż, czy nastrój zmienił się między sesjami (np. "Azja słaba przez jena, Europa neutralna, USA w górę po danych").
 

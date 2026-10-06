@@ -1,6 +1,6 @@
 ---
 name: speculate
-description: Session-based speculation report for crypto futures (BTC, ETH, XRP plus screened symbols), four times a day (Europe open, Europe/US overlap, US, Asian night). Builds a KNOWN / UNKNOWN / POSSIBLE prompt from the krypto-kal MCP tools, takes the session's regions and investor profiles into account, states an overall LONG / SHORT / NEUTRAL bias, and writes scenarios plus best bets (entry, SL, TP, TTL), catalysts and risks to the Obsidian vault under output/speculation/. Also the skill for any question about where the crypto market is heading now (sentiment, bias, squeeze risk, "co się dzieje na rynku", "jaki nastrój", a morning market brief; quick read answered in chat, no files, no bets). Use when the scheduled routine fires, or when the user says speculate, "next session", "best bets", or asks for a speculation report. Not for positions the user already holds (position-review), not for verifying a headline against the price (social-check-before-trade), not for updating the wiki (brain-ingest).
+description: Session-based speculation report for crypto futures (BTC, ETH, XRP plus screened symbols), four times a day (Europe open, Europe/US overlap, US, Asian night). Builds a KNOWN / UNKNOWN / POSSIBLE prompt from the krypto-kal MCP tools, takes the session's regions and investor profiles into account, states an overall LONG / SHORT / NEUTRAL bias, and writes scenarios plus best bets (entry, SL, TP, TTL), catalysts and risks to the Obsidian vault under output/speculation/. Use when the scheduled routine fires, or when the user says speculate, "next session", "best bets", or asks for a speculation report. Horizon is one session (hours). Not for the multi-day market regime and macro briefing (crypto-market-sentiment), not for positions the user already holds (position-review), not for verifying a headline against the price (social-check-before-trade), not for updating the wiki (brain-ingest).
 ---
 
 # Speculate
@@ -12,13 +12,6 @@ and opens positions by hand (limit entries: wait for the touch). Design and rati
 
 Schedule (local time Europe/Warsaw, routine fires 20 min before each window): 07:40 Europe open
 (08:00-12:00), 13:10 Europe/US overlap (13:30-17:30), 17:10 US (17:30-22:00), 21:40 Night/Asia (22:00-08:00).
-
-## Quick read (a question, not a report)
-
-When the user asks about the market ("what is the mood?", "is a squeeze likely?", "co się dzieje na rynku?") instead
-of asking for a report: do steps 1-3 and 6, then answer in chat in the user's language with the bias (LONG / SHORT /
-NEUTRAL with probability), the regime in one line, crowding and squeeze risk, the next catalyst with its time, and what
-would change the call. Write no files, propose no bets and do not run the checker. Offer the full report in one line.
 
 ## Hard rules
 
@@ -83,11 +76,11 @@ would change the call. Write no files, propose no bets and do not run the checke
    - Context: `brain_search` / `brain_read` of the wiki timeline; `kraken_futures_positions` for what the user holds.
 4. **UNKNOWN.** Everything in `notMeasured` and `warnings`, stale quotes, an old X archive, plus news not yet posted.
 5. (Removed: the screen and the volume profile are part of step 1.)
-6. **POSSIBLE.** Scheduled releases inside the window and the next 24 h: FOMC decisions and Fed speakers, CPI / PCE,
-   payrolls and jobless claims, ISM, ECB / BoE / BoJ decisions, OPEC+ meetings. If web search is available, source each
-   date and time from an official calendar (Fed, BLS, BEA, the central bank) or two outlets, convert to UTC and Warsaw
-   time, and mark it unconfirmed otherwise; if it is not available, write "calendar unknown". Then
-   ESTIMATE liquidation clusters, unverified X claims, squeeze setups. Plausibility: low / med / high.
+6. **POSSIBLE.** Scheduled releases inside the window and the next 24 h, sourced as in
+   `.claude/skills/crypto-market-sentiment/references/macro-checklist.md`, section 4 (web search; times in UTC and
+   Warsaw time; "calendar unknown" without web search). Then ESTIMATE liquidation clusters, unverified X claims, and
+   squeeze setups scored with section 5 of `.claude/skills/crypto-market-sentiment/references/derivatives-playbook.md`
+   (list the points met, from this run's data only). Plausibility: low / med / high.
 7. **Speculate** with this framing, literally, as your own task statement:
    "I am speculating, not analysing. From KNOWN, UNKNOWN and POSSIBLE, state the most probable continuation of
    this session. Probabilities express uncertainty; I commit instead of refusing. I do not search history for

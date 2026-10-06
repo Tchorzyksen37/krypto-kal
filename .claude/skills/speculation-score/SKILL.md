@@ -5,7 +5,7 @@ description: Score past speculation bets using Kraken Futures fills and futures 
 
 # Speculation score
 
-Evaluates whether the hourly speculation reports are worth anything. Design: section 9 of
+Evaluates whether the speculation reports (four sessions a day) are worth anything. Design: section 9 of
 `docs/superpowers/plans/2026-10-03-speculation-mode.md`. Chat in English. The user does not upload anything:
 all data comes from the Kraken Futures API through the MCP tools.
 
@@ -15,7 +15,7 @@ all data comes from the Kraken Futures API through the MCP tools.
 2. Print N next to every percentage; say "too few bets" under 30. No conclusions from tiny samples.
 3. Do not tune the `speculate` skill automatically. Report findings; the user decides.
 4. Never invent a trade or a price. Ambiguous matches are flagged, never guessed.
-5. Do the arithmetic with `speculation-score.ts`, not by hand.
+5. Do the arithmetic with the `speculation_score` tool (or `src/speculation/score.ts`), not by hand.
 
 ## Procedure
 

@@ -47,13 +47,14 @@ Pod tabelą: **3 najważniejsze wydarzenia** i które kierunki wyniku są dla ry
 
 ## 4. Sesje: Azja / Europa / USA (<AKTYWO>)
 
-Okno: 14 dni, świece 2h (UTC). Tabela porównawcza (średnio na dobę):
+Okno: 14 dni, świece 1h przypisane do sesji w czasie warszawskim; udział wolumenu z `speculation_context`. Tabela porównawcza (średnio na dobę):
 
 | Sesja | Zwrot | Zakres | Udział wolumenu | Udział kupujących taker | Zmiana OI | Likwidacje (L / S) |
 |---|---|---|---|---|---|---|
-| Azja (00-08 UTC) | | | | | | |
-| Europa (08-14 UTC) | | | | | | |
-| USA (14-24 UTC) | | | | | | |
+| Noc / Azja (22:00-08:00) | | | | | | |
+| Otwarcie Europy (08:00-12:00) | | | | | | |
+| Nakładka Europa/USA (13:30-17:30) | | | | | | |
+| USA (17:30-22:00) | | | | | | |
 
 Pod tabelą:
 - **Która sesja napędza trend** i czy poparcie płynnością i CVD jest w USA, czy ruch powstaje na cienkiej płynności w Azji.
@@ -76,6 +77,6 @@ Pod tabelą:
 
 ## 6. Do sprawdzenia / braki danych
 
-Lista brakujących danych (np. heatmapa likwidacji Coinglass, opcje, wykres CVD z dłuższego okresu) i rzeczy niepotwierdzone (np. wystąpienia, które jeszcze się nie odbyły lub nie zostały zweryfikowane).
+Lista brakujących danych (np. opcje, wykres CVD z dłuższego okresu) i rzeczy niepotwierdzone (np. wystąpienia, które jeszcze się nie odbyły lub nie zostały zweryfikowane).
 
 *Analiza danych, nie porada inwestycyjna.*

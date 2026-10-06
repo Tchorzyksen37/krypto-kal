@@ -97,7 +97,7 @@ Policz osobno dla **long squeeze** i **short squeeze**. Każdy spełniony warune
 
 **Rozróżnik:** OI spada razem z ceną = czyszczenie lewaru, zwykle krótsze. OI rośnie mimo spadku ceny = weszli nowi agresywni shortujący, presja może trwać dłużej.
 
-**Poziomy wyzwalacza:** wyznacz z danych ceny: najbliższy opór/wsparcie i ekstrema ostatnich dni. Coinalyze nie daje heatmapy likwidacji - jeśli ocena zależy od klastrów, zaznacz "do sprawdzenia w Coinglass Liquidation Heatmap".
+**Poziomy wyzwalacza:** wyznacz z danych ceny: najbliższy opór/wsparcie i ekstrema ostatnich dni. Klastry likwidacji daje tylko model `coinalyze_liquidation_heatmap_estimate` (interwał `4hour`, limit 500+): podawaj je jako ESTIMATE, nigdy jako zmierzone dane.
 
 ## 6. Przewaga longów czy shortów
 
@@ -138,15 +138,11 @@ Cel: ustalić, **w której sesji rynek rośnie, w której spada, gdzie jest pły
 
 ### Dane
 
-Pobierz na interwale `2hour`, `limit=168` (14 dni): OHLCV, open interest i likwidacje (funding wystarczy z `4hour`, bo zmienia się co kilka godzin). Świece 2h zaczynają się o parzystych godzinach UTC, więc granice sesji wypadają na granicach świec. Jeśli tokeny lub limity zapytań są ograniczeniem, zacznij od 7 dni (`limit=84`).
+Najpierw `speculation_context` (`core: ["<AKTYWO>"]`, `extra: 0`): udział sesji w wolumenie, sezonowość otwarć i rytm open interest są tam już zmierzone (patrz SKILL.md, Krok 2b). Nie licz ich drugi raz.
 
-Przypisanie świec (godzina UTC początku świecy):
-- **Azja:** 00, 02, 04, 06
-- **Europa:** 08, 10, 12
-- **USA:** 14, 16, 18, 20, 22 (22:00-24:00 to przejście USA → Azja, dołącz do USA)
-- **Nakładka Europa/USA** (12, 14 UTC) oznacz dodatkowo, gdy wypadają w niej dane makro lub otwarcie Wall Street
+Resztę pobierz z Coinalyze na interwale `1hour`, `limit=336` (14 dni): OHLCV, open interest i likwidacje (funding wystarczy z `4hour`). Jeśli limity zapytań są ograniczeniem, zacznij od 7 dni (`limit=168`).
 
-Przy zmianie czasu przesuń granice o godzinę zgodnie z uwagą w SKILL.md.
+Przypisanie świec: przelicz początek świecy (UTC) na czas Europe/Warsaw i przypisz go do sesji z tabeli w SKILL.md. Granice o :30 zaokrąglaj w dół do pełnej godziny (świeca 13:00 → nakładka, 17:00 → USA); świecę 12:00 licz do otwarcia Europy.
 
 ### Metryki na sesję (dla każdej doby, potem średnio z okna)
 
