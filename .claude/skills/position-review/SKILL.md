@@ -70,8 +70,9 @@ the situation, not advice and not an order: the user decides and acts by hand.
    - catalysts, time-ordered with UTC and Warsaw time: scheduled macro releases and speakers (sourced as in
      `.claude/skills/crypto-market-sentiment/references/macro-checklist.md`, section 4: web search against official
      calendars, otherwise "calendar unknown"), session opens (from
-     `speculation_context.session`), funding times, options expiry, events from the brain (`brain_search` the symbol and
-     the region, `wiki/timeline.md`) and fresh X posts (`x_sync` if available, then `x_recent` 6 h; if none, say how old
+     `speculation_context.session`), funding times, options expiry, events from the brain (`brain_related` on the asset's
+     market page, e.g. `btc` or `oil`, with `depth: 2` and `type: "event"`; `brain_search` the symbol and the region;
+     `wiki/timeline.md`) and fresh X posts (`x_sync` if available, then `x_recent` 6 h; if none, say how old
      the newest post is). A fresh headline that could hit the position is checked with the method of
      `.claude/skills/social-check-before-trade/references/market-alignment.md` (did the move come before or after it,
      is it already priced in); for a full news check offer the `social-check-before-trade` skill;

@@ -88,7 +88,8 @@ For each event, in this order:
 ### 4a. Event page
 
 Path: `wiki/events/YYYY-MM-DD-short-kebab-slug.md` (UTC date of the first post). If it already exists, update it
-instead of creating a second one (search `wiki/events/` for the date and keywords first).
+instead of creating a second one: search `wiki/events/` for the date and keywords, and call `brain_related` on the
+event's main actor or place (`type: "event"`) to see the event pages already linked to it.
 
 ```markdown
 ---
@@ -137,7 +138,8 @@ move is within normal noise. If the tools are not available, write
 ### 4c. Other pages touched by the event
 
 For every actor, person, place, theme and market the event mentions, open its page and **update** it, or create it
-if it does not exist (search first: `ls wiki/<folder>/`).
+if it does not exist (search first: `ls wiki/<folder>/`, or `brain_related` with the name, which lists close slugs
+when there is no exact page).
 
 | Folder | For | Example slug |
 |---|---|---|
@@ -231,7 +233,8 @@ Before reporting, verify and fix anything that fails:
 - [ ] Every new page has frontmatter with `title`, `type`, `updated`, `sources`.
 - [ ] Every fact line has a link and one of: confirmed, reported, unverified, disputed.
 - [ ] Every new page is in `wiki/index.md`; every new event is in `wiki/timeline.md`.
-- [ ] Every `[[link]]` you wrote points to a file that exists in `wiki/`.
+- [ ] Every `[[link]]` you wrote points to a file that exists in `wiki/` (`brain_related` without a page lists links to
+      missing pages and new orphans).
 - [ ] The log entry is written. Nothing in `raw/` was changed.
 - [ ] `brain_ingest_mark` was called (or its absence is logged).
 - [ ] The briefing exists in `output/` and cites only wiki pages.

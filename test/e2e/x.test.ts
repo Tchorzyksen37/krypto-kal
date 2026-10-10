@@ -9,9 +9,9 @@ import { join } from "node:path";
 import { after, describe, test } from "node:test";
 import { DEFAULT_BRAIN_DIR } from "../../src/brain/brain.ts";
 import { BotStore } from "../../src/bot/bot-store.ts";
-import { call, serverTests, useMcpServer } from "./test-helpers.ts";
+import { call, callText, serverTests, useMcpServer } from "./test-helpers.ts";
 
-const BRAIN_TOOLS = ["x_recent", "brain_list", "brain_read", "brain_search", "brain_write", "brain_triage", "brain_ingest_mark"];
+const BRAIN_TOOLS = ["x_recent", "brain_list", "brain_read", "brain_search", "brain_related", "brain_write", "brain_triage", "brain_ingest_mark"];
 const X_TOOLS = ["x_sync", "x_accounts"];
 
 const dir = mkdtempSync(join(tmpdir(), "brain-e2e-"));
@@ -34,6 +34,17 @@ describe("Second brain", () => {
     assert.deepEqual(hits.map((h) => h.path), ["wiki/places/strait-of-hormuz.md"]);
     const files = (await call(ctx, "brain_list", { dir: "wiki", recursive: true })) as { path: string }[];
     assert.ok(files.some((f) => f.path === "wiki/places/strait-of-hormuz.md"));
+  });
+
+  test("brain_related walks the wiki graph: links, backlinks and the overview", async () => {
+    await call(ctx, "brain_write", { path: "wiki/actors/iran.md", content: "---\ntitle: Iran\ntype: actor\n---\n[[strait-of-hormuz]]" });
+    await call(ctx, "brain_write", { path: "wiki/events/2026-10-01-tanker-seized.md", content: "---\ntitle: Tanker seized\ntype: event\n---\n[[iran]]" });
+    const text = await callText(ctx, "brain_related", { page: "iran" });
+    assert.match(text, /^wiki graph around \[\[iran\]\] actor – Iran \(wiki\/actors\/iran\.md\)/);
+    assert.match(text, /\n- \[\[strait-of-hormuz\]\] .*: linked from it/);
+    assert.match(text, /\n- \[\[2026-10-01-tanker-seized\]\] event – Tanker seized .*: links to it/);
+    assert.match(await callText(ctx, "brain_related", {}), /^wiki graph: \d+ pages, /);
+    assert.match(await callText(ctx, "brain_related", { page: "no such page" }), /^no wiki page "no such page"/);
   });
 
   test("speculation_score scores the speculation folder of the brain and writes the scorecard", { skip: process.env.KRAKEN_FUTURES_ENABLED === "false" && "KRAKEN_FUTURES_ENABLED=false" }, async () => {

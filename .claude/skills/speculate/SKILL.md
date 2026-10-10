@@ -99,7 +99,9 @@ Schedule (local time Europe/Warsaw, routine fires 20 min before each window): 07
    - News: if `x_sync` is available, run it first (it is budget-capped) so the archive is current, then
      `x_recent` for the last 6 h. If `x_sync` is not available or the archive's newest post is old, say how old it
      is under UNKNOWN ("no posts since <time>"); an empty archive is not "no news".
-   - Context: `brain_search` / `brain_read` of the wiki timeline; `kraken_futures_positions` for what the user holds.
+   - Context: `brain_read` of the wiki timeline; `brain_related` on the market pages of the core symbols (e.g. `btc`,
+     `depth: 2`, `type: "event"`) for the events and actors behind them; `kraken_futures_positions` for what the user
+     holds.
 4. **UNKNOWN.** Everything in `notMeasured` and `warnings`, stale quotes, an old X archive, plus news not yet posted.
 5. (Removed: the screen and the volume profile are part of step 1.)
 6. **POSSIBLE.** Scheduled releases inside the window and the next 24 h, sourced as in

@@ -23,6 +23,7 @@ import {
 } from "../providers/coinalyze/coinalyze-client.ts";
 import { Brain } from "../brain/brain.ts";
 import { markIngested, runTriage } from "../brain/triage.ts";
+import { buildWikiGraph, findPage, renderOverview, renderRelated } from "../brain/graph.ts";
 import { coinalyzeJobs, startCollector, yahooJobs, type CollectorJob } from "./collector.ts";
 import { HistoryStore } from "../core/history-store.ts";
 import { estimateLiquidationHeatmap, type HeatmapBar } from "../analytics/liquidation-heatmap.ts";
@@ -951,6 +952,39 @@ function registerBrain(server: McpServer) {
       },
     },
     (args) => toResult("brain_search", args, () => brain.search(args.query, args.dir, args.limit)),
+  );
+
+  server.registerTool(
+    "brain_related",
+    {
+      description:
+        "[Brain] The wiki as a knowledge graph. With `page`: the pages related to it, nearest and strongest first, " +
+        "with why (linked both ways, links to it, linked from it, shared raw sources) and the path to read; " +
+        "`depth` 2-3 follows the graph further (e.g. event -> actor -> other events). Without `page`: an overview " +
+        "(hubs per type, recently updated pages, orphans, links to missing pages). Use it before reading pages one " +
+        "by one, to see the bigger picture around a topic. The lists at the wiki root (index, timeline, log) are " +
+        "not part of the graph.",
+      inputSchema: {
+        page: z.string().optional().describe('Slug, path or title, e.g. "iran", "wiki/places/strait-of-hormuz.md", "Strait of Hormuz"'),
+        depth: z.number().int().min(1).max(3).default(1),
+        limit: z.number().int().min(1).max(200).default(30),
+        type: z.string().optional().describe('Only related pages of this type, e.g. "event", "actor", "market"'),
+        shared_sources: z.boolean().default(true).describe("Also relate pages that cite the same raw X posts"),
+      },
+    },
+    (args) =>
+      toResult("brain_related", args, async () => {
+        const graph = await buildWikiGraph(brain);
+        if (!args.page) return new PresentedText(renderOverview(graph), 0);
+        const { node, candidates } = findPage(graph, args.page);
+        if (!node) {
+          const list = candidates.map((n) => `- [[${n.slug}]] ${n.type} – ${n.title}`).join("\n");
+          return new PresentedText(`no wiki page "${args.page}" (${graph.nodes.size} pages in the graph)${list ? `; closest:\n${list}` : ""}`, 0);
+        }
+        return new PresentedText(renderRelated(graph, node, {
+          depth: args.depth, limit: args.limit, sharedSources: args.shared_sources, ...(args.type ? { type: args.type } : {}),
+        }), 0);
+      }),
   );
 
   server.registerTool(
