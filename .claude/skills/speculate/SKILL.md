@@ -27,6 +27,9 @@ Schedule (local time Europe/Warsaw, routine fires 20 min before each window): 07
    LONG/SHORT) and a bias per symbol. The checker refuses a report without it.
 10. Session profiles, regions and investor types are heuristics, not facts. Use them to weigh evidence, and
     say in the report when the data contradicts them.
+11. **Every report has a Macro drivers section** (step 3): Nasdaq, US yields, the dollar against other currencies
+    and oil, each with its level and its changes (previous close, this session, since the previous report). A report
+    without it is incomplete; if a driver cannot be measured it goes to UNKNOWN by name.
 
 ## Procedure
 
@@ -65,11 +68,34 @@ Schedule (local time Europe/Warsaw, routine fires 20 min before each window): 07
 3. **More KNOWN** (each with its timestamp):
    - Shorter-term price action of the picked symbols: `kraken_futures_candles` 5m / 15m of the PF_ contract.
      Never the spot `kraken_ohlc`: bets are scored on futures prices.
-   - Macro: `yahoo_quote` for `ES=F`, `NQ=F` (CME futures: they trade from Sunday 23:00/00:00 Warsaw time to
-     Friday night, unlike the cash indices), `DX-Y.NYB`, `^TNX`, `CL=F`; for the night session also `^N225`,
-     `^HSI`, `JPY=X`. **Check each quote's time:** a quote from the last close (weekends, holidays, outside
-     trading hours) is stale. List it as "last close <day>", do not treat it as a fresh signal, and do not let it
-     drive the bias.
+   - **Macro drivers (mandatory, every run).** Four drivers move crypto in this regime, in this order of
+     influence: (1) **Nasdaq**: `NQ=F` (CME futures: they trade from Sunday 23:00/00:00 Warsaw time to Friday
+     night, unlike the cash index), plus `ES=F` and the last `^IXIC` close; (2) **US yields**: `^TNX` (10y),
+     `^FVX` (5y), `^TYX` (30y); the 2y is not on Yahoo, take it from a web source or list it as unknown;
+     (3) **the dollar against other currencies**: `DX-Y.NYB`, `EURUSD=X`, `JPY=X` (USD/JPY), `GBPUSD=X`;
+     (4) **oil**: `CL=F`, `BZ=F`. The night session adds `^N225`, `^HSI`. For each driver record the level and
+     three changes: against the **previous close**; **during this session so far** (`yahoo_history` 5m or 15m from
+     the window start; before the window starts, since the Warsaw morning); and **since the previous speculation
+     report** (read the `macro` snapshot in the latest earlier `*.meta.json` under `output/speculation/`; none =
+     say so). **Check each quote's time:** a quote from the last close (weekends, holidays, outside trading hours,
+     for example `^TNX` before the Cboe session) is stale. List it as "last close <day>", do not treat it as a
+     fresh signal, and do not let it drive the bias.
+   - **AI and mega-cap earnings (a fifth driver, through Nasdaq).** Results, valuations (evaluations), guidance and
+     quarterly targets of AI and mega-cap companies move Nasdaq and, through it, crypto: Nvidia, Microsoft,
+     Alphabet, Meta, Amazon, Apple, Tesla, TSMC and the AI labs' funding or valuation headlines. Look up by web
+     search which of them report today and in the next 48 h (date, time in UTC and Warsaw, consensus if found;
+     "calendar unknown" otherwise) and list them in POSSIBLE and in the catalysts table. After-hours results land in
+     the Night/Asia session, pre-market ones in the Europe open. Check `x_recent` and the wiki for AI-sector
+     headlines too. A miss or a guidance cut is a Nasdaq-down scenario; a beat that is already priced in
+     (futures near the 52-week high) can still sell off.
+   - **Measure the Nasdaq-crypto link, do not assume it.** Working hypothesis (observed in Aug-Oct 2026): Nasdaq
+     strength lifted crypto even with expensive oil, high yields and a strong dollar, and Nasdaq sell-offs hit
+     crypto hard; yields, oil and the dollar act mostly through Nasdaq. Test it every run: `yahoo_history` 1d of
+     `^IXIC` (limit 30) against BTC daily closes (`coinalyze_ohlcv_history` daily, `BTCUSDT_PERP.A`, Monday against
+     Friday). Count same-direction days (skip days where either moved less than 0.1%), and note the BTC move on
+     Nasdaq days beyond +-1%, up and down separately, always with N. Say in the report if the data contradict the
+     hypothesis. Reference run, 2026-10-09: 12 of 17 days in the same direction over 22 sessions; Nasdaq down 1% or
+     more: BTC fell on 2 of 2 days, about 1.7x as much; Nasdaq up 1% or more: BTC rose on 3 of 4 days, irregularly.
    - News: if `x_sync` is available, run it first (it is budget-capped) so the archive is current, then
      `x_recent` for the last 6 h. If `x_sync` is not available or the archive's newest post is old, say how old it
      is under UNKNOWN ("no posts since <time>"); an empty archive is not "no news".
@@ -86,6 +112,27 @@ Schedule (local time Europe/Warsaw, routine fires 20 min before each window): 07
    this session. Probabilities express uncertainty; I commit instead of refusing. I do not search history for
    a matching situation; I reason from current state, who is trading, positioning and catalysts. Each scenario
    cites the items it relies on."
+   **Driver scenarios first:** for each macro driver of step 3, say what it can do in this window (up / flat / down,
+   with a rough probability and the typical session range measured from `yahoo_history` 15m of the last 5 days, not
+   from memory), what it is sensitive to, and the read-through to crypto. Sensitivities to use:
+   - Nasdaq: yields (especially the 10y near its 52-week high), oil spikes through inflation and rates, US data
+     and Fed speakers, AI/mega-cap news, the US cash open (15:30 Warsaw);
+   - yields: CPI/PPI/PCE, jobs data, Fed speakers and minutes, Treasury auctions, oil through inflation
+     expectations, risk-off flows (yields fall);
+   - dollar against EUR/JPY/GBP: yield differentials, the risk-off bid, BoJ/MoF signals on the yen, ECB/BoE news,
+     Gulf escalation;
+   - oil: Gulf/Hormuz/Houthi headlines, Iran talks, US statements, IEA/SPR/OPEC+ decisions, inventories.
+   Weigh Nasdaq first. The bias must say where it agrees or disagrees with Nasdaq's state, and a crypto move with
+   no matching Nasdaq move is flagged as crypto-specific (positioning, flush) rather than macro.
+   **Altcoins follow bitcoin with a higher beta unless there is coin-specific news.** For every non-BTC symbol:
+   (1) search for a coin-specific catalyst (web search, `x_recent`, the wiki, listings/unlocks/ETF or legal
+   decisions, protocol events); (2) measure its beta to BTC from this run's data (1h `kraken_futures_candles` of
+   the last 7 days, or daily Coinalyze closes for 30 days), separately for BTC up and BTC down moves, with N: it
+   is often larger on the way down than on the way up (Oct 7-8 2026: ETH fell about 1.8-2.0x BTC, while on
+   Oct 9 it lagged BTC's bounce); (3) with no specific catalyst the symbol's lean is BTC's bias scaled by that
+   beta, and the report says "no coin-specific news found, follows BTC with beta X (N=...)". A bet on an
+   altcoin against BTC's lean needs the specific reason (relative weakness measured, crowding, a dated catalyst)
+   written in its rationale.
    Decide the **bias first** (LONG / SHORT / NEUTRAL + probability + one line why, and a lean per symbol), then
    2-4 scenarios (probabilities sum to 1), catalysts with time and direction, risks with what invalidates the
    call, and 0 to `maxBets` bets. Bets: `symbol, side, entry, stop_loss, take_profit, ttl_minutes, probability,
@@ -102,11 +149,21 @@ Schedule (local time Europe/Warsaw, routine fires 20 min before each window): 07
    digest carries an "Opening and positioning base rates" line per core symbol (with `days` / `events`), with
    frontmatter (`type: speculation`, `session`, `generated`, `valid_until`, `symbols`, `sources_failed`), a
    disclaimer callout, then in order: **Direction** (bias) and session profile, **Who is trading** (regions,
-   investors, measured volume share), regime and scenarios (table with probability and unicode bar), catalysts
+   investors, measured volume share), **Macro drivers** (table: driver, level, change vs previous close, change
+   this session, change since the previous report, stale flag, sensitive to, possible move in the window with
+   probability, read-through to crypto; then the Nasdaq-crypto link line with its N), regime and scenarios (table
+   with probability and unicode bar), catalysts
    (time-ordered table), risks, KNOWN / UNKNOWN / POSSIBLE digest (ESTIMATE labels visible), track record
    (rolling scorecard line), then **Best bets** last. Write `HHMMZ.meta.json` next to it: `session`,
    `generated`, `window` (`session.startUtc` / `session.endUtc` from step 1), `bias {direction, probability,
-   summary}`, `symbols` (the `metaSymbols` rows from step 1, plus `bias` per symbol), and `bets`.
+   summary}`, `symbols` (the `metaSymbols` rows from step 1, plus `bias` per symbol), `bets`, and `macro`: the
+   snapshot of the drivers at report time (`measuredAt`, `nq`, `es`, `tnx`, `fvx`, `tyx`, `dxy`, `eurusd`, `usdjpy`,
+   `gbpusd`, `cl`, `bz`; null for a stale or missing quote) so the next report can state what changed; `drivers`:
+   **the report's view of each driver for the window**, `[{ "driver": "nasdaq" | "yields" | "dollar" | "oil",
+   "expect": "up" | "down" | "flat", "weight": 0..1, "note": "..." }]` (weight = how much the call leans on it; one
+   entry per driver of step 3); and `betas`: the BTC beta assumed for each non-BTC symbol, `{ "ETH": 1.4 }`. The
+   scorer later compares all three with what happened (skill `speculation-score`), so write the values the call is
+   really based on, not rounded guesses. The checker refuses an invalid `drivers` entry and keeps `macro` and `betas`.
 9. **Validate:** `node src/speculation/check.ts <meta.json>`. It re-measures last price, spread and ATR on Kraken
    Futures and validates the bets against those (a level from a stale or wrong price is dropped and flagged in the
    note), records the bias for scoring, enforces the bias, applies the session's limits,

@@ -35,6 +35,7 @@ import { BotStore, expandHome } from "../bot/bot-store.ts";
 import { resolveConfig, statusText } from "../bot/cli.ts";
 import { dayStartMs } from "../bot/limits.ts";
 import { buildReport, renderReport } from "../bot/report.ts";
+import { driverStats } from "../speculation/drivers.ts";
 import { biasStats, edgeLine, readLog, readReports, scoreDir, scoreOptionsFromEnv, summarize } from "../speculation/score.ts";
 import { report as pnlReport, syncFills } from "../trading/futures-pnl.ts";
 import { TradeStore } from "../trading/trade-store.ts";
@@ -675,7 +676,7 @@ function registerKrakenFutures(server: McpServer, client: KrakenFuturesClient, t
 // --- Speculation mode ---
 
 // The measured KNOWN layer of a speculation report in one call (see src/speculation/context.ts).
-function registerSpeculation(server: McpServer, futures: KrakenFuturesClient, cz: CoinalyzeClient | undefined, trades: TradeStore) {
+function registerSpeculation(server: McpServer, futures: KrakenFuturesClient, cz: CoinalyzeClient | undefined, trades: TradeStore, yahooClient: YahooClient | undefined) {
   server.registerTool(
     "speculation_score",
     {
@@ -684,7 +685,10 @@ function registerSpeculation(server: McpServer, futures: KrakenFuturesClient, cz
         "Futures fills into the local store (the same sync as kraken_futures_fills; needs the read-only keys, without " +
         "them only hypothetical outcomes are scored), fetches futures 1m candles for every unresolved bet and finished " +
         "report window, matches fills to bets, and writes bets-log.json, reports-log.json, <day>/_day.md and " +
-        "_scorecard.md. Returns the edge line (take-profit rate vs stated P vs chance), bias statistics and what changed.",
+        "_scorecard.md. It also scores the macro drivers of each finished report (Nasdaq, US 10y yield, dollar index, " +
+        "oil from Yahoo 15m bars): did they do what the report expected, how often did they move the risk-way with " +
+        "BTC, and how much of BTC's session move each accounts for (one-factor beta and R²). Returns the edge line " +
+        "(take-profit rate vs stated P vs chance), bias statistics, macro-driver statistics and what changed.",
       inputSchema: {
         day: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe("UTC day for the _day.md note, default today"),
       },
@@ -696,7 +700,7 @@ function registerSpeculation(server: McpServer, futures: KrakenFuturesClient, cz
         const nowSec = Math.floor(Date.now() / 1000);
         const { input, warnings } = await gatherInput(
           await readLog(dir), nowSec,
-          { candles: futures, ...(futures.hasCredentials ? { fills: { source: futures, store: trades } } : {}) },
+          { candles: futures, ...(yahooClient ? { drivers: yahooClient } : {}), ...(futures.hasCredentials ? { fills: { source: futures, store: trades } } : {}) },
           await readReports(dir),
         );
         const run = await scoreDir(dir, input, args.day, scoreOptionsFromEnv());
@@ -705,8 +709,10 @@ function registerSpeculation(server: McpServer, futures: KrakenFuturesClient, cz
           edge: edgeLine(all),
           stats: all,
           bias: biasStats(await readReports(dir)),
+          macroDrivers: driverStats(await readReports(dir)),
           changed: {
             betsResolved: run.resolved, betsMatchedToYourFills: run.matched, reportsBiasScored: run.reportsScored ?? [],
+            reportsDriversScored: run.driversScored ?? [],
             fillsFromNoReport: run.unmatchedFills.length, ambiguous: run.ambiguous,
           },
           warnings,
@@ -919,7 +925,7 @@ function buildServer(): McpServer {
   if (yahoo) registerYahoo(server, yahoo);
   if (kraken) registerKraken(server, kraken);
   if (krakenFutures) registerKrakenFuturesMarket(server, krakenFutures);
-  if (krakenFutures) registerSpeculation(server, krakenFutures, coinalyze, tradeStore);
+  if (krakenFutures) registerSpeculation(server, krakenFutures, coinalyze, tradeStore, yahoo);
   if (krakenFutures?.hasCredentials) registerKrakenFutures(server, krakenFutures, tradeStore);
   if (x) registerX(server, x);
   registerBrain(server);

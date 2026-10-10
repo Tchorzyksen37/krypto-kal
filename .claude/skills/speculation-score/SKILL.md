@@ -48,5 +48,15 @@ all data comes from the Kraken Futures API through the MCP tools.
    baseline `1 / (1 + R:R)`, and the Brier skill against chance (above 0 = the stated probabilities beat chance).
    Then the bias table (right vs chance, Brier), calibration (stated vs chance vs reached), per session / symbol
    / side / vs bias, never-touched rate, taken vs skipped.
-3. **Reply** with: the edge line as written, the bias hit rate with N, mean net R with its interval, the one
-   pattern that stands out (or "nothing significant yet"), and any fills that matched no bet.
+3. **Macro drivers.** The scorer also scores the drivers of each finished report (Nasdaq NQ=F, the US 10y yield,
+   the dollar index, WTI; Yahoo 15m bars) and writes the "Macro drivers", "Altcoin beta to BTC" and "Last sessions"
+   tables into `_scorecard.md` (tool output: `macroDrivers`). Read them and state, with N: how often each driver
+   moved the risk-way with BTC, which driver accounts for how much of BTC's session move (beta and R², univariate
+   and overlapping, shown only from 8 sessions), whether the headline call that agreed with Nasdaq did better than
+   the one that disagreed, whether the reports' own view of the drivers (`drivers` in the meta) was right, and how
+   the realized altcoin betas compare with the betas the reports assumed. For the latest sessions name the driver
+   with the largest implied contribution and say if BTC moved without any driver (crypto-specific). Under 30
+   sessions these are descriptions, not conclusions; say so, and never tune the `speculate` skill from them.
+4. **Reply** with: the edge line as written, the bias hit rate with N, mean net R with its interval, the macro-driver
+   finding (which driver mattered most, N), the one pattern that stands out (or "nothing significant yet"), and any
+   fills that matched no bet.
