@@ -42,6 +42,12 @@ export interface ReportMeta {
   window: [string, string]; // ISO start, end of the 60-minute window
   symbols: MetaSymbol[];
   bets: BetInput[];
+  // Macro drivers at report time (Nasdaq, yields, dollar, oil); the next report states what changed. Not validated.
+  macro?: Record<string, number | string | null>;
+  // The report's view of each driver for the window (what it expects and how much the call leans on it) and the
+  // beta of each non-BTC symbol to BTC it assumed. The scorer compares both with what happened.
+  drivers?: DriverView[];
+  betas?: Record<string, number>;
   // Written back by the checker:
   validated?: Bet[];
   dropped?: DroppedBet[];
@@ -156,6 +162,39 @@ export interface BiasOutcome {
   headline?: { symbol: string; direction: Direction; probability?: number; result: MoveResult; correct: boolean };
 }
 
+// ---- macro drivers ----
+
+export type DriverId = "nasdaq" | "yields" | "dollar" | "oil";
+
+// What the report expected of one driver over its window; `weight` (0..1) is how much the call leans on it.
+export interface DriverView {
+  driver: DriverId;
+  expect: MoveResult;
+  weight?: number;
+  note?: string;
+}
+
+// What one driver did over the report's window, set by the scorer.
+export interface DriverMove {
+  driver: DriverId;
+  symbol: string; // Yahoo symbol
+  unit: "pct" | "bp"; // pct = % change, bp = basis points of yield
+  open: number;
+  close: number;
+  move: number; // in `unit`
+  result: MoveResult;
+  expected?: MoveResult;
+  expectedCorrect?: boolean;
+  partial?: boolean; // the bars covered only part of the window (yields trade in Cboe hours only); the move is for that part
+  aligned?: boolean; // moved the way the "risk" sign says it should for the leader's move (nasdaq up = BTC up; the others the opposite)
+}
+
+export interface DriverOutcome {
+  leader?: { symbol: string; movePct: number; result: MoveResult };
+  drivers: DriverMove[];
+  biasVsNasdaq?: "agreed" | "disagreed" | "n/a"; // the headline call against Nasdaq's direction in the window
+}
+
 // One entry per report in reports-log.json, written by the checker, scored by the scorer.
 export interface ReportLogEntry {
   report: string;
@@ -164,5 +203,9 @@ export interface ReportLogEntry {
   generated: string;
   bias: Bias;
   symbols: { symbol: string; futures: string; last: number; atr_1h: number; bias?: Direction }[];
+  macro?: Record<string, number | string | null>; // levels the call was based on (from the meta)
+  drivers?: DriverView[];
+  betas?: Record<string, number>;
   outcome?: BiasOutcome;
+  driverOutcome?: DriverOutcome;
 }

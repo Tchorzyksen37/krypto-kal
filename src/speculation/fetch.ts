@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { syncFills, type FillSource } from "../trading/futures-pnl.ts";
 import type { FuturesCandle } from "../providers/kraken/kraken-futures-client.ts";
 import type { TradeStore } from "../trading/trade-store.ts";
+import { DRIVER_SYMBOLS } from "./drivers.ts";
 import type { ScoreInput } from "./score.ts";
 import type { Candle, Fill, LoggedBet, ReportLogEntry } from "./types.ts";
 
@@ -25,6 +26,31 @@ export interface CandleSource {
 export interface Range {
   from: number; // epoch seconds
   to: number;
+}
+
+// Where the macro drivers' bars come from (YahooClient fits).
+export interface DriverSource {
+  history(p: { symbols: string[]; interval: "15m"; from: number; to: number }): Promise<{ symbol: string; history: { t: number; o: number; h: number; l: number; c: number }[] }[]>;
+}
+
+const DRIVER_PAD = 30 * 60; // bars from 30 minutes before the window start: the scorer wants a bar near the start
+
+// Windows of finished reports that have no driver outcome yet, padded and merged. The bias outcome is set in the same
+// run (after the fetch), so a report counts as soon as its window is over.
+export function driverRanges(reports: ReportLogEntry[], nowSec: number): Range[] {
+  const raw: Range[] = [];
+  for (const r of reports) {
+    const end = Date.parse(r.window[1]) / 1000;
+    if (r.driverOutcome || end > nowSec) continue;
+    raw.push({ from: Math.floor(Date.parse(r.window[0]) / 1000) - DRIVER_PAD, to: Math.min(nowSec, end + DRIVER_PAD) });
+  }
+  const out: Range[] = [];
+  for (const r of raw.sort((a, b) => a.from - b.from)) {
+    const last = out[out.length - 1];
+    if (last && r.from <= last.to) last.to = Math.max(last.to, r.to);
+    else out.push({ ...r });
+  }
+  return out;
 }
 
 const isFinal = (b: LoggedBet) => b.hypothetical !== undefined && b.hypothetical.status !== "open";
@@ -81,6 +107,7 @@ export function fillsFrom(log: LoggedBet[], nowSec: number): number | undefined 
 
 export interface LiveDeps {
   candles: CandleSource;
+  drivers?: DriverSource; // Yahoo; absent: the macro drivers are not scored
   fills?: { source: FillSource; store: TradeStore }; // absent without read-only keys: only hypothetical outcomes
 }
 
@@ -101,6 +128,23 @@ export async function gatherInput(
     candles[symbol] = all;
   }
 
+  let drivers: Record<string, Candle[]> | undefined;
+  const wanted = deps.drivers ? driverRanges(reports, nowSec) : [];
+  if (deps.drivers && wanted.length) {
+    drivers = {};
+    for (const range of wanted) {
+      for (const symbol of DRIVER_SYMBOLS) {
+        try {
+          const [res] = await deps.drivers.history({ symbols: [symbol], interval: "15m", from: range.from, to: range.to });
+          const bars = (res?.history ?? []).map((b) => ({ t: b.t, o: b.o, h: b.h, l: b.l, c: b.c }));
+          drivers[symbol] = [...(drivers[symbol] ?? []), ...bars];
+        } catch (e) {
+          warnings.push(`driver bars for ${symbol} failed: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
+    }
+  }
+
   let fills: Fill[] = [];
   const from = fillsFrom(log, nowSec);
   if (!deps.fills) warnings.push("no read-only Kraken Futures keys: your own trades are not matched, only hypothetical outcomes are scored");
@@ -108,7 +152,8 @@ export async function gatherInput(
     await syncFills(deps.fills.source, deps.fills.store);
     fills = deps.fills.store.fills({ from: from - 60_000 });
   }
-  return { input: { fills, candles, nowSec }, warnings };
+  if (!deps.drivers && driverRanges(reports, nowSec).length) warnings.push("no Yahoo client: the macro drivers (Nasdaq, yields, dollar, oil) are not scored");
+  return { input: { fills, candles, ...(drivers ? { drivers } : {}), nowSec }, warnings };
 }
 
 // Production wiring: the public futures client for candles, the read-only keys and the shared cache DB for fills.
@@ -118,7 +163,8 @@ export async function liveInput(log: LoggedBet[], nowSec: number, env: NodeJS.Pr
   const client = new KrakenFuturesClient({ apiKey: env.KRAKEN_FUTURES_RO_API_KEY ?? "", apiSecret: env.KRAKEN_FUTURES_RO_API_SECRET ?? "" });
   const store = client.hasCredentials ? new TradeStore(env.CACHE_DB_PATH ?? join(homedir(), ".krypto-kal", "cache.db")) : undefined;
   try {
-    return await gatherInput(log, nowSec, { candles: client, ...(store ? { fills: { source: client, store } } : {}) }, reports);
+    const { YahooClient } = await import("../providers/yahoo/yahoo-client.ts");
+    return await gatherInput(log, nowSec, { candles: client, drivers: new YahooClient(), ...(store ? { fills: { source: client, store } } : {}) }, reports);
   } finally {
     store?.close();
   }

@@ -12,7 +12,11 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { renderDrivers, scoreDrivers } from "./drivers.ts";
+import { wilson, type Interval } from "./stats.ts";
 import type { Actual, Bet, BiasOutcome, Candle, ExitReason, Fill, Hypothetical, LoggedBet, MoveResult, ReportLogEntry } from "./types.ts";
+
+export { wilson, type Interval };
 
 const CANDLE_SEC = 60;
 const EPS = 1e-9;
@@ -201,11 +205,6 @@ export function actualOutcome(bet: Bet, m: Match, options: Partial<ScoreOptions>
 
 // ---- statistics ----
 
-export interface Interval {
-  lo: number;
-  hi: number;
-}
-
 export interface Stats {
   bets: number; // bets with a final hypothetical outcome
   touched: number;
@@ -233,16 +232,6 @@ const mean = (xs: number[]) => (xs.length ? round(xs.reduce((s, x) => s + x, 0) 
 // probability reward/(risk+reward), so the take profit comes first with probability risk/(risk+reward) = 1/(1+RR).
 // Time-outs lower both; this is the bar a stated probability has to clear to claim any edge.
 export const chanceOfTp = (b: Bet) => 1 / (1 + Math.abs(b.take_profit - b.entry) / riskOf(b));
-
-// 95% Wilson score interval of a proportion k/n.
-export function wilson(k: number, n: number, z = 1.96): Interval | undefined {
-  if (n === 0) return undefined;
-  const p = k / n;
-  const d = 1 + (z * z) / n;
-  const c = (p + (z * z) / (2 * n)) / d;
-  const h = (z * Math.sqrt((p * (1 - p)) / n + (z * z) / (4 * n * n))) / d;
-  return { lo: round(Math.max(0, c - h)), hi: round(Math.min(1, c + h)) };
-}
 
 // 95% interval of a mean (normal approximation; needs at least 2 values).
 export function meanCI(xs: number[], z = 1.96): Interval | undefined {
@@ -427,6 +416,7 @@ export function renderBias(st: BiasStats): string[] {
 export interface ScoreInput {
   fills: Fill[];
   candles: Record<string, Candle[]>;
+  drivers?: Record<string, Candle[]>; // Yahoo 15m bars of the macro drivers (see drivers.ts), keyed by Yahoo symbol
   nowSec: number;
 }
 
@@ -437,6 +427,7 @@ export interface ScoreRun {
   unmatchedFills: Fill[];
   ambiguous: string[];
   reportsScored?: string[]; // reports whose bias was scored in this run
+  driversScored?: string[]; // reports whose macro drivers were scored in this run
 }
 
 export function scoreLog(logIn: LoggedBet[], input: ScoreInput, options: Partial<ScoreOptions> = {}): ScoreRun {
@@ -527,6 +518,7 @@ export function renderScorecard(log: LoggedBet[], nowSec: number, reports: Repor
     "# Speculation scorecard", "",
     ...statsTable("Last 7 days", summarize(recent)), ...statsTable("All time", summarize(log)),
     ...renderBias(biasStats(reports)),
+    ...renderDrivers(reports),
   ];
 
   lines.push("### Calibration (touched bets)", "", "| Stated P | N | Mean stated | Chance | Take profit reached |", "|---|---|---|---|---|");
@@ -605,12 +597,14 @@ export async function scoreDir(dir: string, input: ScoreInput, day?: string, opt
   const run = scoreLog(log, input, options);
   const reports = scoreReports(await readReports(dir), input.candles, input.nowSec);
   run.reportsScored = reports.scored;
-  if (reports.entries.length) await writeFile(join(dir, "reports-log.json"), `${JSON.stringify(reports.entries, null, 2)}\n`, "utf8");
+  const drivers = input.drivers ? scoreDrivers(reports.entries, input.drivers, input.nowSec) : { entries: reports.entries, scored: [] };
+  run.driversScored = drivers.scored;
+  if (drivers.entries.length) await writeFile(join(dir, "reports-log.json"), `${JSON.stringify(drivers.entries, null, 2)}\n`, "utf8");
   await writeFile(logPath, `${JSON.stringify(run.log, null, 2)}\n`, "utf8");
   const d = day ?? new Date(input.nowSec * 1000).toISOString().slice(0, 10);
   await mkdir(join(dir, d), { recursive: true });
   await writeFile(join(dir, d, "_day.md"), renderDay(run.log, d, run), "utf8");
-  await writeFile(join(dir, "_scorecard.md"), renderScorecard(run.log, input.nowSec, reports.entries), "utf8");
+  await writeFile(join(dir, "_scorecard.md"), renderScorecard(run.log, input.nowSec, drivers.entries), "utf8");
   return run;
 }
 

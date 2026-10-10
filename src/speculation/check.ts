@@ -291,12 +291,18 @@ export function renderVerification(checks: PriceCheck[] | undefined): string[] {
 // ---- bias: every report must say whether it leans long or short ----
 
 const DIRS = ["long", "short", "neutral"];
+const DRIVER_IDS = ["nasdaq", "yields", "dollar", "oil"];
+const MOVES = ["up", "down", "flat"];
 
 export function biasError(meta: ReportMeta): string | undefined {
   const b = meta.bias;
   if (!b || !DIRS.includes(b.direction)) return 'report must state its bias: meta.bias.direction = "long" | "short" | "neutral"';
   if (b.direction !== "neutral" && !(typeof b.probability === "number" && b.probability > 0 && b.probability <= 1)) return "a long/short bias needs a probability in (0, 1]";
   for (const s of meta.symbols) if (s.bias !== undefined && !DIRS.includes(s.bias)) return `invalid bias for ${s.symbol}`;
+  for (const v of meta.drivers ?? []) {
+    if (!DRIVER_IDS.includes(v.driver) || !MOVES.includes(v.expect)) return `invalid driver view: ${JSON.stringify(v)}`;
+    if (v.weight !== undefined && !(typeof v.weight === "number" && v.weight >= 0 && v.weight <= 1)) return `driver weight must be in [0, 1]: ${v.driver}`;
+  }
   return undefined;
 }
 
@@ -385,6 +391,9 @@ export function upsertReportEntry(entries: ReportLogEntry[], meta: ReportMeta, r
     generated: meta.generated,
     bias: meta.bias!,
     symbols: meta.symbols.map((s) => ({ symbol: s.symbol, futures: s.futures, last: s.last, atr_1h: s.atr_1h, ...(s.bias ? { bias: s.bias } : {}) })),
+    ...(meta.macro ? { macro: meta.macro } : {}),
+    ...(meta.drivers ? { drivers: meta.drivers } : {}),
+    ...(meta.betas ? { betas: meta.betas } : {}),
   };
   return [...entries.filter((e) => e.report !== report), entry];
 }
