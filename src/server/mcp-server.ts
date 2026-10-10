@@ -41,6 +41,12 @@ import { report as pnlReport, syncFills } from "../trading/futures-pnl.ts";
 import { TradeStore } from "../trading/trade-store.ts";
 import { createLogger } from "../core/logger.ts";
 import { renderSnapshot, runStats, statsLogPathFromEnv } from "../core/run-stats.ts";
+import { PresentedText, renderSeriesList } from "../present/table.ts";
+import type { SeriesSpec } from "../present/units.ts";
+import {
+  AGGREGATE_LIQUIDATIONS, AGGREGATE_OPEN_INTEREST, COINALYZE_LONG_SHORT, COINALYZE_OHLCV, KRAKEN_FUTURES_CANDLES,
+  coinalyzeFunding, coinalyzeLiquidations, coinalyzeOpenInterest,
+} from "../present/units.ts";
 import { XClient } from "../providers/x/x-client.ts";
 import { accountsOverview, recentRawPosts, syncX, type SyncOptions } from "../brain/x-sync.ts";
 import { YAHOO_INTERVAL_SECONDS, YahooClient, type YahooInterval } from "../providers/yahoo/yahoo-client.ts";
@@ -106,9 +112,10 @@ async function toResult(tool: string, args: unknown, fn: () => Promise<unknown>)
   log.debug("tool call", { tool, args });
   try {
     const data = await runStats.inTool(tool, fn);
-    const text = JSON.stringify(data);
+    // A presented result is already the text the model should read; everything else is JSON.
+    const text = data instanceof PresentedText ? data.text : JSON.stringify(data);
     const ms = Date.now() - started;
-    runStats.recordTool({ tool, ok: true, ms, text, data, args });
+    runStats.recordTool({ tool, ok: true, ms, text, data: data instanceof PresentedText ? undefined : data, points: data instanceof PresentedText ? data.points : undefined, args });
     log.info("tool ok", { tool, ms, chars: text.length });
     return { content: [{ type: "text", text }] };
   } catch (e) {
@@ -198,7 +205,20 @@ const czSymbols = z
       "Find them with coinalyze_future_markets. Each symbol uses 1 of 40 API calls/min.",
   );
 
+// Output format of the history tools (docs/llm-data-layer.md): raw JSON as before, or a header with provenance
+// (window, open bar, units, gaps, summary) plus a CSV table, one row per bar.
+const presentParams = {
+  format: z
+    .enum(["raw", "table"])
+    .default("raw")
+    .describe('"raw": JSON points as returned by the provider. "table": header (window, open bar, units, gaps, summary) + CSV, one row per bar, rounded per field, ISO UTC times'),
+  max_rows: z
+    .number().int().min(10).max(5000).optional()
+    .describe('Only with format "table": row budget; the newest 48 bars stay native, older ones are resampled to a coarser interval'),
+};
+
 const czHistoryParams = {
+  ...presentParams,
   symbols: czSymbols,
   interval: z.enum(czIntervals),
   limit: z
@@ -243,6 +263,18 @@ function sumByTime<P extends { t: number }, K extends keyof P & string>(
     points: [...byT.entries()].sort(([a], [b]) => a - b).map(([t, acc]) => ({ t, ...acc })),
   };
 }
+
+// format "table": the series as header + CSV (src/present/); "raw": the provider's points as before.
+function present<P extends { t: number }>(
+  tool: string, args: { format: "raw" | "table"; max_rows?: number | undefined }, spec: SeriesSpec<P>,
+  series: { symbol: string; history: P[] }[], intervalSec: number,
+): PresentedText {
+  return renderSeriesList(spec, series, {
+    tool, intervalSec, asOfSec: Math.floor(Date.now() / 1000), ...(args.max_rows ? { maxRows: args.max_rows } : {}),
+  });
+}
+
+const aggregateLabel = (symbols: string[]) => `sum of ${symbols.length} (${symbols.join(", ")})`;
 
 function registerCoinalyze(server: McpServer, client: CoinalyzeClient) {
   server.registerTool(
@@ -315,7 +347,13 @@ function registerCoinalyze(server: McpServer, client: CoinalyzeClient) {
         const data = await client.openInterestHistory({
           symbols, ...range(r), convertToUsd: aggregate || convert_to_usd,
         });
-        return aggregate ? sumByTime(data, ["c"]) : data;
+        const step = INTERVAL_SECONDS[r.interval];
+        if (aggregate) {
+          const sum = sumByTime(data, ["c"]);
+          if (r.format === "raw") return sum;
+          return present("coinalyze_open_interest_history", r, AGGREGATE_OPEN_INTEREST, [{ symbol: aggregateLabel(sum.symbols), history: sum.points as { t: number; c: number; n: number }[] }], step);
+        }
+        return r.format === "raw" ? data : present("coinalyze_open_interest_history", r, coinalyzeOpenInterest(convert_to_usd), data, step);
       }),
   );
 
@@ -328,11 +366,12 @@ function registerCoinalyze(server: McpServer, client: CoinalyzeClient) {
       inputSchema: { ...czHistoryParams, predicted: z.boolean().default(false) },
     },
     (args) =>
-      toResult("coinalyze_funding_rate_history", args, () => {
+      toResult("coinalyze_funding_rate_history", args, async () => {
         const { symbols, predicted, ...r } = args;
-        return predicted
+        const data = await (predicted
           ? client.predictedFundingRateHistory({ symbols, ...range(r) })
-          : client.fundingRateHistory({ symbols, ...range(r) });
+          : client.fundingRateHistory({ symbols, ...range(r) }));
+        return r.format === "raw" ? data : present("coinalyze_funding_rate_history", r, coinalyzeFunding(predicted), data, INTERVAL_SECONDS[r.interval]);
       }),
   );
 
@@ -354,7 +393,13 @@ function registerCoinalyze(server: McpServer, client: CoinalyzeClient) {
         const data = await client.liquidationHistory({
           symbols, ...range(r), convertToUsd: aggregate || convert_to_usd,
         });
-        return aggregate ? sumByTime(data, ["l", "s"]) : data;
+        const step = INTERVAL_SECONDS[r.interval];
+        if (aggregate) {
+          const sum = sumByTime(data, ["l", "s"]);
+          if (r.format === "raw") return sum;
+          return present("coinalyze_liquidation_history", r, AGGREGATE_LIQUIDATIONS, [{ symbol: aggregateLabel(sum.symbols), history: sum.points as { t: number; l: number; s: number; n: number }[] }], step);
+        }
+        return r.format === "raw" ? data : present("coinalyze_liquidation_history", r, coinalyzeLiquidations(convert_to_usd), data, step);
       }),
   );
 
@@ -365,9 +410,10 @@ function registerCoinalyze(server: McpServer, client: CoinalyzeClient) {
       inputSchema: czHistoryParams,
     },
     (args) =>
-      toResult("coinalyze_long_short_ratio_history", args, () => {
+      toResult("coinalyze_long_short_ratio_history", args, async () => {
         const { symbols, ...r } = args;
-        return client.longShortRatioHistory({ symbols, ...range(r) });
+        const data = await client.longShortRatioHistory({ symbols, ...range(r) });
+        return r.format === "raw" ? data : present("coinalyze_long_short_ratio_history", r, COINALYZE_LONG_SHORT, data, INTERVAL_SECONDS[r.interval]);
       }),
   );
 
@@ -379,9 +425,10 @@ function registerCoinalyze(server: McpServer, client: CoinalyzeClient) {
       inputSchema: czHistoryParams,
     },
     (args) =>
-      toResult("coinalyze_ohlcv_history", args, () => {
+      toResult("coinalyze_ohlcv_history", args, async () => {
         const { symbols, ...r } = args;
-        return client.ohlcvHistory({ symbols, ...range(r) });
+        const data = await client.ohlcvHistory({ symbols, ...range(r) });
+        return r.format === "raw" ? data : present("coinalyze_ohlcv_history", r, COINALYZE_OHLCV, data, INTERVAL_SECONDS[r.interval]);
       }),
   );
 
@@ -612,6 +659,7 @@ function registerKrakenFuturesMarket(server: McpServer, client: KrakenFuturesCli
         from: z.string().datetime({ offset: true }).optional().describe("Start, ISO 8601. Default: `limit` candles before `to`"),
         to: z.string().datetime({ offset: true }).optional().describe("End, ISO 8601. Default: now"),
         limit: z.number().int().min(1).max(2000).default(200),
+        ...presentParams,
       },
     },
     (args) =>
@@ -620,7 +668,10 @@ function registerKrakenFuturesMarket(server: McpServer, client: KrakenFuturesCli
         const from = args.from ? Math.floor(Date.parse(args.from) / 1000) : to - args.limit * FUTURES_RESOLUTION_SECONDS[args.resolution];
         const res = await client.candles(args.symbol, args.resolution, { from, to });
         const candles = args.from ? res.candles.slice(0, args.limit) : res.candles.slice(-args.limit);
-        return { symbol: args.symbol, resolution: args.resolution, candles, more: res.moreCandles || res.candles.length > candles.length };
+        const more = res.moreCandles || res.candles.length > candles.length;
+        if (args.format === "raw") return { symbol: args.symbol, resolution: args.resolution, candles, more };
+        const table = present("kraken_futures_candles", args, KRAKEN_FUTURES_CANDLES, [{ symbol: args.symbol, history: candles }], FUTURES_RESOLUTION_SECONDS[args.resolution]);
+        return more ? new PresentedText(`${table.text}\nmore candles exist outside this page: pass from/to for the rest`, table.points) : table;
       }),
   );
 }

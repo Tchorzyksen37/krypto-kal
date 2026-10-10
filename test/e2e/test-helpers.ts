@@ -108,6 +108,27 @@ export async function call(ctx: McpContext, name: string, args: Record<string, u
   return JSON.parse(text);
 }
 
+// Calls a tool that answers with plain text (format "table") and returns the text.
+export async function callText(ctx: McpContext, name: string, args: Record<string, unknown> = {}): Promise<string> {
+  const res = await ctx.client.callTool({ name, arguments: args });
+  const text = (res.content as { type: string; text: string }[])[0]?.text ?? "";
+  assert.notEqual(res.isError, true, `Tool ${name} returned an error: ${text}`);
+  return text;
+}
+
+// Asserts a format "table" answer: the header lines, then a CSV header starting with "time," and `rows` data rows
+// (at least one when `rows` is not given).
+export function assertTable(text: string, columns: string[], rows?: number) {
+  const lines = text.split("\n");
+  assert.match(lines[1] ?? "", /^as of \d{4}-\d\d-\d\dT\d\d:\d\dZ; /, text.slice(0, 300));
+  const header = lines.find((l) => l.startsWith("time,"));
+  assert.ok(header, `No CSV header: ${text.slice(0, 300)}`);
+  for (const c of columns) assert.ok(header.split(",").includes(c), `Column ${c} missing in ${header}`);
+  const data = lines.filter((l) => /^\d{4}-\d\d-\d\dT\d\d:\d\dZ,/.test(l));
+  if (rows === undefined) assert.ok(data.length > 0, text.slice(0, 500));
+  else assert.equal(data.length, rows, text.slice(0, 500));
+}
+
 const isNumeric = (v: unknown) =>
   (typeof v === "number" || typeof v === "string") && v !== "" && Number.isFinite(Number(v));
 

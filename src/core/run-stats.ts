@@ -132,11 +132,12 @@ export class RunStats {
   }
 
   // Measures one tool call around the text that goes to the model.
-  recordTool(e: { tool: string; ok: boolean; ms: number; text: string; data?: unknown; args?: unknown; error?: string }): ToolEvent {
+  recordTool(e: { tool: string; ok: boolean; ms: number; text: string; data?: unknown; points?: number | undefined; args?: unknown; error?: string }): ToolEvent {
     const event: ToolEvent = {
       type: "tool", at: new Date(this.now()).toISOString(), tool: e.tool, ok: e.ok, ms: Math.round(e.ms),
       chars: e.text.length, estTokens: Math.round(e.text.length / CHARS_PER_TOKEN),
-      points: e.data === undefined ? 0 : countPoints(e.data), args: truncate(safeJson(e.args ?? {}), MAX_ARGS_CHARS),
+      points: e.points ?? (e.data === undefined ? 0 : countPoints(e.data)), // presented text says how many it holds
+      args: truncate(safeJson(e.args ?? {}), MAX_ARGS_CHARS),
       ...(e.error ? { error: truncate(e.error, MAX_ARGS_CHARS) } : {}),
     };
     this.apply(event);

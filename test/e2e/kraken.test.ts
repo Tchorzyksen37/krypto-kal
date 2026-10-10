@@ -4,7 +4,7 @@
 
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
-import { assertPoints, call, serverTests, useMcpServer } from "./test-helpers.ts";
+import { assertPoints, assertTable, call, callText, serverTests, useMcpServer } from "./test-helpers.ts";
 
 const TOOLS = ["kraken_ticker", "kraken_ohlc", "kraken_order_book", "kraken_system_status"];
 const HAS_KEYS = Boolean(process.env.KRAKEN_API_KEY && process.env.KRAKEN_API_SECRET);
@@ -49,6 +49,12 @@ describe("Kraken", { skip: process.env.KRAKEN_ENABLED === "false" && "KRAKEN_ENA
       const data = (await call(ctx, "kraken_futures_candles", { symbol: "PF_XBTUSD", resolution: "1m", limit: 5 })) as { candles: unknown[] };
       assert.equal(data.candles.length, 5);
       assertPoints(data.candles, ["o", "h", "l", "c", "v"], "t");
+    });
+
+    test("kraken_futures_candles as a table: header with provenance, one CSV row per candle", async () => {
+      const text = await callText(ctx, "kraken_futures_candles", { symbol: "PF_XBTUSD", resolution: "1m", limit: 5, format: "table" });
+      assert.match(text, /^kraken_futures_candles PF_XBTUSD 1m \(Kraken Futures trade-price candles\): 5 bars, /);
+      assertTable(text, ["open", "high", "low", "close", "volume"], 5);
     });
 
     test("kraken_futures_candles reads an explicit past range", async () => {

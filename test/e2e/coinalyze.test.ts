@@ -5,7 +5,7 @@
 
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
-import { assertPoints, call, serverTests, useMcpServer } from "./test-helpers.ts";
+import { assertPoints, assertTable, call, callText, serverTests, useMcpServer } from "./test-helpers.ts";
 
 // History tools and the fields of their `history` points.
 const HISTORY_TOOLS: Record<string, string[]> = {
@@ -64,6 +64,11 @@ describe("Coinalyze", { skip: !process.env.COINALYZE_API_KEY && "COINALYZE_API_K
         assertPoints(data[0]!.history, fields, "t");
       });
     }
+
+    test("coinalyze_ohlcv_history as a table", async () => {
+      const text = await callText(ctx, "coinalyze_ohlcv_history", { symbols: symbols.slice(0, 1), interval: "4hour", limit: 3, format: "table" });
+      assertTable(text, ["open", "close", "volume", "taker_buy_share"]);
+    });
 
     test("coinalyze_open_interest_history (aggregate)", async () => {
       const data = (await call(ctx, "coinalyze_open_interest_history", {

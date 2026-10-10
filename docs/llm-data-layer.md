@@ -1,6 +1,7 @@
 # LLM data layer: deterministic presentation between the cache and tool output
 
-Status: **design proposal**, not implemented. It is the "future plan" in `CLAUDE.md` ("keep raw points in the cache and
+Status: **phase 1 implemented** (2026-10-10): `src/present/` and `format: "table"` on the Coinalyze history tools and
+`kraken_futures_candles` (default still `raw`). Phases 2 and 3 are proposals. It is the "future plan" in `CLAUDE.md` ("keep raw points in the cache and
 put processing in a separate layer between the cache and tool output"), worked out. Storage is described in
 [database-design.md](database-design.md).
 
@@ -183,7 +184,15 @@ Nothing is dropped silently, and `format: "table"` with a larger `max_rows` or `
 
 ## 6. Phases
 
-1. `src/present/` with `round`, `units`, `table`, `stats`, `resample` and golden tests; `format` on the Coinalyze and
-   Kraken Futures history tools (default `raw`).
+1. **Done.** `src/present/` with `round`, `units`, `table`, `stats`, `resample` and golden / property tests
+   (`present.test.ts`); `format: "raw" | "table"` and an optional `max_rows` on the five Coinalyze history tools (also
+   with `aggregate`) and `kraken_futures_candles`; default `raw`, byte-identical to before. Deviations from the design
+   above:
+   - the row budget (3.5) came forward into phase 1 as the optional `max_rows` of `table`; the native part is the
+     newest 48 rows but at most half the budget, and the last resampled bucket can be partial (its `bars` shows it);
+   - `digest` and the facts lines are phase 2; `table` carries a computed `summary:` line instead (first -> last,
+     change, low / high with times; totals and the largest bar for liquidations);
+   - funding is labelled, not normalised to 8h: Coinalyze does not say each exchange's funding interval;
+   - the open bar is the one whose interval has not ended at `asOf`; "cached through" is not shown yet.
 2. `market_view` with facts and the row budget; point `crypto-market-sentiment` and `position-review` at it.
 3. Switch history tools to `table` by default; the same envelope for Yahoo, fills / PnL, quotes and `x_recent`.

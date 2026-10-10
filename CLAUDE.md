@@ -14,6 +14,7 @@ src/
   server/       MCP server entry point and background collector
   core/         shared infrastructure: HTTP pipeline, logger, SQLite history cache
   providers/    one folder per data source: coinalyze, coinglass, yahoo, kraken (spot + futures), x
+  present/      deterministic text the model reads: tables with units, gaps and a summary
   brain/        the second brain (vault file access) and the X-to-brain sync
   analytics/    pure models on top of market data
   trading/      Kraken Futures risk check, PnL statistics and the fill store
@@ -33,6 +34,7 @@ docs/           architecture notes, guides, plans
 | core | [history-store.ts](src/core/history-store.ts) | SQLite (`node:sqlite`) store of series points plus coverage ranges. |
 | core | [series-cache.ts](src/core/series-cache.ts) | Provider-independent read-through history cache on top of `HistoryStore`. |
 | core | [run-stats.ts](src/core/run-stats.ts) | Statistics collected while the server runs: per tool call duration, errors, size of the result the model reads (chars, ~tokens) and series points; per history request points from the SQLite cache vs the API. In memory for the MCP tool `server_stats`, and one JSON line per event in `STATS_LOG_PATH`; `node src/core/run-stats.ts [file] [--since ISO]` summarises a log. |
+| present | [src/present/](src/present/) | Deterministic presentation of series for the model (docs/llm-data-layer.md): `round.ts` (one rounding rule per field class, no exponents), `units.ts` (columns, units and resampling rule per series kind), `table.ts` (header with window, as-of, open bar, units, gaps and a summary line, then CSV), `resample.ts` (epoch-aligned buckets, row budget), `stats.ts` (change, extremes, percentile, z-score, σ, ATR, swings, taker flow, quadrant, spikes). Pure functions; `asOf` is passed in. Behind `format: "table"`. |
 | providers | [coinalyze-client.ts](src/providers/coinalyze/coinalyze-client.ts) | Free Coinalyze API (`https://api.coinalyze.net/v1`; OpenAPI spec at `/v1/doc/api-spec.json`). Needs `COINALYZE_API_KEY`. |
 | providers | [coinglass-client.ts](src/providers/coinglass/coinglass-client.ts) | Coinglass Open API v4. The account's plan has no API access ("Upgrade plan"); its key is commented out in `.env`. |
 | providers | [yahoo-client.ts](src/providers/yahoo/yahoo-client.ts) | Unofficial Yahoo Finance API, no key. Uses `/v8/finance/chart` for both history and quotes, because `/v7/finance/quote` needs a cookie crumb (401). |
@@ -118,7 +120,8 @@ rules live in one place and the others link to them: the macro calendar in
 ## MCP server
 
 - **Stateless:** each HTTP request gets a new `McpServer` and transport. There is one client per provider and one `HistoryStore` for the whole process, so caches and throttles are shared.
-- **`toResult(tool, args, fn)`:** wraps every tool. It logs the outcome with its duration and turns errors into `isError: true` results.
+- **`toResult(tool, args, fn)`:** wraps every tool. It logs the outcome with its duration and turns errors into `isError: true` results. A `PresentedText` result goes to the model as it is; anything else is JSON.
+- **`format`:** the Coinalyze history tools and `kraken_futures_candles` take `format: "raw"` (default, the provider's JSON points) or `"table"` (`src/present/`: header with window, as-of time, open bar, units, gaps and a summary, then CSV with ISO UTC times and per-field rounding), plus an optional `max_rows` budget that resamples older bars.
 - **`timeRange(intervalSeconds, {limit, from, to}, gapFactor)`:** converts `limit` into `from`/`to`.
   - Coinalyze: `limit` = number of intervals back.
   - Yahoo: `limit` = number of most recent **bars**. Markets pause overnight and on weekends, so it fetches `limit × interval × YAHOO_GAP_FACTOR` of calendar time and keeps the last `limit` bars.
@@ -134,7 +137,7 @@ rules live in one place and the others link to them: the macro calendar in
   - `server_stats`: run statistics of this server process (see `run-stats.ts`); `reset: true` starts counting again.
   - `bot_status`: read-only view of the bot's SQLite file (state, halt, simulated position and account, incidents, decisions, report). Always registered; says so when the bot has not run.
   - `brain_*`: `list`, `read`, `search`, `write`, plus `triage` (what to ingest next, by impact) and `ingest_mark` (record ingested/skipped posts). Always registered, so Claude Desktop can run the brain workflow. `raw/` is never writable through MCP.
-- **Future plan** (not started): server-side processing of data before tools return it. Keep raw points in the cache and put processing in a separate layer between the cache and tool output.
+- **LLM data layer** ([docs/llm-data-layer.md](docs/llm-data-layer.md)): phase 1 done (`src/present/`, `format: "table"`). Next: `market_view` (one joined table per asset with computed facts), then `table` as the default and the same envelope for Yahoo, fills / PnL, quotes and `x_recent`. Raw points stay in the cache; processing lives only between the cache and the tool output.
 
 ## History cache (the key design)
 
