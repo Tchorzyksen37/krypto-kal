@@ -44,6 +44,8 @@ import { createLogger } from "../core/logger.ts";
 import { renderSnapshot, runStats, statsLogPathFromEnv } from "../core/run-stats.ts";
 import { PresentedText, renderSeriesList } from "../present/table.ts";
 import type { SeriesSpec } from "../present/units.ts";
+import { renderMarketView } from "../present/market-view.ts";
+import { fundingPct8h, futuresOf } from "../speculation/market.ts";
 import {
   AGGREGATE_LIQUIDATIONS, AGGREGATE_OPEN_INTEREST, COINALYZE_LONG_SHORT, COINALYZE_OHLCV, KRAKEN_FUTURES_CANDLES,
   coinalyzeFunding, coinalyzeLiquidations, coinalyzeOpenInterest,
@@ -1033,10 +1035,78 @@ function registerBrain(server: McpServer) {
   );
 }
 
+// Coinalyze interval -> Kraken Futures candle resolution (2hour and 6hour have none).
+const KRAKEN_RESOLUTION: Partial<Record<CoinalyzeInterval, (typeof KRAKEN_FUTURES_RESOLUTIONS)[number]>> = {
+  "1min": "1m", "5min": "5m", "15min": "15m", "30min": "30m", "1hour": "1h", "4hour": "4h", "12hour": "12h", daily: "1d",
+};
+
+function registerMarketView(server: McpServer, cz: CoinalyzeClient, futures: KrakenFuturesClient | undefined) {
+  server.registerTool(
+    "market_view",
+    {
+      description:
+        "[Market] One asset in one call: Coinalyze OHLCV, open interest (USD), funding, long/short ratio and " +
+        "liquidations (USD) of its perpetual joined into one table by bar, plus the Kraken Futures close of the same " +
+        "bar and its current funding. The header carries computed facts from the closed bars: price change, range, " +
+        "ATR, σ, nearest swing levels, OI change and price/OI quadrant, funding percentile, long/short vs its median, " +
+        "taker flow and CVD divergence, liquidation spikes, and which measurable squeeze conditions are met (with the " +
+        "thresholds used). The newest bars stay at the native interval, older ones are resampled to fit `max_rows`. " +
+        "Use it instead of calling the five Coinalyze history tools one by one. 5 Coinalyze calls; cached history.",
+      inputSchema: {
+        asset: z.string().min(1).describe('Base asset, e.g. "BTC", "ETH", "XRP"'),
+        interval: z.enum(czIntervals).default("1hour"),
+        bars: z.number().int().min(20).max(2000).default(168).describe("Window length in bars (168 x 1hour = 7 days)"),
+        exchange: z.string().default("A").describe('Coinalyze exchange code of the perpetual (A = Binance); see coinalyze_exchanges'),
+        symbol: z.string().optional().describe('Coinalyze symbol to use instead of <ASSET>USDT_PERP.<exchange>, e.g. "BTCUSD_PERP.0"'),
+        max_rows: z.number().int().min(20).max(5000).default(200).describe("Row budget of the table; the newest 48 bars stay native"),
+      },
+    },
+    (args) =>
+      toResult("market_view", args, async () => {
+        const asset = args.asset.toUpperCase();
+        const symbol = args.symbol ?? `${asset}USDT_PERP.${args.exchange}`;
+        const r = range({ interval: args.interval, limit: args.bars });
+        const failed: string[] = [];
+        const get = async <T>(label: string, fn: () => Promise<{ history: T[] }[]>): Promise<T[]> => {
+          try {
+            return (await fn())[0]?.history ?? [];
+          } catch (e) {
+            failed.push(`${label} (${e instanceof Error ? e.message : String(e)})`);
+            return [];
+          }
+        };
+        const symbols = [symbol];
+        const ohlcv = await get("OHLCV", () => cz.ohlcvHistory({ symbols, ...r }));
+        const openInterest = await get("open interest", () => cz.openInterestHistory({ symbols, ...r, convertToUsd: true }));
+        const funding = await get("funding", () => cz.fundingRateHistory({ symbols, ...r }));
+        const longShort = await get("long/short", () => cz.longShortRatioHistory({ symbols, ...r }));
+        const liquidations = await get("liquidations", () => cz.liquidationHistory({ symbols, ...r, convertToUsd: true }));
+
+        let kraken: Parameters<typeof renderMarketView>[0]["kraken"];
+        const resolution = KRAKEN_RESOLUTION[args.interval];
+        if (futures && resolution) {
+          const pf = futuresOf(asset);
+          try {
+            const [{ candles }, tickers] = await Promise.all([futures.candles(pf, resolution, { from: r.from, to: r.to }), futures.tickers([pf])]);
+            const ticker = tickers[0];
+            kraken = { symbol: pf, candles, ...(ticker?.fundingRate !== undefined && ticker.markPrice > 0 ? { fundingPct8h: fundingPct8h(ticker as typeof ticker & { fundingRate: number }) } : {}) };
+          } catch (e) {
+            failed.push(`Kraken Futures ${pf} (${e instanceof Error ? e.message : String(e)})`);
+          }
+        }
+        return renderMarketView({
+          asset, symbol, intervalSec: INTERVAL_SECONDS[args.interval], asOfSec: Math.floor(Date.now() / 1000),
+          ohlcv, openInterest, funding, longShort, liquidations, ...(kraken ? { kraken } : {}), maxRows: args.max_rows, failed,
+        });
+      }),
+  );
+}
+
 function buildServer(): McpServer {
   const server = new McpServer({ name: "krypto-kal", version: "1.0.0" });
   if (coinglass) registerCoinglass(server, coinglass);
   if (coinalyze) registerCoinalyze(server, coinalyze);
+  if (coinalyze) registerMarketView(server, coinalyze, krakenFutures);
   if (yahoo) registerYahoo(server, yahoo);
   if (kraken) registerKraken(server, kraken);
   if (krakenFutures) registerKrakenFuturesMarket(server, krakenFutures);

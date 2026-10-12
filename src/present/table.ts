@@ -25,6 +25,8 @@ export interface SeriesMeta {
   asOfSec: number; // "now" of the request, passed in (never read from the clock here)
   maxRows?: number; // row budget; absent: every bar
   recentRows?: number; // native rows kept under a budget (default 48, at most half of it)
+  notes?: string[]; // extra header lines after the units (e.g. which bars the facts use)
+  facts?: string[]; // computed fact lines (present/facts.ts), printed after the summary
 }
 
 const MAX_GAP_SPANS = 5;
@@ -95,10 +97,10 @@ export function renderSeries<P extends { t: number }>(spec: SeriesSpec<P>, point
     const vals = spec.base.filter((o) => (o.usdGroup ?? o.name) === group).flatMap((o) => named.map((r) => r[o.name]).filter((v): v is number => v !== undefined));
     scales.set(group, usdScale(vals));
   }
-  const columns: Column[] = [
+  const columns: (Column & { hidden?: boolean })[] = [
     ...spec.base.map((c) => {
       const scale = c.rule === "usd" ? scales.get(c.usdGroup ?? c.name)! : undefined;
-      return { name: scale ? `${c.name}_${scale.suffix}` : c.name, rule: scale ? scale.rule : (c.rule as RoundRule), values: named.map((r) => r[c.name]) };
+      return { name: scale ? `${c.name}_${scale.suffix}` : c.name, rule: scale ? scale.rule : (c.rule as RoundRule), values: named.map((r) => r[c.name]), ...(c.hidden ? { hidden: true } : {}) };
     }),
     ...spec.derived.map((d) => ({ name: d.name, rule: d.rule, values: named.map((r) => finite(d.derive(r))) })),
   ];
@@ -110,17 +112,20 @@ export function renderSeries<P extends { t: number }>(spec: SeriesSpec<P>, point
   const open = last + step > meta.asOfSec;
   lines.push(`as of ${isoMinute(meta.asOfSec)}; ${open ? `last bar ${isoMinute(last)} is still open (its values will change)` : "all bars closed"}`);
   lines.push(`units: ${spec.units.join("; ")}`);
+  if (meta.notes) lines.push(...meta.notes);
   lines.push(gapLine(gaps));
   const summary = summaryLine(spec, sorted, byName, columns);
   if (summary) lines.push(summary);
+  if (meta.facts?.length) lines.push("facts:", ...meta.facts.map((f) => `- ${f}`));
   if (plan) {
     lines.push(`rows: ${rows.length} (budget ${meta.maxRows}); bars before ${isoMinute(plan.boundary)} resampled to ${intervalLabel(plan.bucketSec)} buckets, the newest ${rows.filter((r) => r.t >= plan.boundary).length} at ${intervalLabel(step)}; column bars = native bars per row`);
   }
 
-  const header = ["time", ...columns.map((c) => c.name), ...(plan ? ["bars"] : [])];
+  const shown = columns.filter((c) => !c.hidden);
+  const header = ["time", ...shown.map((c) => c.name), ...(plan ? ["bars"] : [])];
   lines.push(header.join(","));
   rows.forEach((r, i) => {
-    const cells = [isoMinute(r.t), ...columns.map((c) => num(c.values[i] === undefined ? undefined : round(c.values[i]!, c.rule)))];
+    const cells = [isoMinute(r.t), ...shown.map((c) => num(c.values[i] === undefined ? undefined : round(c.values[i]!, c.rule)))];
     if (plan) cells.push(String(r.bars));
     lines.push(cells.join(","));
   });

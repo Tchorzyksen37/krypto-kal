@@ -47,14 +47,20 @@ the situation, not advice and not an order: the user decides and acts by hand.
 3. **Market around the position:** `speculation_context` with `core: ["<BASE>"]` and `extra: 0` (BASE = BTC for
    PF_XBTUSD, else the symbol between `PF_` and `USD`). It gives the session, ATR and ATR ratio, spread, depth, funding,
    Coinalyze OI change 1h/4h, long/short ratio, liquidation burst, and the session's regions and investor types. Add:
-   - structure: `kraken_futures_candles` 15m (last 96) and 1h (last 72): trend, the nearest swing highs and lows, where
-     the stop and targets sit relative to them (a stop just beyond an obvious level is a stop-hunt target);
+   - `market_view` with `asset: "<BASE>"`, `interval: "1hour"`, `bars: 72`: one table of price, OI, funding, long/short
+     and liquidations with computed facts (24h and 4h changes, ATR, nearest swing highs and lows, price / OI quadrant,
+     funding percentile, taker flow, liquidation spikes, measurable squeeze conditions, Kraken Futures close and
+     funding). Use its numbers; do not recompute them;
+   - structure: where the stop and targets sit relative to the swing levels from `market_view` (a stop just beyond an
+     obvious level is a stop-hunt target); `kraken_futures_candles` 15m (last 96, `format: "table"`) for the intraday
+     detail around the stop;
    - `coinalyze_liquidation_heatmap_estimate` with `symbols: ["<BASE>USDT_PERP.A"]`, `interval: "4hour"`, `limit: 500`:
      ESTIMATED liquidation clusters near the stop or targets (skipped without a Coinalyze key: say so under Unknown);
-   - **crowding against or with the position:** score the squeeze against the position (a long faces a long squeeze, a
-     short a short squeeze) and the one in its favour with section 5 of
-     `.claude/skills/crypto-market-sentiment/references/derivatives-playbook.md` (points met out of 6, from this run's
-     data only), and read the last 4h with its price / OI quadrant (section 3);
+   - **crowding against or with the position:** the squeeze against the position (a long faces a long squeeze, a
+     short a short squeeze) and the one in its favour: take conditions 1, 2, 3 and 5 from `market_view`'s squeeze line,
+     judge 4 and 6 from the chart (section 5 of
+     `.claude/skills/crypto-market-sentiment/references/derivatives-playbook.md`), give the total out of 6, and read
+     the 4h price / OI quadrant from the facts (section 3);
    - macro (`yahoo_quote`: `ES=F`, `NQ=F`, `DX-Y.NYB`, `^TNX`, `CL=F`), each with its time; stale quotes (weekend, closed
      market) are labelled "last close <day>" and do not drive conclusions.
 

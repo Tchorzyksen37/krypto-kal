@@ -5,6 +5,7 @@
 
 import type { LiquidationPoint, LongShortPoint, OhlcPoint, OhlcvPoint } from "../providers/coinalyze/coinalyze-client.ts";
 import type { FuturesCandle } from "../providers/kraken/kraken-futures-client.ts";
+import type { MarketPoint } from "./facts.ts";
 import { COUNT, FUNDING, PERCENT, PRICE, QUANTITY, RATIO, type RoundRule } from "./round.ts";
 
 export type Agg = "first" | "last" | "max" | "min" | "sum";
@@ -15,6 +16,7 @@ export interface BaseColumn<P> {
   agg: Agg;
   rule: RoundRule | "usd"; // "usd": one scale for the whole group, picked from the values (round.ts usdScale)
   usdGroup?: string; // columns sharing a scale (oi_open .. oi_close)
+  hidden?: boolean; // used by derived columns and facts, not printed in the table
 }
 
 export interface DerivedColumn {
@@ -141,5 +143,32 @@ export const KRAKEN_FUTURES_CANDLES: SeriesSpec<FuturesCandle> = {
   base: [...ohlc<FuturesCandle>("", PRICE), { name: "volume", get: (p) => p.v, agg: "sum", rule: QUANTITY }],
   derived: [],
   units: ["open, high, low, close: trade price in USD", "volume: contracts traded (contract size per instrument, as Kraken lists it)"],
+  summary: { kind: "level", column: "close", label: "close", relative: true, low: "low", high: "high" },
+};
+
+// The joined market view (market_view): Coinalyze price, volume, open interest, funding, long/short and liquidations
+// of one perpetual, plus the Kraken Futures close of the same bar. buy_volume is only there for taker_buy_share.
+export const MARKET_VIEW: SeriesSpec<MarketPoint> = {
+  title: "joined market view",
+  base: [
+    { name: "open", get: (p) => p.o, agg: "first", rule: PRICE },
+    { name: "high", get: (p) => p.h, agg: "max", rule: PRICE },
+    { name: "low", get: (p) => p.l, agg: "min", rule: PRICE },
+    { name: "close", get: (p) => p.c, agg: "last", rule: PRICE },
+    { name: "volume", get: (p) => p.v, agg: "sum", rule: QUANTITY },
+    { name: "buy_volume", get: (p) => p.bv, agg: "sum", rule: QUANTITY, hidden: true },
+    { name: "oi", get: (p) => p.oi, agg: "last", rule: "usd", usdGroup: "oi" },
+    { name: "funding", get: (p) => p.fr, agg: "last", rule: FUNDING },
+    { name: "long_short_ratio", get: (p) => p.ls, agg: "last", rule: RATIO },
+    { name: "liq_long", get: (p) => p.liqL, agg: "sum", rule: "usd", usdGroup: "liq" },
+    { name: "liq_short", get: (p) => p.liqS, agg: "sum", rule: "usd", usdGroup: "liq" },
+    { name: "kf_close", get: (p) => p.kf, agg: "last", rule: PRICE },
+  ],
+  derived: [{ name: "taker_buy_share", derive: (r) => share(r.buy_volume, r.volume), rule: RATIO }],
+  units: [
+    "open..close, volume, taker_buy_share: Coinalyze OHLCV of the perpetual (price in its quote currency, volume as reported)",
+    "oi: open interest at the bar close in USD; funding: funding rate at the bar close in % per the exchange's interval; long_short_ratio: accounts long / short",
+    "liq_long, liq_short: liquidations per bar in USD; kf_close: Kraken Futures trade-price close of the same bar (empty when not available)",
+  ],
   summary: { kind: "level", column: "close", label: "close", relative: true, low: "low", high: "high" },
 };

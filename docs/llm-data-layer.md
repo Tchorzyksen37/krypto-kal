@@ -1,7 +1,8 @@
 # LLM data layer: deterministic presentation between the cache and tool output
 
-Status: **phase 1 implemented** (2026-10-10): `src/present/` and `format: "table"` on the Coinalyze history tools and
-`kraken_futures_candles` (default still `raw`). Phases 2 and 3 are proposals. It is the "future plan" in `CLAUDE.md` ("keep raw points in the cache and
+Status: **phases 1 and 2 implemented** (2026-10-10, 2026-10-12): `src/present/`, `format: "table"` on the Coinalyze
+history tools and `kraken_futures_candles` (default still `raw`), and the joined `market_view` with computed facts.
+Phase 3 is a proposal. It is the "future plan" in `CLAUDE.md` ("keep raw points in the cache and
 put processing in a separate layer between the cache and tool output"), worked out. Storage is described in
 [database-design.md](database-design.md).
 
@@ -194,5 +195,16 @@ Nothing is dropped silently, and `format: "table"` with a larger `max_rows` or `
      change, low / high with times; totals and the largest bar for liquidations);
    - funding is labelled, not normalised to 8h: Coinalyze does not say each exchange's funding interval;
    - the open bar is the one whose interval has not ended at `asOf`; "cached through" is not shown yet.
-2. `market_view` with facts and the row budget; point `crypto-market-sentiment` and `position-review` at it.
+2. **Done.** `market_view(asset, interval, bars, exchange | symbol, max_rows)`: Coinalyze OHLCV, open interest (USD),
+   funding, long/short and liquidations (USD) of `<ASSET>USDT_PERP.<exchange>` joined by bar (`present/market-view.ts`),
+   plus the Kraken Futures close of the same bar (`kf_close`) and its current funding per 8h when the interval has a
+   Kraken resolution. Facts (`present/facts.ts`) come from the closed bars only; thresholds live in
+   `present/thresholds.ts` and are quoted by the derivatives playbook. A series that fails becomes empty columns and a
+   "not available" header line instead of failing the tool. `crypto-market-sentiment` and `position-review` read it
+   instead of the five history tools. Deviations from the design above:
+   - there is no separate `digest` format: `market_view` always carries facts and a budgeted table (`max_rows`,
+     default 200), the history tools keep `raw` / `table`;
+   - of the playbook's six squeeze conditions, the four the data decides (1, 2, 3, 5) are computed; 4 (tests of a
+     level) and 6 (rejection, first liquidation candles) need chart judgment and are listed as not computed;
+   - funding stays in % per the exchange's interval (Coinalyze); the Kraken line gives Kraken's own funding per 8h.
 3. Switch history tools to `table` by default; the same envelope for Yahoo, fills / PnL, quotes and `x_recent`.
