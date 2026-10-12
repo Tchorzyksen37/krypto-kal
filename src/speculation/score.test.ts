@@ -439,6 +439,15 @@ describe("bias scoring", () => {
     assert.match(renderScorecard([], T0, scored), /### Bias \(headline call, judged on BTC\)[\s\S]*\| 4 \| 3 \| 67% \[/);
   });
 
+  test("scorecard adds a non-overlapping table and says how many bets were left out", () => {
+    const a = logged({ ...long, id: "a" }, { hypothetical: { status: "tp", netR: 1.9 } });
+    const b = logged({ ...long, id: "b", fill_from: "2026-10-03T14:30:00.000Z", latest_close: "2026-10-03T15:45:00.000Z" }, { hypothetical: { status: "sl", netR: -1.1 } });
+    const text = renderScorecard([a, b], T0 + 100 * 60);
+    assert.match(text, /### All time, non-overlapping bets/);
+    assert.match(text, /1 of 2 bets overlap an earlier bet on the same symbol and side/);
+    assert.match(renderScorecard([a], T0 + 100 * 60), /0 of 1 bets overlap/);
+  });
+
   test("the scorecard says when nothing has been scored", () => {
     assert.match(renderScorecard([], T0, []), /No session has been scored yet/);
   });

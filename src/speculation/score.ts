@@ -13,6 +13,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { renderDrivers, scoreDrivers } from "./drivers.ts";
+import { withoutOverlaps } from "./overlap.ts";
 import { wilson, type Interval } from "./stats.ts";
 import type { Actual, Bet, BiasOutcome, Candle, ExitReason, Fill, Hypothetical, LoggedBet, MoveResult, ReportLogEntry } from "./types.ts";
 
@@ -514,9 +515,12 @@ export function renderDay(log: LoggedBet[], day: string, run?: Pick<ScoreRun, "u
 export function renderScorecard(log: LoggedBet[], nowSec: number, reports: ReportLogEntry[] = []): string {
   const weekAgo = nowSec - 7 * 86_400;
   const recent = log.filter((b) => Date.parse(b.fill_from) / 1000 >= weekAgo);
+  const distinct = withoutOverlaps(log);
   const lines = [
     "# Speculation scorecard", "",
     ...statsTable("Last 7 days", summarize(recent)), ...statsTable("All time", summarize(log)),
+    ...statsTable("All time, non-overlapping bets", summarize(distinct)),
+    `${log.length - distinct.length} of ${log.length} bets overlap an earlier bet on the same symbol and side and are left out of the table above.`, "",
     ...renderBias(biasStats(reports)),
     ...renderDrivers(reports),
   ];
