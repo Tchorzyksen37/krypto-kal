@@ -5,7 +5,7 @@
 
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
-import { assertPoints, call, serverTests, useMcpServer } from "./test-helpers.ts";
+import { assertPoints, assertTable, call, callText, serverTests, useMcpServer } from "./test-helpers.ts";
 
 // History tools and the fields of their `history` points.
 const HISTORY_TOOLS: Record<string, string[]> = {
@@ -15,7 +15,7 @@ const HISTORY_TOOLS: Record<string, string[]> = {
   coinalyze_long_short_ratio_history: ["r", "l", "s"],
   coinalyze_ohlcv_history: ["o", "h", "l", "c", "v"],
 };
-const TOOLS = ["coinalyze_exchanges", "coinalyze_future_markets", "coinalyze_current", ...Object.keys(HISTORY_TOOLS)];
+const TOOLS = ["coinalyze_exchanges", "coinalyze_future_markets", "coinalyze_current", ...Object.keys(HISTORY_TOOLS), "market_view"];
 
 describe("Coinalyze", { skip: !process.env.COINALYZE_API_KEY && "COINALYZE_API_KEY not set" }, () => {
   const ctx = useMcpServer({ CACHE_DB_PATH: ":memory:" });
@@ -56,7 +56,7 @@ describe("Coinalyze", { skip: !process.env.COINALYZE_API_KEY && "COINALYZE_API_K
 
     for (const [name, fields] of Object.entries(HISTORY_TOOLS)) {
       test(name, async () => {
-        const data = (await call(ctx, name, { symbols: symbols.slice(0, 1), interval: "4hour", limit: 3 })) as {
+        const data = (await call(ctx, name, { symbols: symbols.slice(0, 1), interval: "4hour", limit: 3, format: "raw" })) as {
           symbol: string;
           history: unknown;
         }[];
@@ -65,9 +65,24 @@ describe("Coinalyze", { skip: !process.env.COINALYZE_API_KEY && "COINALYZE_API_K
       });
     }
 
+    test("coinalyze_ohlcv_history as a table", async () => {
+      const text = await callText(ctx, "coinalyze_ohlcv_history", { symbols: symbols.slice(0, 1), interval: "4hour", limit: 3, format: "table" });
+      assertTable(text, ["open", "close", "volume", "taker_buy_share"]);
+    });
+
+    test("market_view joins the series of one asset, with facts", { timeout: 120_000 }, async () => {
+      const text = await callText(ctx, "market_view", { asset: "BTC", interval: "4hour", bars: 30, max_rows: 40 });
+      assert.match(text, /^market_view BTC \(Coinalyze BTCUSDT_PERP\.A/);
+      assert.match(text, /\nfacts:\n- price: close /);
+      assert.match(text, /\n- open interest: /);
+      assert.match(text, /\n- squeeze conditions met /);
+      assert.doesNotMatch(text, /not available: (OHLCV|open interest|funding|long\/short|liquidations) /);
+      assertTable(text, ["open", "close", "oi_musd", "funding", "long_short_ratio", "taker_buy_share"]);
+    });
+
     test("coinalyze_open_interest_history (aggregate)", async () => {
       const data = (await call(ctx, "coinalyze_open_interest_history", {
-        symbols, interval: "4hour", limit: 3, aggregate: true,
+        symbols, interval: "4hour", limit: 3, aggregate: true, format: "raw",
       })) as { symbols: string[]; points: unknown };
       assert.deepEqual(data.symbols.sort(), [...symbols].sort());
       assertPoints(data.points, ["c", "n"], "t");

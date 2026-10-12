@@ -38,7 +38,8 @@ all data comes from the Kraken Futures API through the MCP tools.
    If the tool is not available (old server), run `node --env-file-if-exists=.env src/speculation/score.ts
    <BRAIN>/output/speculation` from the repo instead; it does the same.
    If the network cannot reach Kraken, gather the data with the MCP tools (`kraken_futures_candles` per contract and
-   window, `kraken_futures_fills`) into a JSON file `{ fills, candles: { "PF_...": [...] } }` and run
+   window, `kraken_futures_fills`, both with `format: "raw"`, since their default is a text table) into a JSON file
+   `{ fills, candles: { "PF_...": [...] } }` and run
    `node src/speculation/score.ts <dir> --input <file>`.
    It also scores each finished report's **bias** (`reports-log.json`, written by the checker): the session move of
    each symbol from the first trade to the last close of the window, flat when smaller than 0.25 x 1h ATR x

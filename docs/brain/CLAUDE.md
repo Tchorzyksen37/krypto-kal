@@ -104,12 +104,14 @@ When the user names one of these (in any language), follow it exactly.
       transmission chain, volatility triggers, confidence, market reaction, open questions.
 3. **Migrate** – Given a pile of old notes, propose where each one goes (`raw/`, `wiki/` or
    `output/`) as a table, and **wait for the user's approval before moving a single file**.
-4. **Query** – Answer from the whole wiki: search (`brain_search`), read the relevant pages, cite
+4. **Query** – Answer from the whole wiki: find the entry pages (`brain_search`), map what is connected to them
+   (`brain_related`, `depth` 2 for the bigger picture: event -> actor -> other events), read the relevant pages, cite
    the pages used. Save the answer as a new page (usually `wiki/themes/` or `output/`) and link it
    from `wiki/index.md`.
 5. **Lint** – Hunt for contradictions, stale claims (situation changed since `updated`), orphan
    pages (no incoming links), missing concepts (names mentioned on 3+ pages without their own page)
-   and broken links. **Report only, fix nothing.** Log the run in `wiki/log.md`.
+   and broken links (`brain_related` without a page lists orphans, links to missing pages and duplicate slugs).
+   **Report only, fix nothing.** Log the run in `wiki/log.md`.
 
 ## Sources
 

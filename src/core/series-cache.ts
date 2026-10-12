@@ -4,6 +4,7 @@
 
 import type { HistoryStore, Range } from "./history-store.ts";
 import { isoTime, type Logger } from "./logger.ts";
+import { runStats } from "./run-stats.ts";
 
 export interface CachedSeriesRequest<P extends { t: number }> {
   store: HistoryStore;
@@ -49,6 +50,8 @@ export async function cachedSeries<P extends { t: number }>(r: CachedSeriesReque
     }
   }
 
+  let fetched = 0;
+  let requests = 0;
   for (const { range, symbols } of groups.values()) {
     // A gap that reaches the open tail is fetched together with it – one request instead of two.
     const withTail = needTail && range.to === r.closedUntil;
@@ -57,10 +60,12 @@ export async function cachedSeries<P extends { t: number }>(r: CachedSeriesReque
       kind, interval, symbols: symbols.join(","), from: isoTime(fetchRange.from), to: isoTime(fetchRange.to), withTail,
     });
     const data = await r.fetch(symbols, fetchRange);
+    requests++;
     for (const symbol of symbols) {
       const all = data.get(symbol) ?? [];
       const points = all.filter((pt) => pt.t >= range.from && pt.t <= range.to);
       store.save(key(symbol), range, points);
+      fetched += points.length;
       if (withTail) tail.set(symbol, all.filter(inTail));
       log.debug("history cached", { kind, symbol, interval, points: points.length });
     }
@@ -70,13 +75,24 @@ export async function cachedSeries<P extends { t: number }>(r: CachedSeriesReque
   const tailSymbols = needTail ? r.symbols.filter((s) => !tail.has(s)) : [];
   if (tailSymbols.length > 0) {
     const data = await r.fetch(tailSymbols, { from: tailFrom, to: r.tailTo });
+    requests++;
     for (const symbol of tailSymbols) tail.set(symbol, (data.get(symbol) ?? []).filter(inTail));
   }
 
   const result = new Map<string, P[]>();
+  let closedServed = 0;
+  let tailServed = 0;
   for (const symbol of r.symbols) {
-    result.set(symbol, [...(hasClosed ? store.getPoints<P>(key(symbol), closed) : []), ...(tail.get(symbol) ?? [])]);
+    const closedPoints = hasClosed ? store.getPoints<P>(key(symbol), closed) : [];
+    const tailPoints = tail.get(symbol) ?? [];
+    closedServed += closedPoints.length;
+    tailServed += tailPoints.length;
+    result.set(symbol, [...closedPoints, ...tailPoints]);
   }
+  runStats.recordCache({
+    kind, interval, symbols: r.symbols.length, served: closedServed + tailServed,
+    fromStore: Math.max(0, closedServed - fetched), fetched, tail: tailServed, requests,
+  });
   log.debug("history served", {
     kind, interval, symbols: r.symbols.length,
     points: [...result.values()].reduce((n, pts) => n + pts.length, 0),

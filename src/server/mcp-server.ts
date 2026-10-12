@@ -23,6 +23,7 @@ import {
 } from "../providers/coinalyze/coinalyze-client.ts";
 import { Brain } from "../brain/brain.ts";
 import { markIngested, runTriage } from "../brain/triage.ts";
+import { buildWikiGraph, findPage, renderOverview, renderRelated } from "../brain/graph.ts";
 import { coinalyzeJobs, startCollector, yahooJobs, type CollectorJob } from "./collector.ts";
 import { HistoryStore } from "../core/history-store.ts";
 import { estimateLiquidationHeatmap, type HeatmapBar } from "../analytics/liquidation-heatmap.ts";
@@ -40,6 +41,17 @@ import { biasStats, edgeLine, readLog, readReports, scoreDir, scoreOptionsFromEn
 import { report as pnlReport, syncFills } from "../trading/futures-pnl.ts";
 import { TradeStore } from "../trading/trade-store.ts";
 import { createLogger } from "../core/logger.ts";
+import { renderSnapshot, runStats, statsLogPathFromEnv } from "../core/run-stats.ts";
+import { PresentedText, renderSeriesList } from "../present/table.ts";
+import type { SeriesSpec } from "../present/units.ts";
+import { renderMarketView } from "../present/market-view.ts";
+import { renderFills, renderPnl, renderPosts, renderQuotes } from "../present/records.ts";
+import { KRAKEN_SPOT_OHLC, YAHOO_BARS } from "../present/units.ts";
+import { fundingPct8h, futuresOf } from "../speculation/market.ts";
+import {
+  AGGREGATE_LIQUIDATIONS, AGGREGATE_OPEN_INTEREST, COINALYZE_LONG_SHORT, COINALYZE_OHLCV, KRAKEN_FUTURES_CANDLES,
+  coinalyzeFunding, coinalyzeLiquidations, coinalyzeOpenInterest,
+} from "../present/units.ts";
 import { XClient } from "../providers/x/x-client.ts";
 import { accountsOverview, recentRawPosts, syncX, type SyncOptions } from "../brain/x-sync.ts";
 import { YAHOO_INTERVAL_SECONDS, YahooClient, type YahooInterval } from "../providers/yahoo/yahoo-client.ts";
@@ -61,6 +73,8 @@ function authorized(req: IncomingMessage): boolean {
 // Persistent history cache shared by all providers. Defaults to a path outside OneDrive
 // (sync can lock SQLite files).
 const CACHE_DB_PATH = process.env.CACHE_DB_PATH ?? join(homedir(), ".krypto-kal", "cache.db");
+const STATS_LOG_PATH = statsLogPathFromEnv();
+runStats.configure({ logPath: STATS_LOG_PATH });
 const store = new HistoryStore(CACHE_DB_PATH);
 
 const enabled = (name: string) => process.env[name]?.toLowerCase() !== "false";
@@ -96,21 +110,49 @@ const xSyncOptions: SyncOptions = {
 };
 
 // Runs a tool, logs the outcome and turns errors into `isError` results instead of throwing.
+// Every result is measured (size, points, duration) into runStats, so `server_stats` and the stats log show what
+// the model actually reads; history requests made inside `fn` are attributed to this tool.
 async function toResult(tool: string, args: unknown, fn: () => Promise<unknown>): Promise<CallToolResult> {
   const started = Date.now();
   log.debug("tool call", { tool, args });
   try {
-    const data = await fn();
-    log.info("tool ok", { tool, ms: Date.now() - started });
-    return { content: [{ type: "text", text: JSON.stringify(data) }] };
+    const data = await runStats.inTool(tool, fn);
+    // A presented result is already the text the model should read; everything else is JSON.
+    const text = data instanceof PresentedText ? data.text : JSON.stringify(data);
+    const ms = Date.now() - started;
+    runStats.recordTool({ tool, ok: true, ms, text, data: data instanceof PresentedText ? undefined : data, points: data instanceof PresentedText ? data.points : undefined, args });
+    log.info("tool ok", { tool, ms, chars: text.length });
+    return { content: [{ type: "text", text }] };
   } catch (e) {
     const err = e as Error & { kind?: string; status?: number; code?: string };
     const msg = err.kind
       ? `${err.kind}${err.status ? ` ${err.status}` : ""}${err.code ? ` (code ${err.code})` : ""}: ${err.message}`
       : String(e);
-    log.warn("tool failed", { tool, ms: Date.now() - started, error: msg });
+    const ms = Date.now() - started;
+    runStats.recordTool({ tool, ok: false, ms, text: msg, args, error: msg });
+    log.warn("tool failed", { tool, ms, error: msg });
     return { content: [{ type: "text", text: msg }], isError: true };
   }
+}
+
+function registerStats(server: McpServer) {
+  server.registerTool(
+    "server_stats",
+    {
+      description:
+        "[Server] Statistics of this server process since it started: per tool calls, errors, duration (p50/p95), " +
+        "size of the result the model read (characters, ~tokens) and series points; per history series how many " +
+        "points came from the SQLite cache vs the API and how many API requests that took. The same events are " +
+        "appended to the stats log (STATS_LOG_PATH) for longer analysis.",
+      inputSchema: { reset: z.boolean().default(false).describe("Start counting again after returning the current figures") },
+    },
+    (args) =>
+      toResult("server_stats", args, async () => {
+        const snapshot = runStats.snapshot();
+        if (args.reset) runStats.reset();
+        return { log: STATS_LOG_PATH ?? "disabled (STATS_LOG=false)", text: renderSnapshot(snapshot), ...snapshot };
+      }),
+  );
 }
 
 // --- Coinglass ---
@@ -168,7 +210,20 @@ const czSymbols = z
       "Find them with coinalyze_future_markets. Each symbol uses 1 of 40 API calls/min.",
   );
 
+// Output format of the history tools (docs/llm-data-layer.md): raw JSON as before, or a header with provenance
+// (window, open bar, units, gaps, summary) plus a CSV table, one row per bar.
+const presentParams = {
+  format: z
+    .enum(["raw", "table"])
+    .default("table")
+    .describe('"table" (default): header (window, open bar, units, gaps, summary) + CSV, one row per bar, rounded per field, ISO UTC times. "raw": JSON points exactly as the provider returned them'),
+  max_rows: z
+    .number().int().min(10).max(5000).optional()
+    .describe('Only with format "table": row budget; the newest 48 bars stay native, older ones are resampled to a coarser interval'),
+};
+
 const czHistoryParams = {
+  ...presentParams,
   symbols: czSymbols,
   interval: z.enum(czIntervals),
   limit: z
@@ -176,6 +231,14 @@ const czHistoryParams = {
     .describe("Number of intervals back from `to` (ignored when `from` is given)"),
   from: z.number().int().optional().describe("Range start, UNIX seconds"),
   to: z.number().int().optional().describe("Range end, UNIX seconds (default: now)"),
+};
+
+// Output format of the record tools (quotes, fills, PnL, posts): the same choice without a row budget.
+const recordFormat = {
+  format: z
+    .enum(["raw", "table"])
+    .default("table")
+    .describe('"table" (default): header (what, as of, freshness, units) + CSV or one line per item. "raw": the JSON as before'),
 };
 
 const czAggregate = z
@@ -213,6 +276,18 @@ function sumByTime<P extends { t: number }, K extends keyof P & string>(
     points: [...byT.entries()].sort(([a], [b]) => a - b).map(([t, acc]) => ({ t, ...acc })),
   };
 }
+
+// format "table": the series as header + CSV (src/present/); "raw": the provider's points as before.
+function present<P extends { t: number }>(
+  tool: string, args: { format: "raw" | "table"; max_rows?: number | undefined }, spec: SeriesSpec<P>,
+  series: { symbol: string; history: P[] }[], intervalSec: number,
+): PresentedText {
+  return renderSeriesList(spec, series, {
+    tool, intervalSec, asOfSec: Math.floor(Date.now() / 1000), ...(args.max_rows ? { maxRows: args.max_rows } : {}),
+  });
+}
+
+const aggregateLabel = (symbols: string[]) => `sum of ${symbols.length} (${symbols.join(", ")})`;
 
 function registerCoinalyze(server: McpServer, client: CoinalyzeClient) {
   server.registerTool(
@@ -285,7 +360,13 @@ function registerCoinalyze(server: McpServer, client: CoinalyzeClient) {
         const data = await client.openInterestHistory({
           symbols, ...range(r), convertToUsd: aggregate || convert_to_usd,
         });
-        return aggregate ? sumByTime(data, ["c"]) : data;
+        const step = INTERVAL_SECONDS[r.interval];
+        if (aggregate) {
+          const sum = sumByTime(data, ["c"]);
+          if (r.format === "raw") return sum;
+          return present("coinalyze_open_interest_history", r, AGGREGATE_OPEN_INTEREST, [{ symbol: aggregateLabel(sum.symbols), history: sum.points as { t: number; c: number; n: number }[] }], step);
+        }
+        return r.format === "raw" ? data : present("coinalyze_open_interest_history", r, coinalyzeOpenInterest(convert_to_usd), data, step);
       }),
   );
 
@@ -298,11 +379,12 @@ function registerCoinalyze(server: McpServer, client: CoinalyzeClient) {
       inputSchema: { ...czHistoryParams, predicted: z.boolean().default(false) },
     },
     (args) =>
-      toResult("coinalyze_funding_rate_history", args, () => {
+      toResult("coinalyze_funding_rate_history", args, async () => {
         const { symbols, predicted, ...r } = args;
-        return predicted
+        const data = await (predicted
           ? client.predictedFundingRateHistory({ symbols, ...range(r) })
-          : client.fundingRateHistory({ symbols, ...range(r) });
+          : client.fundingRateHistory({ symbols, ...range(r) }));
+        return r.format === "raw" ? data : present("coinalyze_funding_rate_history", r, coinalyzeFunding(predicted), data, INTERVAL_SECONDS[r.interval]);
       }),
   );
 
@@ -324,7 +406,13 @@ function registerCoinalyze(server: McpServer, client: CoinalyzeClient) {
         const data = await client.liquidationHistory({
           symbols, ...range(r), convertToUsd: aggregate || convert_to_usd,
         });
-        return aggregate ? sumByTime(data, ["l", "s"]) : data;
+        const step = INTERVAL_SECONDS[r.interval];
+        if (aggregate) {
+          const sum = sumByTime(data, ["l", "s"]);
+          if (r.format === "raw") return sum;
+          return present("coinalyze_liquidation_history", r, AGGREGATE_LIQUIDATIONS, [{ symbol: aggregateLabel(sum.symbols), history: sum.points as { t: number; l: number; s: number; n: number }[] }], step);
+        }
+        return r.format === "raw" ? data : present("coinalyze_liquidation_history", r, coinalyzeLiquidations(convert_to_usd), data, step);
       }),
   );
 
@@ -335,9 +423,10 @@ function registerCoinalyze(server: McpServer, client: CoinalyzeClient) {
       inputSchema: czHistoryParams,
     },
     (args) =>
-      toResult("coinalyze_long_short_ratio_history", args, () => {
+      toResult("coinalyze_long_short_ratio_history", args, async () => {
         const { symbols, ...r } = args;
-        return client.longShortRatioHistory({ symbols, ...range(r) });
+        const data = await client.longShortRatioHistory({ symbols, ...range(r) });
+        return r.format === "raw" ? data : present("coinalyze_long_short_ratio_history", r, COINALYZE_LONG_SHORT, data, INTERVAL_SECONDS[r.interval]);
       }),
   );
 
@@ -349,9 +438,10 @@ function registerCoinalyze(server: McpServer, client: CoinalyzeClient) {
       inputSchema: czHistoryParams,
     },
     (args) =>
-      toResult("coinalyze_ohlcv_history", args, () => {
+      toResult("coinalyze_ohlcv_history", args, async () => {
         const { symbols, ...r } = args;
-        return client.ohlcvHistory({ symbols, ...range(r) });
+        const data = await client.ohlcvHistory({ symbols, ...range(r) });
+        return r.format === "raw" ? data : present("coinalyze_ohlcv_history", r, COINALYZE_OHLCV, data, INTERVAL_SECONDS[r.interval]);
       }),
   );
 
@@ -467,9 +557,13 @@ function registerYahoo(server: McpServer, client: YahooClient) {
       description:
         "[Yahoo Finance] Current price, change vs previous close (absolute and %), day range, volume and " +
         "52-week range. One request per symbol.",
-      inputSchema: { symbols: yahooSymbols.max(20) },
+      inputSchema: { symbols: yahooSymbols.max(20), ...recordFormat },
     },
-    (args) => toResult("yahoo_quote", args, () => client.quotes(args.symbols)),
+    (args) =>
+      toResult("yahoo_quote", args, async () => {
+        const quotes = await client.quotes(args.symbols);
+        return args.format === "raw" ? quotes : renderQuotes(quotes, Math.floor(Date.now() / 1000));
+      }),
   );
 
   server.registerTool(
@@ -485,6 +579,7 @@ function registerYahoo(server: McpServer, client: YahooClient) {
         limit: z.number().int().positive().max(2000).default(100).describe("Number of most recent bars"),
         from: z.number().int().optional().describe("Range start, UNIX seconds (returns all bars in range)"),
         to: z.number().int().optional().describe("Range end, UNIX seconds (default: now)"),
+        ...presentParams,
       },
     },
     (args) =>
@@ -492,7 +587,8 @@ function registerYahoo(server: McpServer, client: YahooClient) {
         const { symbols, interval, limit } = args;
         const r = timeRange(YAHOO_INTERVAL_SECONDS[interval], args, YAHOO_GAP_FACTOR[interval]);
         const data = await client.history({ symbols, interval, ...r });
-        return args.from === undefined ? data.map((s) => ({ ...s, history: s.history.slice(-limit) })) : data;
+        const sliced = args.from === undefined ? data.map((s) => ({ ...s, history: s.history.slice(-limit) })) : data;
+        return args.format === "raw" ? sliced : present("yahoo_history", args, YAHOO_BARS, sliced, YAHOO_INTERVAL_SECONDS[interval]);
       }),
   );
 }
@@ -521,12 +617,15 @@ function registerKraken(server: McpServer, client: KrakenClient) {
           .enum(KRAKEN_OHLC_INTERVALS.map(String) as [string, ...string[]])
           .describe("Minutes: 1, 5, 15, 30, 60, 240, 1440 (1d), 10080 (1w), 21600 (15d)"),
         limit: z.number().int().min(1).max(720).default(100),
+        ...presentParams,
       },
     },
     (args) =>
       toResult("kraken_ohlc", args, async () => {
         const res = await client.ohlc(args.pair, Number(args.interval) as (typeof KRAKEN_OHLC_INTERVALS)[number]);
-        return { pair: res.pair, candles: res.candles.slice(-args.limit) };
+        const candles = res.candles.slice(-args.limit);
+        if (args.format === "raw") return { pair: res.pair, candles };
+        return present("kraken_ohlc", args, KRAKEN_SPOT_OHLC, [{ symbol: res.pair, history: candles }], Number(args.interval) * 60);
       }),
   );
 
@@ -582,6 +681,7 @@ function registerKrakenFuturesMarket(server: McpServer, client: KrakenFuturesCli
         from: z.string().datetime({ offset: true }).optional().describe("Start, ISO 8601. Default: `limit` candles before `to`"),
         to: z.string().datetime({ offset: true }).optional().describe("End, ISO 8601. Default: now"),
         limit: z.number().int().min(1).max(2000).default(200),
+        ...presentParams,
       },
     },
     (args) =>
@@ -590,7 +690,10 @@ function registerKrakenFuturesMarket(server: McpServer, client: KrakenFuturesCli
         const from = args.from ? Math.floor(Date.parse(args.from) / 1000) : to - args.limit * FUTURES_RESOLUTION_SECONDS[args.resolution];
         const res = await client.candles(args.symbol, args.resolution, { from, to });
         const candles = args.from ? res.candles.slice(0, args.limit) : res.candles.slice(-args.limit);
-        return { symbol: args.symbol, resolution: args.resolution, candles, more: res.moreCandles || res.candles.length > candles.length };
+        const more = res.moreCandles || res.candles.length > candles.length;
+        if (args.format === "raw") return { symbol: args.symbol, resolution: args.resolution, candles, more };
+        const table = present("kraken_futures_candles", args, KRAKEN_FUTURES_CANDLES, [{ symbol: args.symbol, history: candles }], FUTURES_RESOLUTION_SECONDS[args.resolution]);
+        return more ? new PresentedText(`${table.text}\nmore candles exist outside this page: pass from/to for the rest`, table.points) : table;
       }),
   );
 }
@@ -639,13 +742,14 @@ function registerKrakenFutures(server: McpServer, client: KrakenFuturesClient, t
       description:
         "[Kraken Futures] Trade history: executed fills, newest first. Syncs new fills from Kraken into the local " +
         "database first, so it also works past the API's 100-fill window.",
-      inputSchema: { ...timeParams, limit: z.number().int().min(1).max(1000).default(100) },
+      inputSchema: { ...timeParams, limit: z.number().int().min(1).max(1000).default(100), ...recordFormat },
     },
     (args) =>
       toResult("kraken_futures_fills", args, async () => {
         const sync = await syncFills(client, trades);
-        const fills = trades.fills(filterOf(args), args.limit).map((f) => ({ ...f, time: isoTime(f.ts) }));
-        return { sync, fills };
+        const stored = trades.fills(filterOf(args), args.limit);
+        if (args.format === "table") return renderFills(sync, stored, Math.floor(Date.now() / 1000));
+        return { sync, fills: stored.map((f) => ({ ...f, time: isoTime(f.ts) })) };
       }),
   );
 
@@ -656,12 +760,15 @@ function registerKrakenFutures(server: McpServer, client: KrakenFuturesClient, t
         "[Kraken Futures] Realized profit/loss statistics from the trade history: totals, win rate, profit factor, " +
         "average win/loss, best/worst trade, max drawdown, hold time, per symbol and per UTC day, plus the most recent " +
         "closed trades. A trade is a position from flat to flat. Figures are gross of fees and funding. Syncs fills first.",
-      inputSchema: { ...timeParams, recent_trades: z.number().int().min(0).max(200).default(20) },
+      inputSchema: { ...timeParams, recent_trades: z.number().int().min(0).max(200).default(20), ...recordFormat },
     },
     (args) =>
       toResult("kraken_futures_pnl", args, async () => {
         const sync = await syncFills(client, trades);
         const closed = trades.trades(filterOf(args));
+        if (args.format === "table") {
+          return renderPnl(sync, pnlReport(closed), args.recent_trades ? closed.slice(-args.recent_trades).reverse() : [], Math.floor(Date.now() / 1000));
+        }
         return {
           sync,
           ...pnlReport(closed),
@@ -828,12 +935,15 @@ function registerBrain(server: McpServer) {
         author: z.string().optional().describe('Username, e.g. "Reuters"'),
         contains: z.string().optional().describe("Case-insensitive text filter"),
         limit: z.number().int().min(1).max(500).default(100),
+        max_chars: z.number().int().min(40).max(5000).default(280).describe('Only with format "table": text per post is cut at this length'),
+        ...recordFormat,
       },
     },
     (args) =>
-      toResult("x_recent", args, () =>
-        recentRawPosts(brain, { since: hours(args.hours), author: args.author, contains: args.contains, limit: args.limit }),
-      ),
+      toResult("x_recent", args, async () => {
+        const posts = await recentRawPosts(brain, { since: hours(args.hours), author: args.author, contains: args.contains, limit: args.limit });
+        return args.format === "raw" ? posts : renderPosts(posts, Math.floor(Date.now() / 1000), args.hours, args.max_chars);
+      }),
   );
 
   server.registerTool(
@@ -870,6 +980,39 @@ function registerBrain(server: McpServer) {
       },
     },
     (args) => toResult("brain_search", args, () => brain.search(args.query, args.dir, args.limit)),
+  );
+
+  server.registerTool(
+    "brain_related",
+    {
+      description:
+        "[Brain] The wiki as a knowledge graph. With `page`: the pages related to it, nearest and strongest first, " +
+        "with why (linked both ways, links to it, linked from it, shared raw sources) and the path to read; " +
+        "`depth` 2-3 follows the graph further (e.g. event -> actor -> other events). Without `page`: an overview " +
+        "(hubs per type, recently updated pages, orphans, links to missing pages). Use it before reading pages one " +
+        "by one, to see the bigger picture around a topic. The lists at the wiki root (index, timeline, log) are " +
+        "not part of the graph.",
+      inputSchema: {
+        page: z.string().optional().describe('Slug, path or title, e.g. "iran", "wiki/places/strait-of-hormuz.md", "Strait of Hormuz"'),
+        depth: z.number().int().min(1).max(3).default(1),
+        limit: z.number().int().min(1).max(200).default(30),
+        type: z.string().optional().describe('Only related pages of this type, e.g. "event", "actor", "market"'),
+        shared_sources: z.boolean().default(true).describe("Also relate pages that cite the same raw X posts"),
+      },
+    },
+    (args) =>
+      toResult("brain_related", args, async () => {
+        const graph = await buildWikiGraph(brain);
+        if (!args.page) return new PresentedText(renderOverview(graph), 0);
+        const { node, candidates } = findPage(graph, args.page);
+        if (!node) {
+          const list = candidates.map((n) => `- [[${n.slug}]] ${n.type} – ${n.title}`).join("\n");
+          return new PresentedText(`no wiki page "${args.page}" (${graph.nodes.size} pages in the graph)${list ? `; closest:\n${list}` : ""}`, 0);
+        }
+        return new PresentedText(renderRelated(graph, node, {
+          depth: args.depth, limit: args.limit, sharedSources: args.shared_sources, ...(args.type ? { type: args.type } : {}),
+        }), 0);
+      }),
   );
 
   server.registerTool(
@@ -918,10 +1061,78 @@ function registerBrain(server: McpServer) {
   );
 }
 
+// Coinalyze interval -> Kraken Futures candle resolution (2hour and 6hour have none).
+const KRAKEN_RESOLUTION: Partial<Record<CoinalyzeInterval, (typeof KRAKEN_FUTURES_RESOLUTIONS)[number]>> = {
+  "1min": "1m", "5min": "5m", "15min": "15m", "30min": "30m", "1hour": "1h", "4hour": "4h", "12hour": "12h", daily: "1d",
+};
+
+function registerMarketView(server: McpServer, cz: CoinalyzeClient, futures: KrakenFuturesClient | undefined) {
+  server.registerTool(
+    "market_view",
+    {
+      description:
+        "[Market] One asset in one call: Coinalyze OHLCV, open interest (USD), funding, long/short ratio and " +
+        "liquidations (USD) of its perpetual joined into one table by bar, plus the Kraken Futures close of the same " +
+        "bar and its current funding. The header carries computed facts from the closed bars: price change, range, " +
+        "ATR, σ, nearest swing levels, OI change and price/OI quadrant, funding percentile, long/short vs its median, " +
+        "taker flow and CVD divergence, liquidation spikes, and which measurable squeeze conditions are met (with the " +
+        "thresholds used). The newest bars stay at the native interval, older ones are resampled to fit `max_rows`. " +
+        "Use it instead of calling the five Coinalyze history tools one by one. 5 Coinalyze calls; cached history.",
+      inputSchema: {
+        asset: z.string().min(1).describe('Base asset, e.g. "BTC", "ETH", "XRP"'),
+        interval: z.enum(czIntervals).default("1hour"),
+        bars: z.number().int().min(20).max(2000).default(168).describe("Window length in bars (168 x 1hour = 7 days)"),
+        exchange: z.string().default("A").describe('Coinalyze exchange code of the perpetual (A = Binance); see coinalyze_exchanges'),
+        symbol: z.string().optional().describe('Coinalyze symbol to use instead of <ASSET>USDT_PERP.<exchange>, e.g. "BTCUSD_PERP.0"'),
+        max_rows: z.number().int().min(20).max(5000).default(200).describe("Row budget of the table; the newest 48 bars stay native"),
+      },
+    },
+    (args) =>
+      toResult("market_view", args, async () => {
+        const asset = args.asset.toUpperCase();
+        const symbol = args.symbol ?? `${asset}USDT_PERP.${args.exchange}`;
+        const r = range({ interval: args.interval, limit: args.bars });
+        const failed: string[] = [];
+        const get = async <T>(label: string, fn: () => Promise<{ history: T[] }[]>): Promise<T[]> => {
+          try {
+            return (await fn())[0]?.history ?? [];
+          } catch (e) {
+            failed.push(`${label} (${e instanceof Error ? e.message : String(e)})`);
+            return [];
+          }
+        };
+        const symbols = [symbol];
+        const ohlcv = await get("OHLCV", () => cz.ohlcvHistory({ symbols, ...r }));
+        const openInterest = await get("open interest", () => cz.openInterestHistory({ symbols, ...r, convertToUsd: true }));
+        const funding = await get("funding", () => cz.fundingRateHistory({ symbols, ...r }));
+        const longShort = await get("long/short", () => cz.longShortRatioHistory({ symbols, ...r }));
+        const liquidations = await get("liquidations", () => cz.liquidationHistory({ symbols, ...r, convertToUsd: true }));
+
+        let kraken: Parameters<typeof renderMarketView>[0]["kraken"];
+        const resolution = KRAKEN_RESOLUTION[args.interval];
+        if (futures && resolution) {
+          const pf = futuresOf(asset);
+          try {
+            const [{ candles }, tickers] = await Promise.all([futures.candles(pf, resolution, { from: r.from, to: r.to }), futures.tickers([pf])]);
+            const ticker = tickers[0];
+            kraken = { symbol: pf, candles, ...(ticker?.fundingRate !== undefined && ticker.markPrice > 0 ? { fundingPct8h: fundingPct8h(ticker as typeof ticker & { fundingRate: number }) } : {}) };
+          } catch (e) {
+            failed.push(`Kraken Futures ${pf} (${e instanceof Error ? e.message : String(e)})`);
+          }
+        }
+        return renderMarketView({
+          asset, symbol, intervalSec: INTERVAL_SECONDS[args.interval], asOfSec: Math.floor(Date.now() / 1000),
+          ohlcv, openInterest, funding, longShort, liquidations, ...(kraken ? { kraken } : {}), maxRows: args.max_rows, failed,
+        });
+      }),
+  );
+}
+
 function buildServer(): McpServer {
   const server = new McpServer({ name: "krypto-kal", version: "1.0.0" });
   if (coinglass) registerCoinglass(server, coinglass);
   if (coinalyze) registerCoinalyze(server, coinalyze);
+  if (coinalyze) registerMarketView(server, coinalyze, krakenFutures);
   if (yahoo) registerYahoo(server, yahoo);
   if (kraken) registerKraken(server, kraken);
   if (krakenFutures) registerKrakenFuturesMarket(server, krakenFutures);
@@ -930,6 +1141,7 @@ function buildServer(): McpServer {
   if (x) registerX(server, x);
   registerBrain(server);
   registerBot(server);
+  registerStats(server);
   return server;
 }
 
@@ -1001,6 +1213,7 @@ http.listen(PORT, HOST, () => {
   ].filter(Boolean).join(",");
   log.info("MCP server listening", { url: `http://${HOST}:${PORT}/mcp`, providers });
   log.info("history cache", { path: CACHE_DB_PATH });
+  log.info("run statistics", { log: STATS_LOG_PATH ?? "disabled" });
   log.info("second brain", { path: brain.root });
   if (jobs.length > 0) startCollector(jobs, Number(process.env.COLLECT_EVERY_MINUTES ?? 60));
   // X reads are paid, so the background sync is opt-in and has its own schedule.

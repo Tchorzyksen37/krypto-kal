@@ -45,9 +45,8 @@ Przeczytaj `references/derivatives-playbook.md` - zawiera procedurę pobierania 
 
 Skrót procedury:
 
-1. Znajdź symbole: `coinalyze_future_markets` (parametr `base_asset`), giełdy: `coinalyze_exchanges`. Punktem odniesienia jest zwykle kontrakt USDT perpetual na Binance (sufiks `.A`).
-2. Pobierz dla każdego aktywa: OHLCV, open interest, funding rate, long/short ratio, likwidacje - na interwale dziennym (reżim, 90 dni) i 4h (taktyka, ok. 60 świec). W razie potrzeby 1h dla ostatnich 24-48h.
-3. Policz wskaźniki według playbooka, sklasyfikuj fazę, oceń ryzyko long i short squeeze, wyznacz zakres ruchu ±.
+1. **`market_view`** dla każdego aktywa, dwa razy: `interval: "daily"`, `bars: 90` (reżim) i `interval: "4hour"`, `bars: 60` (taktyka); w razie potrzeby `interval: "1hour"`, `bars: 48`. Jedno wywołanie łączy OHLCV, OI, funding, long/short i likwidacje kontraktu `<ASSET>USDT_PERP.A` w jedną tabelę i podaje fakty policzone przez kod z zamkniętych świec: zmiany, zakres, ATR, σ, najbliższe swingi, kwadrant cena/OI, percentyl fundingu, long/short wobec mediany, przepływ takerów i dywergencję CVD, skoki likwidacji, spełnione warunki squeeze (1, 2, 3, 5 z sekcji 5 playbooka) oraz cenę i funding na Kraken Futures. **Używaj tych liczb, nie licz ich drugi raz.** Inna giełda: `exchange` albo `symbol` (kody: `coinalyze_exchanges`, symbole: `coinalyze_future_markets`).
+2. Z playbooka dolicz tylko to, czego fakty nie mają: warunki squeeze 4 i 6 (testy poziomu, odrzucenie), klasyfikację fazy, zakres ruchu ± i scenariusze. Pojedyncze narzędzia `coinalyze_*_history` (z `format: "table"`) są potrzebne tylko do danych spoza `market_view`, np. `predicted` funding albo `aggregate` po kilku giełdach.
 
 Narzędzie ma limit 40 wywołań na minutę i każdy symbol liczy się osobno - grupuj symbole w jednym wywołaniu i nie powtarzaj zbędnych zapytań.
 

@@ -15,6 +15,8 @@
 
 ## 1. Pobieranie danych
 
+**Najpierw `market_view`** (asset, interval, bars): łączy poniższe serie w jedną tabelę i liczy wskaźniki z sekcji 2, 3 i 5 (warunki 1, 2, 3, 5). Poniższy zestaw zapytań jest potrzebny tylko do tego, czego tam nie ma.
+
 **Symbole.** `coinalyze_future_markets(base_asset="XRP")` zwraca symbole. Punkt odniesienia: kontrakt USDT perpetual na Binance (`<ASSET>USDT_PERP.A`, np. `BTCUSDT_PERP.A`). Kody innych giełd: `coinalyze_exchanges`. Dla obrazu całego rynku można sumować OI i likwidacje z kilku giełd (`aggregate=true`), ale wtedy podaj, które giełdy weszły do sumy.
 
 **Czas.** Znaczniki `t` to UNIX w sekundach UTC (początek interwału). Ostatnia świeca jest zwykle niedomknięta. Przelicz godziny na czas użytkownika, gdy opisujesz wydarzenia (np. publikację danych makro).
@@ -76,6 +78,8 @@ Wybierz jedną fazę i uzasadnij dwoma-trzema wskaźnikami. Jeśli sygnały są 
 ## 5. Ryzyko squeeze (punktacja)
 
 Policz osobno dla **long squeeze** i **short squeeze**. Każdy spełniony warunek to 1 punkt, razem max 6. Interpretacja: 0-1 niskie, 2-3 umiarkowane, 4-6 wysokie. To heurystyka z małej próby - zapisz, które punkty zaliczone.
+
+Warunki 1, 2, 3 i 5 liczy `market_view` (linia faktów „squeeze conditions met”), z progami z `src/present/thresholds.ts`: funding od 80. percentyla okna (krótko: od 20. w dół), OI w granicach 2% maksimum okna, long/short 5% powyżej (poniżej) mediany okna, udział kupujących takerów poniżej 0,48. Ty oceniasz tylko 4 i 6, które wymagają oceny wykresu, i podajesz łączny wynik z 6.
 
 **Long squeeze (kaskada likwidacji longów)**
 1. Funding w górnych 20% rozkładu 30 dni lub rosnący razem z OI
