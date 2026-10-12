@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { appendFileSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdtempSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { acquireLock, handledSlots, readLedger, recordSlot } from "./state.ts";
@@ -64,5 +64,46 @@ test("a stale lock is replaced", () => {
     const old = new Date(now - 20 * 60_000);
     utimesSync(join(dir, "tick.lock"), old, old);
     assert.ok(acquireLock(dir, now, 15 * 60_000));
+  });
+});
+
+test("release by an owner whose lock was replaced keeps the new holder's lock", () => {
+  withDir((dir) => {
+    const now = Date.now();
+    const releaseA = acquireLock(dir, now, 15 * 60_000);
+    assert.ok(releaseA);
+    const old = new Date(now - 20 * 60_000);
+    utimesSync(join(dir, "tick.lock"), old, old);
+    const releaseB = acquireLock(dir, now, 15 * 60_000);
+    assert.ok(releaseB);
+    releaseA();
+    assert.ok(existsSync(join(dir, "tick.lock")));
+    assert.equal(acquireLock(dir, now, 15 * 60_000), undefined);
+    releaseB();
+    assert.ok(!existsSync(join(dir, "tick.lock")));
+    assert.deepEqual(readdirSync(dir), []);
+  });
+});
+
+test("releasing twice is harmless", () => {
+  withDir((dir) => {
+    const now = Date.now();
+    const release = acquireLock(dir, now, 1000);
+    assert.ok(release);
+    release();
+    const second = acquireLock(dir, now, 1000);
+    assert.ok(second);
+    release();
+    assert.ok(existsSync(join(dir, "tick.lock")));
+  });
+});
+
+test("a lock exactly at the stale boundary is not replaced", () => {
+  withDir((dir) => {
+    const now = 2_000_000_000_000;
+    writeFileSync(join(dir, "tick.lock"), "x");
+    const t = new Date(now - 15 * 60_000);
+    utimesSync(join(dir, "tick.lock"), t, t);
+    assert.equal(acquireLock(dir, now, 15 * 60_000), undefined);
   });
 });
