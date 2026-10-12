@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { describe, test } from "node:test";
 import { BotStore } from "../bot/bot-store.ts";
 import { loadConfig } from "../bot/config.ts";
+import { effectivePolicy } from "../bot/policy.ts";
 import { T0, config as baseConfig } from "../bot/sim-fixtures.ts";
 import { MIN, iso } from "../bot/trader-fixtures.ts";
 import type { Bet, ReportMeta } from "../speculation/types.ts";
@@ -83,6 +84,24 @@ describe("handoff", () => {
     assert.equal(r.status, "failed");
     assert.match(r.detail, /check/);
   });
+
+  // A tick that crashes after the handoff but before the ledger write hands the same bet off again.
+  for (const laterMin of [0, 5]) {
+    test(`a repeated handoff of the same bet (${laterMin} min later) leaves the effective policy unchanged`, () => {
+      const store = new BotStore(":memory:");
+      const n = config.loosen_confirm_cycles;
+      const effective = () => effectivePolicy(store.latestPolicies(n).map((p) => p.policy), n);
+      const first = handoff(store, config, meta([bet()]), T0, "r.meta.json");
+      assert.equal(first.status, "handed_off");
+      const before = effective();
+      assert.ok(before);
+      const second = handoff(store, config, meta([bet()]), T0 + laterMin * MIN, "r.meta.json");
+      assert.equal(second.status, "handed_off", second.detail);
+      assert.doesNotMatch(second.detail, /already exists/);
+      assert.equal(store.latestPolicies(100).length, 2 * n);
+      assert.deepEqual(effective(), before);
+    });
+  }
 
   test("no validated bets is no_bet", () => {
     assert.equal(handoff(new BotStore(":memory:"), config, meta([]), T0, "s").status, "no_bet");

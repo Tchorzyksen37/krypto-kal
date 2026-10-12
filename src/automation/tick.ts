@@ -2,7 +2,7 @@
 // report with `claude`, check it, hand the best bet to the dry-run bot and record the outcome in the ledger.
 // Never throws: every failure is recorded as `failed` and alerted, so a later tick retries within the cutoff.
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import type { ReportMeta } from "../speculation/types.ts";
 import type { HandoffResult } from "./handoff.ts";
@@ -56,7 +56,13 @@ export async function tick(d: TickDeps): Promise<TickResult> {
   try {
     release = acquireLock(d.stateDir, d.nowMs, d.timeoutMs + 60_000);
   } catch (e) {
-    return { status: "busy", detail: `lock error: ${message(e)}` };
+    const detail = `lock error: ${message(e)}`;
+    try {
+      await d.alert("automation_generate_failed", detail);
+    } catch {
+      // an alert sink failure must not break the tick
+    }
+    return { status: "busy", detail };
   }
   if (!release) return { status: "busy", detail: "another tick holds the lock" };
 
@@ -85,6 +91,14 @@ export async function tick(d: TickDeps): Promise<TickResult> {
     let meta = readMeta(metaPath);
     if (!isValidated(meta)) {
       // A validated meta means a crash after the check: go straight to the handoff.
+      // An unvalidated one is left over from a failed attempt; remove it so it cannot pass as this run's.
+      if (existsSync(metaPath)) {
+        try {
+          unlinkSync(metaPath);
+        } catch (e) {
+          return await fail("automation_generate_failed", `cannot remove the stale meta ${metaPath}: ${message(e)}`);
+        }
+      }
       let run;
       try {
         run = await d.runner(speculatePrompt(due), claudeArgs(d.brainDir), d.timeoutMs);

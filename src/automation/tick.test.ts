@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ReportMeta } from "../speculation/types.ts";
@@ -225,6 +225,92 @@ test("a throwing alert does not make the tick throw", async () => {
     const r = await tick(h.deps);
     assert.equal(r.status, "failed");
     assert.equal(existsSync(join(h.stateDir, "tick.lock")), false);
+  });
+});
+
+test("a stale unvalidated meta does not pass as this run's report", async () => {
+  await withHarness(async (h) => {
+    writeMeta(h.metaPath, false);
+    h.deps.runner = async (prompt) => {
+      h.prompts.push(prompt);
+      return OK_RUN;
+    };
+    const r = await tick(h.deps);
+    assert.equal(r.status, "failed");
+    assert.equal(h.prompts.length, 1);
+    assert.deepEqual(h.alerts.map((a) => a.kind), ["automation_generate_failed"]);
+    assert.equal(h.checks.length, 0);
+    assert.equal(h.handoffs.length, 0);
+  });
+});
+
+test("a stale unvalidated meta is replaced by the run's new one", async () => {
+  await withHarness(async (h) => {
+    mkdirSync(join(h.metaPath, ".."), { recursive: true });
+    writeFileSync(h.metaPath, JSON.stringify({ bets: [], marker: "old" }));
+    h.deps.runner = async () => {
+      writeFileSync(h.metaPath, JSON.stringify({ bets: [], marker: "new" }), { flag: "wx" });
+      return OK_RUN;
+    };
+    let seen: unknown;
+    h.deps.check = async (path) => {
+      seen = JSON.parse(readFileSync(path, "utf8")).marker;
+      writeFileSync(path, JSON.stringify({ bets: [], marker: "new", validated: [] }));
+    };
+    const r = await tick(h.deps);
+    assert.equal(r.status, "handed_off");
+    assert.equal(seen, "new");
+  });
+});
+
+test("a throwing handoff fails the slot, alerts and releases the lock", async () => {
+  await withHarness(async (h) => {
+    h.deps.handoff = () => {
+      throw new Error("handoff exploded");
+    };
+    const r = await tick(h.deps);
+    assert.equal(r.status, "failed");
+    assert.equal(latest(h.stateDir, SLOT.id)?.status, "failed");
+    assert.deepEqual(h.alerts.map((a) => a.kind), ["automation_handoff_failed"]);
+    assert.match(h.alerts[0]!.detail, /handoff exploded/);
+    assert.equal(existsSync(join(h.stateDir, "tick.lock")), false);
+  });
+});
+
+test("a ledger write failure after a successful handoff does not throw", async () => {
+  await withHarness(async (h) => {
+    const ledger = join(h.stateDir, "ledger.jsonl");
+    h.deps.handoff = (meta, nowMs, source) => {
+      h.handoffs.push({ meta, nowMs, source });
+      rmSync(ledger, { force: true });
+      mkdirSync(ledger); // appending to a directory fails
+      return { status: "handed_off", betId: "b1", detail: "stored" };
+    };
+    const r = await tick(h.deps);
+    assert.equal(r.status, "failed");
+    assert.equal(h.handoffs.length, 1);
+    assert.deepEqual(h.alerts.map((a) => a.kind), ["automation_handoff_failed"]);
+    assert.equal(existsSync(join(h.stateDir, "tick.lock")), false);
+  });
+});
+
+test("a lock error is alerted and the tick does not run", async () => {
+  await withHarness(async (h) => {
+    mkdirSync(join(h.stateDir, ".."), { recursive: true });
+    writeFileSync(h.stateDir, "not a dir");
+    const r = await tick(h.deps);
+    assert.equal(r.status, "busy");
+    assert.equal(h.prompts.length, 0);
+    assert.deepEqual(h.alerts.map((a) => a.kind), ["automation_generate_failed"]);
+  });
+});
+
+test("a current slot past its entry cutoff is nothing_due", async () => {
+  await withHarness(async (h) => {
+    h.deps.nowMs = SLOT.entryCutoffMs;
+    const r = await tick(h.deps);
+    assert.equal(r.status, "nothing_due");
+    assert.equal(h.prompts.length, 0);
   });
 });
 
