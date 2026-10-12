@@ -153,6 +153,32 @@ export interface FuturesFill {
   realized_pnl?: number | null;
 }
 
+// One entry of the account log (GET /api/history/v3/account-log): every booking on the account, including trades
+// (realized PnL and fee), funding, liquidations, transfers and conversions. Typed from Kraken's docs and not yet
+// checked against a real account, so every field is optional and amounts may come as null.
+export interface FuturesAccountLogEntry {
+  id: number;
+  date: string; // ISO
+  info: string; // "futures trade", "funding rate change", "futures liquidation", "transfer", "conversion", ...
+  asset?: string | null; // the balance this entry books against, e.g. "usd"
+  contract?: string | null; // e.g. "pf_xbtusd"
+  margin_account?: string | null;
+  booking_uid?: string | null;
+  execution?: string | null;
+  old_balance?: number | null;
+  new_balance?: number | null;
+  realized_pnl?: number | null;
+  fee?: number | null;
+  realized_funding?: number | null;
+  funding_rate?: number | null;
+  liquidation_fee?: number | null;
+  trade_price?: number | null;
+  mark_price?: number | null;
+  old_average_entry_price?: number | null;
+  new_average_entry_price?: number | null;
+  collateral?: string | null;
+}
+
 // The multi-collateral ("flex") margin account, which is what PF_ contracts trade against.
 // Fields are optional because their schema has not been checked against a real account yet.
 export interface FuturesFlexAccount {
@@ -343,6 +369,12 @@ export class KrakenFuturesClient {
   }
 
   // The 100 most recent fills, or the 100 before `lastFillTime` (ISO 8601).
+  // Account log entries in id order. `from` is the first id to return (inclusive); `count` the page size.
+  async accountLog(p: { from?: number; count?: number; sort?: "asc" | "desc" } = {}): Promise<FuturesAccountLogEntry[]> {
+    const params = stringify({ from: p.from, count: p.count ?? 500, sort: p.sort ?? "asc" });
+    return (await this.private<{ logs?: FuturesAccountLogEntry[] }>("GET", "/api/history/v3/account-log", params, 2)).logs ?? [];
+  }
+
   async fills(lastFillTime?: string): Promise<FuturesFill[]> {
     return (await this.private<{ fills: FuturesFill[] }>("GET", "/fills", stringify({ lastFillTime }), 2)).fills;
   }
@@ -433,7 +465,8 @@ export class KrakenFuturesClient {
     }
     const apiKey = this.apiKey;
     const apiSecret = this.apiSecret;
-    const fullPath = API_PREFIX + path;
+    // The history API lives outside /derivatives/api/v3 and is signed with its own path.
+    const fullPath = path.startsWith("/api/") ? path : API_PREFIX + path;
 
     const attempt = () =>
       this.limiter.run(cost, () => {

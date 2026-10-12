@@ -22,6 +22,7 @@ There is no database server. Persistent state is split between two kinds of stor
 |---|---|---|---|---|
 | `cache.db` | `~/.krypto-kal/cache.db` | `CACHE_DB_PATH` | MCP server (`HistoryStore`, `TradeStore`); the speculation scorer CLI (`TradeStore`) | the same |
 | `bot.db` | `~/.krypto-kal/bot.db` | `db_path` in the bot config (`BOT_CONFIG`) | bot trader and watchdog processes, bot CLI | MCP tool `bot_status` |
+| Account log, FX rates | `cache.db` tables `futures_account_log`, `fx_rates` | `CACHE_DB_PATH` | the results page (`npm run dashboard`, `AccountLogStore`) | the results page |
 | Run statistics log | `~/.krypto-kal/tool-stats.jsonl` | `STATS_LOG_PATH`, off with `STATS_LOG=false` | MCP server (`runStats`, append-only JSON lines) | `server_stats` (in-memory copy), `node src/core/run-stats.ts` |
 | Vault state files | `<BRAIN_DIR>/.*.json` | `BRAIN_DIR` | X sync, triage (`brain_ingest_mark`) | X sync, triage |
 | Vault speculation logs | `<BRAIN_DIR>/output/speculation/` | `BRAIN_DIR` | speculation checker and scorer | scorer, `speculation-to-bot`, Claude skills |
@@ -107,6 +108,35 @@ Source: [diagrams/cache-history.puml](diagrams/cache-history.puml)
 | `save(key, range, points)` | `INSERT OR REPLACE` points, `DELETE` + `INSERT` merged coverage, one transaction | `cachedSeries`, collector |
 | `hasPointsBefore(key, t)` | `SELECT 1 ... AND t < ? LIMIT 1` | Yahoo split check |
 | `deleteSeries(kind, symbol)` | two `DELETE`s, one transaction | Yahoo split handling |
+
+### 3.3 Kraken Futures account log and FX rates (`AccountLogStore`)
+
+Behind the results page (`npm run dashboard`), in the same `cache.db` (`src/trading/account-log.ts`).
+
+```sql
+CREATE TABLE futures_account_log (
+  id       INTEGER PRIMARY KEY,  -- Kraken's account-log entry id (increasing)
+  t_ms     INTEGER NOT NULL,     -- entry time, epoch ms
+  info     TEXT    NOT NULL,     -- "futures trade", "funding rate change", "futures liquidation", "transfer", ...
+  asset    TEXT,                 -- the balance booked against, e.g. "usd"
+  contract TEXT,                 -- e.g. "pf_xrpusd"
+  data     TEXT    NOT NULL      -- the whole entry as JSON (realized_pnl, fee, realized_funding, balances, ...)
+);
+CREATE INDEX futures_account_log_t ON futures_account_log (t_ms);
+
+CREATE TABLE fx_rates (
+  pair TEXT NOT NULL,            -- Yahoo symbol, e.g. "USDPLN=X"
+  t_ms INTEGER NOT NULL,         -- time of the quote's last price
+  rate REAL NOT NULL,
+  PRIMARY KEY (pair, t_ms)
+) WITHOUT ROWID;
+```
+
+- `futures_account_log` is append-only (`INSERT OR IGNORE` on `id`). The sync asks for entries from the newest stored id
+  plus one, ascending, 500 per page; the first run walks the whole history.
+- The raw JSON is kept because the fields are typed from Kraken's docs and not yet checked against a real account:
+  a different reading of a field only needs a new computation, not a new download.
+- Results are computed on every page load from all entries (`account-stats.ts`); nothing derived is stored.
 
 ### 3.2 Kraken Futures fills and trades (`TradeStore`)
 
