@@ -1,6 +1,6 @@
 ---
 name: speculate
-description: Session-based speculation report for crypto futures (BTC, ETH, XRP plus screened symbols), four times a day (Europe open, Europe/US overlap, US, Asian night). Builds a KNOWN / UNKNOWN / POSSIBLE prompt from the krypto-kal MCP tools, takes the session's regions and investor profiles into account, states an overall LONG / SHORT / NEUTRAL bias, and writes scenarios plus best bets (entry, SL, TP, TTL), catalysts and risks to the Obsidian vault under output/speculation/. Use when the scheduled routine fires, or when the user says speculate, "next session", "best bets", or asks for a speculation report. Horizon is one session (hours). Not for the multi-day market regime and macro briefing (crypto-market-sentiment), not for positions the user already holds (position-review), not for verifying a headline against the price (social-check-before-trade), not for updating the wiki (brain-ingest).
+description: Session-based speculation report for crypto futures (BTC, ETH, XRP plus screened symbols), every 2 hours on an automated UTC grid, or per session when run by hand (Europe open, Europe/US overlap, US, Asian night). Builds a KNOWN / UNKNOWN / POSSIBLE prompt from the krypto-kal MCP tools, takes the session's regions and investor profiles into account, states an overall LONG / SHORT / NEUTRAL bias, and writes scenarios plus best bets (entry, SL, TP, TTL), catalysts and risks to the Obsidian vault under output/speculation/. Use when the scheduled routine fires, or when the user says speculate, "next session", "best bets", or asks for a speculation report. Horizon is one session (hours). Not for the multi-day market regime and macro briefing (crypto-market-sentiment), not for positions the user already holds (position-review), not for verifying a headline against the price (social-check-before-trade), not for updating the wiki (brain-ingest).
 ---
 
 # Speculate
@@ -10,8 +10,28 @@ known, what is unknown and what is possible. It is not analysis of history and n
 and opens positions by hand (limit entries: wait for the touch). Design and rationale:
 `docs/superpowers/plans/2026-10-03-speculation-mode.md`.
 
-Schedule (local time Europe/Warsaw, routine fires 20 min before each window): 07:40 Europe open
-(08:00-12:00), 13:10 Europe/US overlap (13:30-17:30), 17:10 US (17:30-22:00), 21:40 Night/Asia (22:00-08:00).
+Schedule: the automated schedule is a 2-hour grid on even UTC hours (00:00Z, 02:00Z ... 22:00Z), run by
+`npm run auto -- tick` (Windows Task Scheduler). Each automated report covers exactly one such slot. A manual
+`/speculate` (no slot in the prompt) still reports on the running session: Europe open (08:00-12:00 Warsaw),
+Europe/US overlap (13:30-17:30), US (17:30-22:00), Night/Asia (22:00-08:00).
+
+## Slot mode
+
+The automation's prompt has this form: `Run the speculate skill for the 2-hour slot <id>: window start <ISO>,
+window end <ISO>, session <id>. Use exactly this window as the report's window and file name HHMMZ=<HHMM>Z. Do not
+offer to hand bets to the bot.` When the prompt names `window start`, `window end` and `session`, the run is in slot
+mode, otherwise it is a normal session run. In slot mode:
+
+- `window` in the meta is exactly `[window start, window end]` from the prompt (ISO UTC), not the session's
+  `startUtc` / `endUtc`. `session` in the meta is the `session <id>` from the prompt; the checker takes the session
+  limits from `meta.session`. Use that session's profile (regions, investors, cautions) from `speculation_context`
+  for the weighing, but its own window is ignored.
+- The report covers **only the 2-hour window**: scenarios, catalysts, risks and bets must fit inside it. The checker
+  caps each bet's `entry_deadline` at the window end, so a bet's fill window ends at the slot end; choose entries
+  that can plausibly be touched within the slot, and keep `ttl_minutes` short.
+- Files are named by the slot start: folder `YYYY-MM-DD` is the UTC date of the window start, `HHMMZ` is the window
+  start in UTC (the `HHMMZ=<HHMM>Z` of the prompt), for both `.md` and `.meta.json`.
+- Step 10: do not offer to hand bets to the bot; the automation does it.
 
 ## Hard rules
 
@@ -33,7 +53,9 @@ Schedule (local time Europe/Warsaw, routine fires 20 min before each window): 07
 
 ## Procedure
 
-1. **Measured inputs: one call to `speculation_context`.** It returns, all measured by code:
+1. **Measured inputs: one call to `speculation_context`.** The tool has no session or window parameter and
+   returns the running session; in slot mode use the prompt's session id and window instead of the ones it returns
+   (the symbols, measurements and `metaSymbols` are unaffected). It returns, all measured by code:
    - `session`: the session to report on (UTC and local window, limits, typical behaviour, what to watch,
      cautions, regions, investor types);
    - `symbols`: core BTC, ETH, XRP plus up to `SPECULATION_SCREEN_EXTRA` screened extras (`why` says why), each
@@ -147,7 +169,7 @@ Schedule (local time Europe/Warsaw, routine fires 20 min before each window): 07
      A breakout entry is not supported; express it as a pullback limit instead.
    **Night session:** the window is 10 hours, so each bet names the phase it targets (US wind-down, Asia open,
    HK/China open, Europe pre-open); prefer few, high reward:risk, limit-at-range-edge bets, wide stops.
-8. **Write the report** to `BRAIN/output/speculation/YYYY-MM-DD/HHMMZ.md` (HHMM = window start in UTC); the KNOWN
+8. **Write the report** to `BRAIN/output/speculation/YYYY-MM-DD/HHMMZ.md` (HHMM = window start in UTC; in slot mode the slot start); the KNOWN
    digest carries an "Opening and positioning base rates" line per core symbol (with `days` / `events`), with
    frontmatter (`type: speculation`, `session`, `generated`, `valid_until`, `symbols`, `sources_failed`), a
    disclaimer callout, then in order: **Direction** (bias) and session profile, **Who is trading** (regions,
@@ -157,7 +179,7 @@ Schedule (local time Europe/Warsaw, routine fires 20 min before each window): 07
    with probability and unicode bar), catalysts
    (time-ordered table), risks, KNOWN / UNKNOWN / POSSIBLE digest (ESTIMATE labels visible), track record
    (rolling scorecard line), then **Best bets** last. Write `HHMMZ.meta.json` next to it: `session`,
-   `generated`, `window` (`session.startUtc` / `session.endUtc` from step 1), `bias {direction, probability,
+   `generated`, `window` (`session.startUtc` / `session.endUtc` from step 1; in slot mode `[window start, window end]` from the prompt), `bias {direction, probability,
    summary}`, `symbols` (the `metaSymbols` rows from step 1, plus `bias` per symbol), `bets`, and `macro`: the
    snapshot of the drivers at report time (`measuredAt`, `nq`, `es`, `tnx`, `fvx`, `tyx`, `dxy`, `eurusd`, `usdjpy`,
    `gbpusd`, `cl`, `bz`; null for a stale or missing quote) so the next report can state what changed; `drivers`:
@@ -173,4 +195,5 @@ Schedule (local time Europe/Warsaw, routine fires 20 min before each window): 07
    rewrites the Best bets block. Do not hand-format those. On a script error, fix the files once and rerun. On
    a second failure, keep the KNOWN / UNKNOWN summary and add a "generation failed" banner.
 10. **Reply** in three lines: bias, top bet (or "no bet") with levels, report path. If the top bet is on the bot's
-    symbol, add one line offering to hand it to the dry-run bot (skill `speculation-to-bot`).
+    symbol, add one line offering to hand it to the dry-run bot (skill `speculation-to-bot`). In slot mode skip that
+    offer.
