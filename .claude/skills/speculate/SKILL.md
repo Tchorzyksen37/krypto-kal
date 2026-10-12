@@ -23,14 +23,26 @@ offer to hand bets to the bot.` When the prompt names `window start`, `window en
 mode, otherwise it is a normal session run. In slot mode:
 
 - `window` in the meta is exactly `[window start, window end]` from the prompt (ISO UTC), not the session's
-  `startUtc` / `endUtc`. `session` in the meta is the `session <id>` from the prompt; the checker takes the session
-  limits from `meta.session`. Use that session's profile (regions, investors, cautions) from `speculation_context`
-  for the weighing, but its own window is ignored.
+  `startUtc` / `endUtc`. `session` in the meta is ALWAYS the `session <id>` from the prompt; the checker takes the
+  session limits from `meta.session`.
+- **Profile source.** `speculation_context` describes the RUNNING session, which can differ from the slot's session
+  near a session boundary and on late or catch-up runs. Compare `session.id` from the tool with the prompt's session.
+  Equal: use the tool's session block (profile, regions, investors, watch, caution) as it is. Different: take profile,
+  regions, investors, watch and caution NOT from the tool but from `node src/speculation/sessions.ts <window start
+  ISO>` (its output has limits, regions, investors, profile, watch and caution of the session it picks at that
+  instant; for an even-UTC-hour slot start it picks the slot's session with the default 20-minute lead, because session
+  starts fall on :00 or :30 UTC and none lies in the 20 minutes after an even hour; a larger
+  `SPECULATION_LEAD_MINUTES` could make it pick the next session). In that case state under KNOWN / UNKNOWN that the
+  tool's session block described a different session, and that the `volume` share line is for the tool's session.
+- **Time references.** Everywhere this file says "the session to report on", "this session", "the window start" or
+  "since window start" (steps 1, 2, 3, 6, 7, 8), in slot mode it means the prompt's window: "this session so far" is
+  measured from the slot start, and the window is the 2-hour slot.
 - The report covers **only the 2-hour window**: scenarios, catalysts, risks and bets must fit inside it. The checker
   caps each bet's `entry_deadline` at the window end, so a bet's fill window ends at the slot end; choose entries
   that can plausibly be touched within the slot, and keep `ttl_minutes` short.
 - Files are named by the slot start: folder `YYYY-MM-DD` is the UTC date of the window start, `HHMMZ` is the window
-  start in UTC (the `HHMMZ=<HHMM>Z` of the prompt), for both `.md` and `.meta.json`.
+  start in UTC (the `HHMMZ=<HHMM>Z` of the prompt), for both `.md` and `.meta.json`. Example: a slot starting
+  `2026-10-12T10:00:00.000Z` writes `2026-10-12/1000Z.md` and `2026-10-12/1000Z.meta.json`.
 - Step 10: do not offer to hand bets to the bot; the automation does it.
 
 ## Hard rules
@@ -54,8 +66,7 @@ mode, otherwise it is a normal session run. In slot mode:
 ## Procedure
 
 1. **Measured inputs: one call to `speculation_context`.** The tool has no session or window parameter and
-   returns the running session; in slot mode use the prompt's session id and window instead of the ones it returns
-   (the symbols, measurements and `metaSymbols` are unaffected). It returns, all measured by code:
+   returns the running session; in slot mode see "Slot mode" (profile source and time references). It returns, all measured by code:
    - `session`: the session to report on (UTC and local window, limits, typical behaviour, what to watch,
      cautions, regions, investor types);
    - `symbols`: core BTC, ETH, XRP plus up to `SPECULATION_SCREEN_EXTRA` screened extras (`why` says why), each
@@ -167,9 +178,11 @@ mode, otherwise it is a normal session run. In slot mode:
    - round-trip fees cost more than 0.2R (stop too tight for the price, typical for BTC);
    - the limit is on the wrong side of the market: a long entry must be at or below `last`, a short at or above.
      A breakout entry is not supported; express it as a pullback limit instead.
-   **Night session:** the window is 10 hours, so each bet names the phase it targets (US wind-down, Asia open,
+   **Night session (manual runs only):** the window is 10 hours, so each bet names the phase it targets (US wind-down, Asia open,
    HK/China open, Europe pre-open); prefer few, high reward:risk, limit-at-range-edge bets, wide stops.
-8. **Write the report** to `BRAIN/output/speculation/YYYY-MM-DD/HHMMZ.md` (HHMM = window start in UTC; in slot mode the slot start); the KNOWN
+   In slot mode the window is 2 hours: a bet names the phase it targets only if that phase fits the slot, and
+   `ttl_minutes` stays short.
+8. **Write the report** to `BRAIN/output/speculation/YYYY-MM-DD/HHMMZ.md` (HHMM = window start in UTC; slot mode: see above); the KNOWN
    digest carries an "Opening and positioning base rates" line per core symbol (with `days` / `events`), with
    frontmatter (`type: speculation`, `session`, `generated`, `valid_until`, `symbols`, `sources_failed`), a
    disclaimer callout, then in order: **Direction** (bias) and session profile, **Who is trading** (regions,
@@ -179,7 +192,7 @@ mode, otherwise it is a normal session run. In slot mode:
    with probability and unicode bar), catalysts
    (time-ordered table), risks, KNOWN / UNKNOWN / POSSIBLE digest (ESTIMATE labels visible), track record
    (rolling scorecard line), then **Best bets** last. Write `HHMMZ.meta.json` next to it: `session`,
-   `generated`, `window` (`session.startUtc` / `session.endUtc` from step 1; in slot mode `[window start, window end]` from the prompt), `bias {direction, probability,
+   `generated`, `window` (`session.startUtc` / `session.endUtc` from step 1; slot mode: see above), `bias {direction, probability,
    summary}`, `symbols` (the `metaSymbols` rows from step 1, plus `bias` per symbol), `bets`, and `macro`: the
    snapshot of the drivers at report time (`measuredAt`, `nq`, `es`, `tnx`, `fvx`, `tyx`, `dxy`, `eurusd`, `usdjpy`,
    `gbpusd`, `cl`, `bz`; null for a stale or missing quote) so the next report can state what changed; `drivers`:
