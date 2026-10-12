@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node --env-file-if-exists=.env src/server/mcp-server.ts",
     "bot": "node --env-file-if-exists=.env src/bot/cli.ts",
-    "dashboard": "node --env-file-if-exists=.env src/dashboard/server.ts",
+    "auto": "node --env-file-if-exists=.env src/automation/cli.ts",
+    "dashboard":"node --env-file-if-exists=.env src/dashboard/server.ts",
     "test": "node --env-file-if-exists=.env --test \"src/**/*.test.ts\" \"test/e2e/*.test.ts\"",
     "test:offline": "node --test \"src/**/*.test.ts\"",
     "test:e2e": "node --env-file-if-exists=.env --test \"test/e2e/*.test.ts\"",
