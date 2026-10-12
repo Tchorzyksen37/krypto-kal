@@ -56,7 +56,7 @@ describe("Coinalyze", { skip: !process.env.COINALYZE_API_KEY && "COINALYZE_API_K
 
     for (const [name, fields] of Object.entries(HISTORY_TOOLS)) {
       test(name, async () => {
-        const data = (await call(ctx, name, { symbols: symbols.slice(0, 1), interval: "4hour", limit: 3 })) as {
+        const data = (await call(ctx, name, { symbols: symbols.slice(0, 1), interval: "4hour", limit: 3, format: "raw" })) as {
           symbol: string;
           history: unknown;
         }[];
@@ -82,7 +82,7 @@ describe("Coinalyze", { skip: !process.env.COINALYZE_API_KEY && "COINALYZE_API_K
 
     test("coinalyze_open_interest_history (aggregate)", async () => {
       const data = (await call(ctx, "coinalyze_open_interest_history", {
-        symbols, interval: "4hour", limit: 3, aggregate: true,
+        symbols, interval: "4hour", limit: 3, aggregate: true, format: "raw",
       })) as { symbols: string[]; points: unknown };
       assert.deepEqual(data.symbols.sort(), [...symbols].sort());
       assertPoints(data.points, ["c", "n"], "t");

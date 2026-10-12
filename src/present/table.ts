@@ -58,6 +58,24 @@ export function findGaps(times: number[], stepSec: number): Gap[] {
   return gaps;
 }
 
+// Exchange-hours series: the breaks are counted and the longest named, but not called missing data.
+function breakLine(gaps: Gap[], stepSec: number): string {
+  if (!gaps.length) return "breaks: none";
+  const longest = [...gaps].sort((a, b) => b.bars - a.bars || a.from - b.from)[0]!;
+  return `breaks: ${gaps.length} (market closed: nights, weekends, holidays; no exchange calendar is applied, so a halt or missing data looks the same); the longest ${duration((longest.bars) * stepSec)} from ${isoMinute(longest.from)}`;
+}
+
+// 2d 3h, 5h 20m, 45m: a duration in words, coarse on purpose.
+export function duration(sec: number): string {
+  const s = Math.max(0, Math.round(sec));
+  const d = Math.floor(s / 86_400);
+  const h = Math.floor((s % 86_400) / 3_600);
+  const m = Math.floor((s % 3_600) / 60);
+  if (d) return h ? `${d}d ${h}h` : `${d}d`;
+  if (h) return m ? `${h}h ${m}m` : `${h}h`;
+  return `${m}m`;
+}
+
 function gapLine(gaps: Gap[]): string {
   if (!gaps.length) return "gaps: none";
   const total = gaps.reduce((n, g) => n + g.bars, 0);
@@ -110,10 +128,12 @@ export function renderSeries<P extends { t: number }>(spec: SeriesSpec<P>, point
   const last = sorted[sorted.length - 1]!.t;
   const lines = [`${head}: ${sorted.length} bar${sorted.length === 1 ? "" : "s"}, ${isoMinute(first)} .. ${isoMinute(last)} (bar start times, UTC)`];
   const open = last + step > meta.asOfSec;
-  lines.push(`as of ${isoMinute(meta.asOfSec)}; ${open ? `last bar ${isoMinute(last)} is still open (its values will change)` : "all bars closed"}`);
+  const age = meta.asOfSec - (last + step);
+  const stale = !open && age > 2 * step ? `; the newest bar ended ${duration(age)} before as of` : "";
+  lines.push(`as of ${isoMinute(meta.asOfSec)}; ${open ? `last bar ${isoMinute(last)} is still open (its values will change)` : `all bars closed${stale}`}`);
   lines.push(`units: ${spec.units.join("; ")}`);
   if (meta.notes) lines.push(...meta.notes);
-  lines.push(gapLine(gaps));
+  lines.push(spec.gaps === "breaks" ? breakLine(gaps, step) : gapLine(gaps));
   const summary = summaryLine(spec, sorted, byName, columns);
   if (summary) lines.push(summary);
   if (meta.facts?.length) lines.push("facts:", ...meta.facts.map((f) => `- ${f}`));

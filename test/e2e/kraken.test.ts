@@ -27,9 +27,15 @@ describe("Kraken", { skip: process.env.KRAKEN_ENABLED === "false" && "KRAKEN_ENA
     });
 
     test("kraken_ohlc returns `limit` candles", async () => {
-      const data = (await call(ctx, "kraken_ohlc", { pair: "XBTUSD", interval: "60", limit: 5 })) as { candles: unknown[] };
+      const data = (await call(ctx, "kraken_ohlc", { pair: "XBTUSD", interval: "60", limit: 5, format: "raw" })) as { candles: unknown[] };
       assert.equal(data.candles.length, 5);
       assertPoints(data.candles, ["o", "h", "l", "c", "v"], "t");
+    });
+
+    test("kraken_ohlc as a table with volume-weighted vwap", async () => {
+      const text = await callText(ctx, "kraken_ohlc", { pair: "XBTUSD", interval: "60", limit: 5 });
+      assert.match(text, /^kraken_ohlc \S+ 1h \(Kraken spot OHLC\): 5 bars, /);
+      assertTable(text, ["open", "close", "volume", "trades", "vwap"], 5);
     });
 
     test("kraken_order_book", async () => {
@@ -46,7 +52,7 @@ describe("Kraken", { skip: process.env.KRAKEN_ENABLED === "false" && "KRAKEN_ENA
 
   describe("futures market data (public)", { skip: process.env.KRAKEN_FUTURES_ENABLED === "false" && "KRAKEN_FUTURES_ENABLED=false" }, () => {
     test("kraken_futures_candles returns `limit` candles of a perpetual", async () => {
-      const data = (await call(ctx, "kraken_futures_candles", { symbol: "PF_XBTUSD", resolution: "1m", limit: 5 })) as { candles: unknown[] };
+      const data = (await call(ctx, "kraken_futures_candles", { symbol: "PF_XBTUSD", resolution: "1m", limit: 5, format: "raw" })) as { candles: unknown[] };
       assert.equal(data.candles.length, 5);
       assertPoints(data.candles, ["o", "h", "l", "c", "v"], "t");
     });
@@ -61,7 +67,7 @@ describe("Kraken", { skip: process.env.KRAKEN_ENABLED === "false" && "KRAKEN_ENA
       const to = new Date(Date.now() - 3 * 86_400_000);
       const from = new Date(to.getTime() - 30 * 60_000);
       const data = (await call(ctx, "kraken_futures_candles", {
-        symbol: "PF_XBTUSD", resolution: "1m", from: from.toISOString(), to: to.toISOString(), limit: 2000,
+        symbol: "PF_XBTUSD", resolution: "1m", from: from.toISOString(), to: to.toISOString(), limit: 2000, format: "raw",
       })) as { candles: { t: number }[] };
       assert.ok(data.candles.length >= 25 && data.candles.length <= 31, String(data.candles.length));
       assert.ok(data.candles.every((c) => c.t * 1000 >= from.getTime() - 60_000 && c.t * 1000 <= to.getTime()));

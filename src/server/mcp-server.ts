@@ -45,6 +45,8 @@ import { renderSnapshot, runStats, statsLogPathFromEnv } from "../core/run-stats
 import { PresentedText, renderSeriesList } from "../present/table.ts";
 import type { SeriesSpec } from "../present/units.ts";
 import { renderMarketView } from "../present/market-view.ts";
+import { renderFills, renderPnl, renderPosts, renderQuotes } from "../present/records.ts";
+import { KRAKEN_SPOT_OHLC, YAHOO_BARS } from "../present/units.ts";
 import { fundingPct8h, futuresOf } from "../speculation/market.ts";
 import {
   AGGREGATE_LIQUIDATIONS, AGGREGATE_OPEN_INTEREST, COINALYZE_LONG_SHORT, COINALYZE_OHLCV, KRAKEN_FUTURES_CANDLES,
@@ -213,8 +215,8 @@ const czSymbols = z
 const presentParams = {
   format: z
     .enum(["raw", "table"])
-    .default("raw")
-    .describe('"raw": JSON points as returned by the provider. "table": header (window, open bar, units, gaps, summary) + CSV, one row per bar, rounded per field, ISO UTC times'),
+    .default("table")
+    .describe('"table" (default): header (window, open bar, units, gaps, summary) + CSV, one row per bar, rounded per field, ISO UTC times. "raw": JSON points exactly as the provider returned them'),
   max_rows: z
     .number().int().min(10).max(5000).optional()
     .describe('Only with format "table": row budget; the newest 48 bars stay native, older ones are resampled to a coarser interval'),
@@ -229,6 +231,14 @@ const czHistoryParams = {
     .describe("Number of intervals back from `to` (ignored when `from` is given)"),
   from: z.number().int().optional().describe("Range start, UNIX seconds"),
   to: z.number().int().optional().describe("Range end, UNIX seconds (default: now)"),
+};
+
+// Output format of the record tools (quotes, fills, PnL, posts): the same choice without a row budget.
+const recordFormat = {
+  format: z
+    .enum(["raw", "table"])
+    .default("table")
+    .describe('"table" (default): header (what, as of, freshness, units) + CSV or one line per item. "raw": the JSON as before'),
 };
 
 const czAggregate = z
@@ -547,9 +557,13 @@ function registerYahoo(server: McpServer, client: YahooClient) {
       description:
         "[Yahoo Finance] Current price, change vs previous close (absolute and %), day range, volume and " +
         "52-week range. One request per symbol.",
-      inputSchema: { symbols: yahooSymbols.max(20) },
+      inputSchema: { symbols: yahooSymbols.max(20), ...recordFormat },
     },
-    (args) => toResult("yahoo_quote", args, () => client.quotes(args.symbols)),
+    (args) =>
+      toResult("yahoo_quote", args, async () => {
+        const quotes = await client.quotes(args.symbols);
+        return args.format === "raw" ? quotes : renderQuotes(quotes, Math.floor(Date.now() / 1000));
+      }),
   );
 
   server.registerTool(
@@ -565,6 +579,7 @@ function registerYahoo(server: McpServer, client: YahooClient) {
         limit: z.number().int().positive().max(2000).default(100).describe("Number of most recent bars"),
         from: z.number().int().optional().describe("Range start, UNIX seconds (returns all bars in range)"),
         to: z.number().int().optional().describe("Range end, UNIX seconds (default: now)"),
+        ...presentParams,
       },
     },
     (args) =>
@@ -572,7 +587,8 @@ function registerYahoo(server: McpServer, client: YahooClient) {
         const { symbols, interval, limit } = args;
         const r = timeRange(YAHOO_INTERVAL_SECONDS[interval], args, YAHOO_GAP_FACTOR[interval]);
         const data = await client.history({ symbols, interval, ...r });
-        return args.from === undefined ? data.map((s) => ({ ...s, history: s.history.slice(-limit) })) : data;
+        const sliced = args.from === undefined ? data.map((s) => ({ ...s, history: s.history.slice(-limit) })) : data;
+        return args.format === "raw" ? sliced : present("yahoo_history", args, YAHOO_BARS, sliced, YAHOO_INTERVAL_SECONDS[interval]);
       }),
   );
 }
@@ -601,12 +617,15 @@ function registerKraken(server: McpServer, client: KrakenClient) {
           .enum(KRAKEN_OHLC_INTERVALS.map(String) as [string, ...string[]])
           .describe("Minutes: 1, 5, 15, 30, 60, 240, 1440 (1d), 10080 (1w), 21600 (15d)"),
         limit: z.number().int().min(1).max(720).default(100),
+        ...presentParams,
       },
     },
     (args) =>
       toResult("kraken_ohlc", args, async () => {
         const res = await client.ohlc(args.pair, Number(args.interval) as (typeof KRAKEN_OHLC_INTERVALS)[number]);
-        return { pair: res.pair, candles: res.candles.slice(-args.limit) };
+        const candles = res.candles.slice(-args.limit);
+        if (args.format === "raw") return { pair: res.pair, candles };
+        return present("kraken_ohlc", args, KRAKEN_SPOT_OHLC, [{ symbol: res.pair, history: candles }], Number(args.interval) * 60);
       }),
   );
 
@@ -723,13 +742,14 @@ function registerKrakenFutures(server: McpServer, client: KrakenFuturesClient, t
       description:
         "[Kraken Futures] Trade history: executed fills, newest first. Syncs new fills from Kraken into the local " +
         "database first, so it also works past the API's 100-fill window.",
-      inputSchema: { ...timeParams, limit: z.number().int().min(1).max(1000).default(100) },
+      inputSchema: { ...timeParams, limit: z.number().int().min(1).max(1000).default(100), ...recordFormat },
     },
     (args) =>
       toResult("kraken_futures_fills", args, async () => {
         const sync = await syncFills(client, trades);
-        const fills = trades.fills(filterOf(args), args.limit).map((f) => ({ ...f, time: isoTime(f.ts) }));
-        return { sync, fills };
+        const stored = trades.fills(filterOf(args), args.limit);
+        if (args.format === "table") return renderFills(sync, stored, Math.floor(Date.now() / 1000));
+        return { sync, fills: stored.map((f) => ({ ...f, time: isoTime(f.ts) })) };
       }),
   );
 
@@ -740,12 +760,15 @@ function registerKrakenFutures(server: McpServer, client: KrakenFuturesClient, t
         "[Kraken Futures] Realized profit/loss statistics from the trade history: totals, win rate, profit factor, " +
         "average win/loss, best/worst trade, max drawdown, hold time, per symbol and per UTC day, plus the most recent " +
         "closed trades. A trade is a position from flat to flat. Figures are gross of fees and funding. Syncs fills first.",
-      inputSchema: { ...timeParams, recent_trades: z.number().int().min(0).max(200).default(20) },
+      inputSchema: { ...timeParams, recent_trades: z.number().int().min(0).max(200).default(20), ...recordFormat },
     },
     (args) =>
       toResult("kraken_futures_pnl", args, async () => {
         const sync = await syncFills(client, trades);
         const closed = trades.trades(filterOf(args));
+        if (args.format === "table") {
+          return renderPnl(sync, pnlReport(closed), args.recent_trades ? closed.slice(-args.recent_trades).reverse() : [], Math.floor(Date.now() / 1000));
+        }
         return {
           sync,
           ...pnlReport(closed),
@@ -912,12 +935,15 @@ function registerBrain(server: McpServer) {
         author: z.string().optional().describe('Username, e.g. "Reuters"'),
         contains: z.string().optional().describe("Case-insensitive text filter"),
         limit: z.number().int().min(1).max(500).default(100),
+        max_chars: z.number().int().min(40).max(5000).default(280).describe('Only with format "table": text per post is cut at this length'),
+        ...recordFormat,
       },
     },
     (args) =>
-      toResult("x_recent", args, () =>
-        recentRawPosts(brain, { since: hours(args.hours), author: args.author, contains: args.contains, limit: args.limit }),
-      ),
+      toResult("x_recent", args, async () => {
+        const posts = await recentRawPosts(brain, { since: hours(args.hours), author: args.author, contains: args.contains, limit: args.limit });
+        return args.format === "raw" ? posts : renderPosts(posts, Math.floor(Date.now() / 1000), args.hours, args.max_chars);
+      }),
   );
 
   server.registerTool(

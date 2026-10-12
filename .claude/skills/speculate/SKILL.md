@@ -77,9 +77,9 @@ Schedule (local time Europe/Warsaw, routine fires 20 min before each window): 07
      three changes: against the **previous close**; **during this session so far** (`yahoo_history` 5m or 15m from
      the window start; before the window starts, since the Warsaw morning); and **since the previous speculation
      report** (read the `macro` snapshot in the latest earlier `*.meta.json` under `output/speculation/`; none =
-     say so). **Check each quote's time:** a quote from the last close (weekends, holidays, outside trading hours,
-     for example `^TNX` before the Cboe session) is stale. List it as "last close <day>", do not treat it as a
-     fresh signal, and do not let it drive the bias.
+     say so). **Check each quote's time:** `yahoo_quote` marks each row `fresh` or `stale (last price <day>)` (older
+     than 30 min: weekend, holiday, outside trading hours, for example `^TNX` before the Cboe session). List a stale
+     one as "last close <day>", do not treat it as a fresh signal, and do not let it drive the bias.
    - **AI and mega-cap earnings (a fifth driver, through Nasdaq).** Results, valuations (evaluations), guidance and
      quarterly targets of AI and mega-cap companies move Nasdaq and, through it, crypto: Nvidia, Microsoft,
      Alphabet, Meta, Amazon, Apple, Tesla, TSMC and the AI labs' funding or valuation headlines. Look up by web

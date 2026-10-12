@@ -36,6 +36,12 @@ describe("Second brain", () => {
     assert.ok(files.some((f) => f.path === "wiki/places/strait-of-hormuz.md"));
   });
 
+  test("x_recent as text: header with the newest post's age, one line per post", async () => {
+    const text = await callText(ctx, "x_recent", { hours: 2 });
+    assert.match(text, /^x_recent: \d+ archived posts? from the last 2h, newest first; as of /);
+    assert.match(text.split("\n")[1]!, /^(newest post .* old|no posts in the window);/);
+  });
+
   test("brain_related walks the wiki graph: links, backlinks and the overview", async () => {
     await call(ctx, "brain_write", { path: "wiki/actors/iran.md", content: "---\ntitle: Iran\ntype: actor\n---\n[[strait-of-hormuz]]" });
     await call(ctx, "brain_write", { path: "wiki/events/2026-10-01-tanker-seized.md", content: "---\ntitle: Tanker seized\ntype: event\n---\n[[iran]]" });
@@ -107,7 +113,7 @@ describe("X", { skip: !process.env.X_BEARER_TOKEN && "X_BEARER_TOKEN not set" },
   test("x_sync saves posts that x_recent then returns", async () => {
     const res = (await call(ctx, "x_sync")) as { queries: number; saved: string[] };
     assert.ok(res.queries > 0);
-    const recent = (await call(ctx, "x_recent", { hours: 2 })) as { path: string; url: string }[];
+    const recent = (await call(ctx, "x_recent", { hours: 2, format: "raw" })) as { path: string; url: string }[];
     assert.equal(recent.length, res.saved.length);
     for (const p of recent) assert.match(p.url, /^https:\/\/x\.com\/\w+\/status\/\d+$/);
   });

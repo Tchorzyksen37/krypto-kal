@@ -13,3 +13,4 @@ export const SPIKE_QUANTILE = 0.95; // liquidation bars above this quantile of t
 export const QUADRANT_FLAT_PCT = 0.1; // price or OI moves smaller than this (in %) count as flat
 export const SWING_SIDE = 3; // a swing high/low must beat this many bars on each side
 export const ATR_PERIOD = 14;
+export const QUOTE_STALE_MINUTES = 30; // a quote whose last price is older than this is "stale" (closed market)

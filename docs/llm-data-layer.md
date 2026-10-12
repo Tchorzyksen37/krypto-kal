@@ -1,8 +1,7 @@
 # LLM data layer: deterministic presentation between the cache and tool output
 
-Status: **phases 1 and 2 implemented** (2026-10-10, 2026-10-12): `src/present/`, `format: "table"` on the Coinalyze
-history tools and `kraken_futures_candles` (default still `raw`), and the joined `market_view` with computed facts.
-Phase 3 is a proposal. It is the "future plan" in `CLAUDE.md` ("keep raw points in the cache and
+Status: **all three phases implemented** (2026-10-10 .. 2026-10-12): `src/present/`, the joined `market_view` with
+computed facts, and `format: "table"` as the default of every series and record tool (`raw` stays available). It is the "future plan" in `CLAUDE.md` ("keep raw points in the cache and
 put processing in a separate layer between the cache and tool output"), worked out. Storage is described in
 [database-design.md](database-design.md).
 
@@ -207,4 +206,17 @@ Nothing is dropped silently, and `format: "table"` with a larger `max_rows` or `
    - of the playbook's six squeeze conditions, the four the data decides (1, 2, 3, 5) are computed; 4 (tests of a
      level) and 6 (rejection, first liquidation candles) need chart judgment and are listed as not computed;
    - funding stays in % per the exchange's interval (Coinalyze); the Kraken line gives Kraken's own funding per 8h.
-3. Switch history tools to `table` by default; the same envelope for Yahoo, fills / PnL, quotes and `x_recent`.
+3. **Done.** `table` is the default of the Coinalyze history tools, `kraken_futures_candles`, `yahoo_history` and
+   `kraken_ohlc`; `yahoo_quote`, `kraken_futures_fills`, `kraken_futures_pnl` and `x_recent` take
+   `format: "raw" | "table"` with `table` as the default (`present/records.ts`). `raw` is unchanged everywhere; the e2e
+   tests that read JSON ask for it. Details:
+   - Yahoo bars are an exchange-hours series: nights, weekends and holidays are reported as `breaks` (count and the
+     longest), not as missing data, because no exchange calendar is applied; prices lose the float32 noise;
+   - every series header says how long ago the newest bar ended when it is older than two bars (closed market);
+   - `kraken_ohlc` carries a volume-weighted `vwap` through resampling (price x volume, divided again);
+   - `yahoo_quote` adds `market_time`, `age` and a `fresh` / `stale (last price <weekday>)` state (threshold
+     `QUOTE_STALE_MINUTES` = 30), which the skills use instead of judging quote times themselves;
+   - fills: one CSV row per fill with notional, a per-symbol summary and the sync line; PnL: the summary with N and a
+     95% Wilson interval on the win rate, then per-symbol, per-day and recent-trade tables;
+   - `x_recent`: one line per post (time, age, author, category, kind, text cut at `max_chars`, path), and a header
+     with the newest post's age, saying that an empty archive is not "no news".

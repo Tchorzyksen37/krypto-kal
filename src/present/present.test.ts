@@ -178,7 +178,7 @@ test("golden: USD open interest in millions, funding with absolute change, long/
   const oi = renderSeries(coinalyzeOpenInterest(true), [0, 1].map((i) => ({ t: T0 + i * H, o: 7.4e9 + i * 1e7, h: 7.42e9 + i * 1e7, l: 7.39e9, c: 7.41e9 + i * 1.3e7 })),
     { tool: "coinalyze_open_interest_history", symbol: "BTCUSDT_PERP.A", intervalSec: H, asOfSec: T0 + 10 * H });
   assert.equal(oi.split("\n").slice(1).join("\n"), [
-    "as of 2025-09-30T10:00Z; all bars closed",
+    "as of 2025-09-30T10:00Z; all bars closed; the newest bar ended 8h before as of",
     "units: oi_*: open interest in USD (scale in the column name)",
     "gaps: none",
     "summary: open interest 7410M -> 7423M (+0.18%); low 7390M at 2025-09-30T00:00Z; high 7430M at 2025-09-30T01:00Z",

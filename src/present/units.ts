@@ -5,6 +5,8 @@
 
 import type { LiquidationPoint, LongShortPoint, OhlcPoint, OhlcvPoint } from "../providers/coinalyze/coinalyze-client.ts";
 import type { FuturesCandle } from "../providers/kraken/kraken-futures-client.ts";
+import type { KrakenCandle } from "../providers/kraken/kraken-client.ts";
+import type { YahooBar } from "../providers/yahoo/yahoo-client.ts";
 import type { MarketPoint } from "./facts.ts";
 import { COUNT, FUNDING, PERCENT, PRICE, QUANTITY, RATIO, type RoundRule } from "./round.ts";
 
@@ -31,6 +33,9 @@ export type Summary =
 
 export interface SeriesSpec<P> {
   title: string; // what the data is, e.g. "Coinalyze OHLCV"
+  // "missing" (default): a regular 24/7 series, a missing bar is a gap in the data. "breaks": an exchange-hours series
+  // (stocks, indices, FX, CME futures), where nights, weekends and holidays leave breaks that are not missing data.
+  gaps?: "missing" | "breaks";
   base: BaseColumn<P>[];
   derived: DerivedColumn[];
   units: string[]; // header lines, one per column family
@@ -169,6 +174,38 @@ export const MARKET_VIEW: SeriesSpec<MarketPoint> = {
     "open..close, volume, taker_buy_share: Coinalyze OHLCV of the perpetual (price in its quote currency, volume as reported)",
     "oi: open interest at the bar close in USD; funding: funding rate at the bar close in % per the exchange's interval; long_short_ratio: accounts long / short",
     "liq_long, liq_short: liquidations per bar in USD; kf_close: Kraken Futures trade-price close of the same bar (empty when not available)",
+  ],
+  summary: { kind: "level", column: "close", label: "close", relative: true, low: "low", high: "high" },
+};
+
+// Yahoo Finance chart bars: exchange hours, so breaks are reported as breaks, not gaps. Prices are split-adjusted, not
+// dividend-adjusted; 7 significant figures also remove Yahoo's float32 noise (5678.89990234375 -> 5678.9).
+export const YAHOO_BARS: SeriesSpec<YahooBar> = {
+  title: "Yahoo Finance bars",
+  gaps: "breaks",
+  base: [...ohlc<YahooBar>("", PRICE), { name: "volume", get: (p) => p.v, agg: "sum", rule: QUANTITY }],
+  derived: [],
+  units: [
+    "open, high, low, close: price in the instrument's currency, split-adjusted (not dividend-adjusted)",
+    "volume: as Yahoo reports it (shares or contracts; 0 for most indices and FX)",
+  ],
+  summary: { kind: "level", column: "close", label: "close", relative: true, low: "low", high: "high" },
+};
+
+// Kraken spot OHLC. The VWAP of a resampled row is volume-weighted from its native bars, so it is carried as
+// price x volume and divided again after resampling.
+export const KRAKEN_SPOT_OHLC: SeriesSpec<KrakenCandle> = {
+  title: "Kraken spot OHLC",
+  base: [
+    ...ohlc<KrakenCandle>("", PRICE),
+    { name: "volume", get: (p) => p.v, agg: "sum", rule: QUANTITY },
+    { name: "trades", get: (p) => p.count, agg: "sum", rule: COUNT },
+    { name: "price_x_volume", get: (p) => p.vwap * p.v, agg: "sum", rule: QUANTITY, hidden: true },
+  ],
+  derived: [{ name: "vwap", derive: (r) => share(r.price_x_volume, r.volume), rule: PRICE }],
+  units: [
+    "open, high, low, close, vwap: price in the pair's quote currency (XBT = bitcoin)",
+    "volume: base asset traded; trades: number of trades",
   ],
   summary: { kind: "level", column: "close", label: "close", relative: true, low: "low", high: "high" },
 };

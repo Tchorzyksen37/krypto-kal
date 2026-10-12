@@ -61,8 +61,8 @@ the situation, not advice and not an order: the user decides and acts by hand.
      judge 4 and 6 from the chart (section 5 of
      `.claude/skills/crypto-market-sentiment/references/derivatives-playbook.md`), give the total out of 6, and read
      the 4h price / OI quadrant from the facts (section 3);
-   - macro (`yahoo_quote`: `ES=F`, `NQ=F`, `DX-Y.NYB`, `^TNX`, `CL=F`), each with its time; stale quotes (weekend, closed
-     market) are labelled "last close <day>" and do not drive conclusions.
+   - macro (`yahoo_quote`: `ES=F`, `NQ=F`, `DX-Y.NYB`, `^TNX`, `CL=F`), each with its time; rows the tool marks
+     `stale (last price <day>)` (weekend, closed market) are labelled "last close <day>" and do not drive conclusions.
 
 4. **Scenarios** (2-4, probabilities summing to 1) for the position's horizon (the next session, or until the user's own
    time limit if they have one):
