@@ -1,0 +1,330 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kraken Futures – wyniki</title>
+<style>
+  :root {
+    --page: #f9f9f7; --surface: #fcfcfb; --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
+    --grid: #e1e0d9; --axis: #c3c2b7; --border: rgba(11,11,11,0.10);
+    --pos: #2a78d6; --neg: #e34948; --warn-bg: #fff4dc; --warn-ink: #6b4a00;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --page: #0d0d0d; --surface: #1a1a19; --ink: #f0efec; --ink-2: #c3c2b7; --muted: #898781;
+      --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,0.10);
+      --pos: #3987e5; --neg: #e66767; --warn-bg: #3a2c0c; --warn-ink: #f5d48a;
+    }
+  }
+  :root[data-theme="dark"] {
+    --page: #0d0d0d; --surface: #1a1a19; --ink: #f0efec; --ink-2: #c3c2b7; --muted: #898781;
+    --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,0.10);
+    --pos: #3987e5; --neg: #e66767; --warn-bg: #3a2c0c; --warn-ink: #f5d48a;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--page); color: var(--ink); font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 1100px; margin: 0 auto; padding: 20px 16px 40px; }
+  header { display: flex; flex-wrap: wrap; gap: 12px; align-items: baseline; justify-content: space-between; margin-bottom: 16px; }
+  h1 { font-size: 18px; margin: 0; }
+  .meta { color: var(--muted); font-size: 12px; }
+  .controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 16px; }
+  .seg { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  .seg button, .btn { background: var(--surface); color: var(--ink-2); border: 0; padding: 6px 12px; font: inherit; cursor: pointer; }
+  .seg button[aria-pressed="true"] { color: var(--ink); background: var(--grid); font-weight: 600; }
+  .btn { border: 1px solid var(--border); border-radius: 8px; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-bottom: 16px; }
+  .card, .panel { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; }
+  .label { color: var(--ink-2); font-size: 13px; }
+  .hero { font-size: 28px; font-weight: 600; margin: 4px 0; font-variant-numeric: tabular-nums; }
+  .sub { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+  .panel { margin-bottom: 16px; }
+  .panel h2 { font-size: 14px; margin: 0 0 8px; }
+  svg { display: block; overflow: visible; }
+  .tick { fill: var(--muted); font-size: 11px; }
+  .gridline { stroke: var(--grid); stroke-width: 1; }
+  .baseline { stroke: var(--axis); stroke-width: 1; }
+  .hit { fill: transparent; cursor: default; }
+  #tip { position: fixed; pointer-events: none; background: var(--surface); color: var(--ink); border: 1px solid var(--border);
+         border-radius: 8px; padding: 8px 10px; font-size: 12px; box-shadow: 0 4px 16px rgba(0,0,0,0.15); display: none; z-index: 10;
+         font-variant-numeric: tabular-nums; white-space: nowrap; }
+  #tip b { font-weight: 600; }
+  details { margin-top: 8px; }
+  summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
+  .scroll { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; margin-top: 8px; }
+  th, td { text-align: right; padding: 4px 8px; border-bottom: 1px solid var(--grid); }
+  th:first-child, td:first-child { text-align: left; }
+  th { color: var(--ink-2); font-weight: 600; }
+  .note { background: var(--warn-bg); color: var(--warn-ink); border-radius: 8px; padding: 8px 12px; margin-bottom: 12px; font-size: 13px; }
+  .legend { display: flex; gap: 14px; color: var(--ink-2); font-size: 12px; margin-bottom: 6px; }
+  .sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+  ul.plain { margin: 6px 0 0; padding-left: 18px; color: var(--ink-2); font-size: 13px; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Kraken Futures – wyniki od otwarcia konta</h1>
+    <div class="meta" id="meta">wczytywanie…</div>
+  </header>
+
+  <div class="controls">
+    <div class="seg" role="group" aria-label="Waluta" id="cur"></div>
+    <div class="seg" role="group" aria-label="Miara">
+      <button data-measure="net" aria-pressed="true">Netto</button>
+      <button data-measure="gross" aria-pressed="false">Brutto</button>
+    </div>
+    <button class="btn" id="refresh">Odśwież teraz</button>
+    <button class="btn" id="theme" title="Motyw">Motyw</button>
+  </div>
+
+  <div id="notes"></div>
+  <section class="cards" id="cards"></section>
+
+  <section class="panel">
+    <h2 id="daily-title">Wynik dzienny (UTC)</h2>
+    <div class="legend"><span><span class="sw" style="background:var(--pos)"></span>zysk</span><span><span class="sw" style="background:var(--neg)"></span>strata</span></div>
+    <div id="daily"></div>
+    <details><summary>Tabela dzienna</summary><div id="daily-table"></div></details>
+  </section>
+
+  <section class="panel">
+    <h2 id="inst-title">Wynik per instrument, cały okres</h2>
+    <div class="legend"><span><span class="sw" style="background:var(--pos)"></span>zysk</span><span><span class="sw" style="background:var(--neg)"></span>strata</span><span>(liczba zamkniętych transakcji)</span></div>
+    <div id="inst"></div>
+    <details><summary>Tabela per instrument</summary><div id="inst-table"></div></details>
+  </section>
+
+  <section class="panel">
+    <h2>Otwarte pozycje</h2>
+    <div id="open"></div>
+  </section>
+
+  <section class="panel">
+    <h2>Jakość danych</h2>
+    <div id="quality"></div>
+  </section>
+</main>
+<div id="tip" role="status"></div>
+
+<script>
+"use strict";
+const state = { data: null, currency: "USD", measure: "net" };
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+
+function rate() {
+  const d = state.data;
+  return state.currency === "USD" || !d || !d.fx ? 1 : d.fx.rate;
+}
+function money(usd, opts = {}) {
+  if (usd === undefined || usd === null || !Number.isFinite(usd)) return "–";
+  const v = usd * rate();
+  const s = new Intl.NumberFormat("pl-PL", { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(Math.abs(v));
+  const sign = opts.unsigned ? "" : v > 0.004 ? "+" : v < -0.004 ? "−" : "";
+  return `${sign}${s} ${state.currency}`;
+}
+const pct = (x) => (x === undefined || x === null ? "–" : `${new Intl.NumberFormat("pl-PL", { maximumFractionDigits: 0 }).format(x * 100)}%`);
+const num = (x, d = 2) => (x === undefined || x === null ? "–" : new Intl.NumberFormat("pl-PL", { maximumFractionDigits: d }).format(x));
+const dt = (iso) => (iso ? iso.replace("T", " ").slice(0, 16) + " UTC" : "–");
+const measureLabel = () => (state.measure === "net" ? "netto (po prowizjach i fundingu)" : "brutto (przed prowizjami i fundingiem)");
+const pick = (t) => (state.measure === "net" ? t.net : t.gross);
+
+// ---- tooltip ----
+const tip = $("tip");
+function showTip(e, html) {
+  tip.innerHTML = html;
+  tip.style.display = "block";
+  const pad = 12;
+  const w = tip.offsetWidth, h = tip.offsetHeight;
+  tip.style.left = `${Math.min(window.innerWidth - w - 8, e.clientX + pad)}px`;
+  tip.style.top = `${Math.max(8, e.clientY - h - pad)}px`;
+}
+function hideTip() { tip.style.display = "none"; }
+const breakdown = (t) =>
+  `brutto <b>${money(t.gross)}</b><br>prowizje <b>${money(-t.fees)}</b><br>funding <b>${money(t.funding)}</b><br>netto <b>${money(t.net)}</b>`;
+
+// A bar from the baseline to `v`, with a 4px rounded data end and a square base.
+function barPath(x, y0, w, y1, horizontal) {
+  const r = Math.min(4, Math.abs(y1 - y0) / 2, w / 2);
+  if (!horizontal) {
+    if (y1 < y0) return `M${x},${y0}V${y1 + r}Q${x},${y1} ${x + r},${y1}H${x + w - r}Q${x + w},${y1} ${x + w},${y1 + r}V${y0}Z`;
+    return `M${x},${y0}V${y1 - r}Q${x},${y1} ${x + r},${y1}H${x + w - r}Q${x + w},${y1} ${x + w},${y1 - r}V${y0}Z`;
+  }
+  // horizontal: x is the bar's y, y0/y1 are x positions, w is the thickness
+  const yy = x;
+  if (y1 > y0) return `M${y0},${yy}H${y1 - r}Q${y1},${yy} ${y1},${yy + r}V${yy + w - r}Q${y1},${yy + w} ${y1 - r},${yy + w}H${y0}Z`;
+  return `M${y0},${yy}H${y1 + r}Q${y1},${yy} ${y1},${yy + r}V${yy + w - r}Q${y1},${yy + w} ${y1 + r},${yy + w}H${y0}Z`;
+}
+
+function niceTicks(lo, hi, n = 5) {
+  if (lo === hi) { lo -= 1; hi += 1; }
+  const span = hi - lo, raw = span / n, mag = 10 ** Math.floor(Math.log10(raw));
+  const step = [1, 2, 2.5, 5, 10].map((m) => m * mag).find((s) => span / s <= n) ?? 10 * mag;
+  const start = Math.floor(lo / step) * step, out = [];
+  // The last tick is the first one at or above `hi`, so the axis always covers the largest value.
+  for (let v = start; out.length === 0 || out[out.length - 1] < hi - 1e-9; v += step) out.push(Number(v.toFixed(10)));
+  return out;
+}
+
+// Charts are drawn at the container's real width, so text keeps its size on a phone.
+const widthOf = (id) => Math.max(300, Math.round($(id).clientWidth || 1000));
+
+function dailyChart(days) {
+  if (!days.length) return '<p class="sub">Brak zamkniętych wyników.</p>';
+  const W = widthOf("daily"), H = 260, L = 56, R = 8, T = 10, B = 28;
+  const vals = days.map((d) => pick(d) * rate());
+  const ticks = niceTicks(Math.min(0, ...vals), Math.max(0, ...vals));
+  const lo = ticks[0], hi = ticks[ticks.length - 1];
+  const y = (v) => T + (H - T - B) * (1 - (v - lo) / (hi - lo));
+  const slot = (W - L - R) / days.length, bw = Math.max(2, Math.min(24, slot - 2));
+  const labelEvery = Math.max(1, Math.ceil(days.length / Math.max(2, Math.floor((W - L - R) / 48))));
+  let s = `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="Wynik dzienny">`;
+  for (const t of ticks) s += `<line class="gridline" x1="${L}" x2="${W - R}" y1="${y(t)}" y2="${y(t)}"/><text class="tick" x="${L - 6}" y="${y(t) + 4}" text-anchor="end">${num(t, 0)}</text>`;
+  days.forEach((d, i) => {
+    const v = vals[i], x = L + i * slot + (slot - bw) / 2;
+    const color = v >= 0 ? "var(--pos)" : "var(--neg)";
+    if (Math.abs(y(v) - y(0)) >= 0.5) s += `<path d="${barPath(x, y(0), bw, y(v))}" fill="${color}"/>`;
+    s += `<rect class="hit" data-i="${i}" x="${L + i * slot}" y="${T}" width="${slot}" height="${H - T - B}"/>`;
+    if (i % labelEvery === 0) s += `<text class="tick" x="${L + i * slot + slot / 2}" y="${H - 8}" text-anchor="middle">${d.day.slice(8, 10)}.${d.day.slice(5, 7)}</text>`;
+  });
+  s += `<line class="baseline" x1="${L}" x2="${W - R}" y1="${y(0)}" y2="${y(0)}"/></svg>`;
+  return s;
+}
+
+function instrumentChart(items) {
+  if (!items.length) return '<p class="sub">Brak instrumentów.</p>';
+  const W = widthOf("inst"), row = 34, bw = 22, L = 96, R = 16, T = 6, B = 26, H = T + B + row * items.length;
+  const vals = items.map((it) => pick(it) * rate());
+  const ticks = niceTicks(Math.min(0, ...vals), Math.max(0, ...vals), W < 600 ? 3 : 5);
+  const lo = ticks[0], hi = ticks[ticks.length - 1];
+  const x = (v) => L + (W - L - R) * ((v - lo) / (hi - lo));
+  let s = `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="Wynik per instrument">`;
+  for (const t of ticks) s += `<line class="gridline" x1="${x(t)}" x2="${x(t)}" y1="${T}" y2="${H - B}"/><text class="tick" x="${x(t)}" y="${H - 8}" text-anchor="middle">${num(t, 0)}</text>`;
+  items.forEach((it, i) => {
+    const v = vals[i], yy = T + i * row + (row - bw) / 2, color = v >= 0 ? "var(--pos)" : "var(--neg)";
+    if (Math.abs(x(v) - x(0)) >= 0.5) s += `<path d="${barPath(yy, x(0), bw, x(v), true)}" fill="${color}"/>`;
+    s += `<text class="tick" x="${L - 8}" y="${yy + bw / 2 + 4}" text-anchor="end">${esc(it.instrument)} (${it.closing})</text>`;
+    s += `<rect class="hit" data-i="${i}" x="${L}" y="${T + i * row}" width="${W - L - R}" height="${row}"/>`;
+  });
+  s += `<line class="baseline" x1="${x(0)}" x2="${x(0)}" y1="${T}" y2="${H - B}"/></svg>`;
+  return s;
+}
+
+function bindTips(container, items, html) {
+  container.querySelectorAll(".hit").forEach((el) => {
+    const it = items[Number(el.dataset.i)];
+    el.addEventListener("mousemove", (e) => showTip(e, html(it)));
+    el.addEventListener("mouseleave", hideTip);
+  });
+}
+
+function table(head, rows) {
+  return `<div class="scroll"><table><thead><tr>${head.map((h) => `<th>${esc(h)}</th>`).join("")}</tr></thead><tbody>${rows.map((r) => `<tr>${r.map((c) => `<td>${esc(c)}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`;
+}
+
+function render() {
+  const d = state.data;
+  if (!d) return;
+  const st = d.stats;
+
+  // currency toggle
+  const curs = d.fx ? ["USD", d.currency] : ["USD"];
+  $("cur").innerHTML = curs.map((c) => `<button data-cur="${c}" aria-pressed="${c === state.currency}">${c}</button>`).join("");
+  $("cur").querySelectorAll("button").forEach((b) => b.addEventListener("click", () => { state.currency = b.dataset.cur; render(); }));
+
+  const fx = d.fx ? `kurs ${esc(d.fx.pair)} ${num(d.fx.rate, 4)} z ${dt(d.fx.time)}${d.fx.stale ? " (nieodświeżony)" : ""}` : "brak kursu walut";
+  $("meta").innerHTML = `od ${dt(st.since)} · ostatnia synchronizacja ${dt(d.sync.at)} · ${fx}`;
+
+  const notes = [];
+  if (d.sync.error) notes.push(`Synchronizacja nie powiodła się: ${esc(d.sync.error)}. Pokazane dane są z poprzedniej synchronizacji.`);
+  if (d.sync.result && !d.sync.result.complete) notes.push("Historia nie jest jeszcze kompletna (limit stron); kolejna synchronizacja ją dokończy.");
+  if (st.quality.mismatches) notes.push(`${st.quality.mismatches} wpisów, w których brutto − prowizje + funding nie zgadza się ze zmianą salda (np. id ${st.quality.mismatchIds.join(", ")}). Netto jest liczone ze zmiany salda; rozbicie może być niedokładne.`);
+  if (Object.keys(st.quality.otherAssets).length) notes.push(`Wpisy w innych walutach niż USD nie są wliczone: ${esc(Object.entries(st.quality.otherAssets).map(([a, n]) => `${a} (${n})`).join(", "))}.`);
+  if (d.fx && d.fx.stale) notes.push(`Kurs walut nie został odświeżony (${esc(d.fx.error || "")}); użyty ostatni zapisany.`);
+  $("notes").innerHTML = notes.map((n) => `<div class="note">${n}</div>`).join("");
+
+  const t = st.total, td = st.today;
+  const topToday = td.byInstrument[0];
+  $("cards").innerHTML = [
+    card(`Dziś (${td.day}), ${state.measure === "net" ? "netto" : "brutto"}`, money(pick(td)),
+      `brutto ${money(td.gross)} · prowizje ${money(-td.fees)} · funding ${money(td.funding)}${topToday ? `<br>najwięcej: ${esc(topToday.instrument)} ${money(pick(topToday))}` : ""}`),
+    card("Niezrealizowane (otwarte pozycje)", st.open.available ? money(st.open.unrealized) : "–",
+      st.open.available ? `${plural(st.open.positions.length, "pozycja", "pozycje", "pozycji")} · funding niezreal. ${money(st.open.unrealizedFunding)}` : `nie odczytano: ${esc(d.positionsError || "brak danych")}`),
+    card(`Cały okres, ${state.measure === "net" ? "netto" : "brutto"}`, money(pick(t)),
+      `brutto ${money(t.gross)} · prowizje ${money(-t.fees)} · funding ${money(t.funding)}`),
+    card("Wygrane / PF (brutto)", `${pct(t.winRate)} / ${t.profitFactor === undefined || t.profitFactor === null ? "–" : num(t.profitFactor, 2)}`,
+      `${t.wins} z ${t.closing} zamknięć z wynikiem (N=${t.closing})`),
+  ].join("");
+
+  $("daily-title").textContent = `Wynik dzienny, ${state.currency} ${measureLabel()} (UTC)`;
+  $("daily").innerHTML = dailyChart(st.byDay);
+  bindTips($("daily"), st.byDay, (x) => `<b>${x.day}</b><br>${breakdown(x)}`);
+  $("daily-table").innerHTML = table(["dzień (UTC)", "brutto", "prowizje", "funding", "netto"],
+    [...st.byDay].reverse().map((x) => [x.day, money(x.gross), money(-x.fees), money(x.funding), money(x.net)]));
+
+  $("inst-title").textContent = `Wynik per instrument, cały okres, ${state.currency} ${measureLabel()}`;
+  const insts = [...st.byInstrument].sort((a, b) => pick(b) - pick(a) || a.instrument.localeCompare(b.instrument));
+  $("inst").innerHTML = instrumentChart(insts);
+  bindTips($("inst"), insts, (x) => `<b>${esc(x.instrument)}</b> · ${x.closing} zamknięć, ${x.wins} wygranych<br>${breakdown(x)}`);
+  $("inst-table").innerHTML = table(["instrument", "zamknięcia", "wygrane", "brutto", "prowizje", "funding", "netto"],
+    insts.map((x) => [x.instrument, x.closing, x.wins, money(x.gross), money(-x.fees), money(x.funding), money(x.net)]));
+
+  $("open").innerHTML = !st.open.available
+    ? `<p class="sub">Nie udało się odczytać pozycji: ${esc(d.positionsError || "brak danych")}</p>`
+    : st.open.positions.length
+      ? table(["kontrakt", "strona", "wielkość", "cena wejścia", "niezreal. PnL", "niezreal. funding"],
+        st.open.positions.map((p) => [p.symbol, p.side === "long" ? "long" : "short", num(p.size, 6), num(p.entry, 6), money(p.unrealizedPnl), money(p.unrealizedFunding)]))
+      : '<p class="sub">Brak otwartych pozycji.</p>';
+
+  const q = st.quality;
+  $("quality").innerHTML = `<ul class="plain">
+    <li>${q.entries} wpisów w logu konta, ${q.counted} wliczonych (transakcje, likwidacje, funding w USD).</li>
+    <li>Pominięte (nie są wynikiem handlu): ${Object.keys(q.excluded).length ? esc(Object.entries(q.excluded).map(([k, n]) => `${k} (${n})`).join(", ")) : "brak"}.</li>
+    <li>Niezgodności rozbicia ze zmianą salda: ${q.mismatches}.</li>
+    <li>Wygrane i PF liczone na zamknięciach z niezerowym zrealizowanym PnL, brutto; netto uwzględnia prowizje obu stron transakcji i funding.</li>
+  </ul>`;
+}
+
+// Polish plural: 1 pozycja, 2-4 pozycje, 5+ pozycji (12-14 take the last form).
+function plural(n, one, few, many) {
+  const t = n % 100, u = n % 10;
+  return `${n} ${n === 1 ? one : u >= 2 && u <= 4 && (t < 12 || t > 14) ? few : many}`;
+}
+
+function card(label, hero, sub) {
+  return `<div class="card"><div class="label">${esc(label)}</div><div class="hero">${hero}</div><div class="sub">${sub}</div></div>`;
+}
+
+async function load(refresh) {
+  try {
+    const res = await fetch(`/api/stats${refresh ? "?refresh=1" : ""}`, { cache: "no-store" });
+    if (!res.ok) throw new Error(await res.text());
+    state.data = await res.json();
+    if (state.currency !== "USD" && !state.data.fx) state.currency = "USD";
+    if (!state.initialised) { state.currency = state.data.fx ? state.data.currency : "USD"; state.initialised = true; }
+    render();
+  } catch (e) {
+    $("notes").innerHTML = `<div class="note">Nie udało się wczytać danych: ${esc(e.message)}</div>`;
+  }
+}
+
+document.querySelectorAll("[data-measure]").forEach((b) => b.addEventListener("click", () => {
+  state.measure = b.dataset.measure;
+  document.querySelectorAll("[data-measure]").forEach((o) => o.setAttribute("aria-pressed", String(o === b)));
+  render();
+}));
+$("refresh").addEventListener("click", () => load(true));
+$("theme").addEventListener("click", () => {
+  const root = document.documentElement;
+  const dark = root.dataset.theme ? root.dataset.theme === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
+  root.dataset.theme = dark ? "light" : "dark";
+});
+let resizeTimer;
+window.addEventListener("resize", () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(render, 150); });
+load(false);
+setInterval(() => load(false), 60_000);
+</script>
+</body>
+</html>

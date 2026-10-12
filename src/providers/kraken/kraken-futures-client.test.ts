@@ -106,6 +106,17 @@ describe("KrakenFuturesClient", () => {
     assert.equal(header(call, "Authent"), krakenFuturesSignature("/api/v3/fills", header(call, "Nonce")!, query, SECRET));
   });
 
+  test("the account log is a signed GET on the history API path, ascending from an id", async () => {
+    respond = () => Promise.resolve(new Response(JSON.stringify({ accountUid: "u", logs: [{ id: 7, date: "2026-10-01T10:00:00.000Z", info: "futures trade", asset: "usd", realized_pnl: 1.5, fee: 0.2 }] })));
+    const logs = await makeClient().accountLog({ from: 7, count: 100 });
+    assert.deepEqual(logs.map((l) => l.id), [7]);
+    const call = calls[0]!;
+    assert.equal(call.url.pathname, "/api/history/v3/account-log");
+    const query = call.url.search.slice(1);
+    assert.equal(query, "from=7&count=100&sort=asc");
+    assert.equal(header(call, "Authent"), krakenFuturesSignature("/api/history/v3/account-log", header(call, "Nonce")!, query, SECRET));
+  });
+
   test("private POST signs exactly the body that is sent", async () => {
     respond = () => ok({ sendStatus: { status: "placed", order_id: "abc" } });
     await makeClient({ tradingEnabled: true }).sendOrder({
