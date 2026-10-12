@@ -12,6 +12,9 @@ export type HandoffResult =
   | { status: "no_bet"; detail: string }
   | { status: "failed"; detail: string };
 
+// Thrown inside the store transaction to roll back a partly stored bet.
+class RollbackError extends Error {}
+
 export function handoff(store: BotStore, config: BotConfig, meta: ReportMeta, nowMs: number, source: string): HandoffResult {
   if (!Array.isArray(meta.validated)) return { status: "failed", detail: "the checker has not run on this report (no validated bets)" };
 
@@ -21,10 +24,20 @@ export function handoff(store: BotStore, config: BotConfig, meta: ReportMeta, no
     ...conv.warnings.map((w) => `warning: ${w}`),
   ];
   if (conv.fixtures.length !== 1 || conv.warnings.length) {
-    return { status: "no_bet", detail: notes.join("\n") || "no usable bet in this report" };
+    const none = conv.fixtures.length > 1 ? `${conv.fixtures.length} bets, expected exactly one` : "no usable bet in this report";
+    return { status: "no_bet", detail: notes.join("\n") || none };
   }
 
-  const { added, text } = addFromSpeculation(store, config, meta, nowMs, { source });
-  if (added !== 1) return { status: "failed", detail: text };
-  return { status: "handed_off", betId: conv.fixtures[0]!.betId, detail: [text, ...notes].join("\n") };
+  // All copies or none: a throw rolls the whole transaction back.
+  try {
+    const text = store.transaction(() => {
+      const r = addFromSpeculation(store, config, meta, nowMs, { source });
+      if (r.added !== 1) throw new RollbackError(r.text);
+      return r.text;
+    });
+    return { status: "handed_off", betId: conv.fixtures[0]!.betId, detail: text };
+  } catch (e) {
+    if (e instanceof RollbackError) return { status: "failed", detail: e.message };
+    return { status: "failed", detail: `bot store error: ${e instanceof Error ? e.message : String(e)}` };
+  }
 }

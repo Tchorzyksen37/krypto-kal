@@ -4,7 +4,8 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, test } from "node:test";
 import { BotStore } from "../bot/bot-store.ts";
 import { loadConfig } from "../bot/config.ts";
@@ -28,6 +29,25 @@ const meta = (validated: Bet[] | undefined): ReportMeta => ({
 });
 
 describe("handoff", () => {
+  test("a store error is a failed result, not a throw", () => {
+    const store = new BotStore(":memory:");
+    store.putPolicy = () => { throw new Error("database is locked"); };
+    const r = handoff(store, config, meta([bet()]), T0, "s");
+    assert.equal(r.status, "failed");
+    assert.match(r.detail, /bot store error: database is locked/);
+  });
+
+  test("a failure on a later copy leaves nothing stored", () => {
+    const cfg = { ...config, loosen_confirm_cycles: 2 };
+    const store = new BotStore(":memory:");
+    const put = store.putPolicy.bind(store);
+    let n = 0;
+    store.putPolicy = (p, t) => { if (++n === 2) throw new Error("disk full"); return put(p, t); };
+    const r = handoff(store, cfg, meta([bet()]), T0, "s");
+    assert.equal(r.status, "failed");
+    assert.equal(store.latestPolicies(10).length, 0);
+  });
+
   test("a clean BTC bet is handed off", () => {
     const store = new BotStore(":memory:");
     const r = handoff(store, config, meta([bet()]), T0, "r.meta.json");
@@ -74,7 +94,7 @@ test("config/bot.auto.json only raises max_policy_ttl_min", () => {
   try {
     writeFileSync(join(dir, "empty.json"), "{}");
     const defaults = loadConfig(join(dir, "empty.json")).config;
-    const auto = loadConfig("config/bot.auto.json").config;
+    const auto = loadConfig(join(dirname(fileURLToPath(import.meta.url)), "../../config/bot.auto.json")).config;
     assert.equal(auto.max_policy_ttl_min, 120);
     assert.deepEqual({ ...auto, max_policy_ttl_min: 0 }, { ...defaults, max_policy_ttl_min: 0 });
   } finally {
