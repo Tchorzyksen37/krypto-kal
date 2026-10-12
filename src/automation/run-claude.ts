@@ -24,6 +24,7 @@ export function speculatePrompt(slot: Slot): string {
 }
 
 // No bypass flag: anything outside this list is denied in headless mode.
+// The Windows form of the Write/Edit path patterns is unverified; the first real `claude -p` run checks it.
 export function claudeArgs(brainDir: string): string[] {
   const dir = brainDir.replace(/\\/g, "/").replace(/\/+$/, "");
   return [
@@ -38,13 +39,8 @@ export function claudeArgs(brainDir: string): string[] {
   ];
 }
 
-interface SpawnOptions {
-  shell?: boolean;
-  input?: string; // written to stdin (used instead of an argument when a shell is involved)
-}
-
 // Generic spawn helper: never throws, caps output, kills the whole process tree on timeout.
-export function spawnOutput(cmd: string, args: string[], timeoutMs: number, opts: SpawnOptions = {}): Promise<ClaudeRun> {
+export function spawnOutput(cmd: string, args: string[], timeoutMs: number, input = ""): Promise<ClaudeRun> {
   return new Promise((resolve) => {
     let output = "";
     let timedOut = false;
@@ -56,22 +52,23 @@ export function spawnOutput(cmd: string, args: string[], timeoutMs: number, opts
       resolve(run);
     };
     const add = (chunk: Buffer): void => {
-      if (output.length < OUTPUT_CAP) output = (output + chunk.toString("utf8")).slice(0, OUTPUT_CAP);
+      output = (output + chunk.toString("utf8")).slice(-OUTPUT_CAP); // keep the tail: it holds the result or error
     };
     let child;
     try {
-      child = spawn(cmd, args, { shell: opts.shell ?? false, windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
+      child = spawn(cmd, args, { windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
     } catch (e) {
       return resolve({ ok: false, exitCode: null, timedOut: false, output: String(e instanceof Error ? e.message : e) });
     }
     const timer = setTimeout(() => {
       timedOut = true;
       killTree(child.pid);
+      done({ ok: false, exitCode: null, timedOut: true, output }); // do not wait for pipes to close
     }, timeoutMs);
     child.stdout.on("data", add);
     child.stderr.on("data", add);
     child.stdin.on("error", () => {});
-    child.stdin.end(opts.input ?? "");
+    child.stdin.end(input);
     child.on("error", (e) => done({ ok: false, exitCode: null, timedOut, output: (e as Error).message }));
     child.on("close", (code) => done({ ok: !timedOut && code === 0, exitCode: code, timedOut, output }));
   });
@@ -88,18 +85,12 @@ function killTree(pid: number | undefined): void {
   }
 }
 
-const isEnoent = (r: ClaudeRun): boolean => r.exitCode === null && /ENOENT/.test(r.output);
+// The prompt travels on stdin only: --allowedTools is variadic and would swallow a trailing positional.
+export function buildInvocation(prompt: string, args: string[]): { cmd: string; args: string[]; input: string } {
+  return { cmd: "claude", args, input: prompt };
+}
 
-// cmd.exe quoting is not reliable for these characters, so refuse instead of guessing.
-const cmdUnsafe = /["%\r\n]/;
-
-export const realClaudeRunner: ClaudeRunner = async (prompt, args, timeoutMs) => {
-  const direct = await spawnOutput("claude", [...args, prompt], timeoutMs);
-  if (process.platform !== "win32" || !isEnoent(direct)) return direct;
-  // claude.cmd can only be started through a shell. The fixed flags are double-quoted; the prompt goes
-  // through stdin so it is never part of the command line.
-  if (args.some((a) => cmdUnsafe.test(a))) {
-    return { ok: false, exitCode: null, timedOut: false, output: "claude.cmd fallback refused: an argument has characters unsafe for cmd.exe" };
-  }
-  return spawnOutput("claude.cmd", args.map((a) => `"${a}"`), timeoutMs, { shell: true, input: prompt });
+export const realClaudeRunner: ClaudeRunner = (prompt, args, timeoutMs) => {
+  const inv = buildInvocation(prompt, args);
+  return spawnOutput(inv.cmd, inv.args, timeoutMs, inv.input);
 };

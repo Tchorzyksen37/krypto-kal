@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { claudeArgs, spawnOutput, speculatePrompt } from "./run-claude.ts";
+import { buildInvocation, claudeArgs, spawnOutput, speculatePrompt } from "./run-claude.ts";
 import type { Slot } from "./slots.ts";
 
 const slot: Slot = {
@@ -65,4 +65,25 @@ test("spawnOutput caps output and never throws on a missing command", async () =
   assert.equal(r.ok, false);
   assert.equal(r.exitCode, null);
   assert.ok(r.output.length > 0);
+});
+
+test("spawnOutput passes input on stdin", async () => {
+  const code = "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>process.stdout.write('got:'+d))";
+  const r = await spawnOutput(process.execPath, ["-e", code], 10_000, "hello prompt");
+  assert.equal(r.output, "got:hello prompt");
+});
+
+test("spawnOutput keeps the tail when capping", async () => {
+  const r = await spawnOutput(process.execPath, ["-e", "process.stdout.write('a'.repeat(30000)+'END')"], 10_000);
+  assert.equal(r.output.length, 20_000);
+  assert.ok(r.output.endsWith("END"));
+});
+
+test("buildInvocation keeps the prompt out of the arguments", () => {
+  const args = claudeArgs("C:/v");
+  const inv = buildInvocation("my prompt", args);
+  assert.equal(inv.cmd, "claude");
+  assert.deepEqual(inv.args, args);
+  assert.ok(!inv.args.includes("my prompt"));
+  assert.equal(inv.input, "my prompt");
 });
