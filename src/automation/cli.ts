@@ -27,9 +27,9 @@ const SCORE_PROMPT = "Run the speculation-score skill.";
 
 const message = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
-function alertTo(brainDir: string, nowMs: number): (kind: string, detail: string) => Promise<void> {
+function alertTo(brainDir: string): (kind: string, detail: string) => Promise<void> {
   const sink = new VaultAlertSink(brainDir);
-  return (kind, detail) => sink.send([{ tMs: nowMs, level: "incident", kind, detail }]);
+  return (kind, detail) => sink.send([{ tMs: Date.now(), level: "incident", kind, detail }]);
 }
 
 function brainDirOf(env: NodeJS.ProcessEnv): string {
@@ -67,7 +67,7 @@ export function buildDeps(env: NodeJS.ProcessEnv, nowMs: number): TickDeps {
       await runCheck(metaPath, optionsFromEnv(env), market);
     },
     handoff: (meta, at, source) => handoff(botStore(), config, meta, at, source),
-    alert: alertTo(brainDir, nowMs),
+    alert: alertTo(brainDir),
     timeoutMs: TIMEOUT_MS,
   };
 }
@@ -92,14 +92,9 @@ export function statusText(stateDir: string, nowMs: number): string {
   return [`state: ${stateDir}`, ...lines, `next slot: ${next}`].join("\n");
 }
 
-// The tick allowlist, plus the score script the skill falls back to. The scorecard lives under
-// output/speculation/, which the tick's Write entry already covers; it is added only if missing.
+// Exactly the tick allowlist: the speculation_score MCP tool and the scorecard's Write path are already in it.
 export function scoreArgs(brainDir: string): string[] {
-  const args = claudeArgs(brainDir);
-  const write = `Write(${brainDir.replace(/\\/g, "/").replace(/\/+$/, "")}/output/speculation/**)`;
-  if (!args.includes(write)) args.push(write);
-  args.push("Bash(node src/speculation/score.ts:*)", "Bash(node --env-file-if-exists=.env src/speculation/score.ts:*)");
-  return args;
+  return claudeArgs(brainDir);
 }
 
 export interface ScoreDeps {
@@ -147,7 +142,7 @@ async function main(argv: string[]): Promise<number> {
       return 0;
     case "score": {
       const brainDir = brainDirOf(process.env);
-      const r = await runScore({ brainDir, runner: realClaudeRunner, alert: alertTo(brainDir, now), timeoutMs: TIMEOUT_MS });
+      const r = await runScore({ brainDir, runner: realClaudeRunner, alert: alertTo(brainDir), timeoutMs: TIMEOUT_MS });
       console.log(`score ${r.ok ? "ok" : "failed"}: ${r.detail}`);
       return r.ok ? 0 : 1;
     }

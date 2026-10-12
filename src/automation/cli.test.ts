@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, describe, test } from "node:test";
 import { appendRunLog, buildDeps, exitCodeFor, runScore, scoreArgs, statusText } from "./cli.ts";
+import { claudeArgs } from "./run-claude.ts";
 import { recordSlot } from "./state.ts";
 
 const NOW = Date.UTC(2026, 9, 12, 10, 5);
@@ -87,26 +88,30 @@ describe("status", () => {
 });
 
 describe("score", () => {
-  test("scoreArgs keep the tick allowlist and allow writing the scorecard", () => {
+  test("scoreArgs are exactly the tick allowlist, with no wider Bash and no bypass flag", () => {
     const args = scoreArgs("C:\\vault");
-    assert.equal(args[0], "-p");
-    assert.ok(args.includes("Write(C:/vault/output/speculation/**)"));
-    assert.ok(args.includes("mcp__krypto-kal__*"));
+    assert.deepEqual(args, claudeArgs("C:\\vault"));
+    assert.ok(!args.some((a) => a.startsWith("Bash(node src/speculation/score.ts")), args.join(" "));
+    assert.ok(!args.some((a) => a === "Bash" || /^Bash\(\s*\*?\s*(:\*)?\s*\)$/.test(a)), args.join(" "));
+    assert.ok(!args.some((a) => /dangerously/i.test(a)), args.join(" "));
   });
 
-  test("runs the score prompt and alerts on failure", async () => {
+  test("runs the score prompt with scoreArgs and alerts on failure", async () => {
     const alerts: string[] = [];
     let prompt = "";
+    let passed: string[] = [];
     const r = await runScore({
       brainDir: "C:\\vault",
-      runner: async (p) => {
+      runner: async (p, a) => {
         prompt = p;
+        passed = a;
         return { ok: false, exitCode: 2, timedOut: false, output: "boom" };
       },
       alert: async (kind, detail) => void alerts.push(`${kind}: ${detail}`),
       timeoutMs: 1000,
     });
     assert.equal(prompt, "Run the speculation-score skill.");
+    assert.deepEqual(passed, claudeArgs("C:\\vault"));
     assert.equal(r.ok, false);
     assert.equal(alerts.length, 1);
     assert.match(alerts[0]!, /^automation_score_failed: .*exit code 2.*boom/);
