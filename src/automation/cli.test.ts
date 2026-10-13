@@ -187,7 +187,7 @@ describe("score", () => {
       alert: async (kind, detail) => void alerts.push(`${kind}: ${detail}`),
       timeoutMs: 1000,
     });
-    assert.equal(prompt, "Run the speculation-score skill.");
+    assert.ok(prompt.includes("BRAIN is C:\\vault") && prompt.endsWith("Run the speculation-score skill."));
     assert.deepEqual(passed, scoreArgs("C:\\vault"));
     assert.equal(r.ok, false);
     assert.equal(alerts.length, 1);

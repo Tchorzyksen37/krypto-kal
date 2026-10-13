@@ -162,7 +162,7 @@ export async function tick(d: TickDeps): Promise<TickResult> {
       }
       let run;
       try {
-        run = await d.runner(speculatePrompt(due), claudeArgs(d.brainDir), d.timeoutMs);
+        run = await d.runner(speculatePrompt(due, d.brainDir), claudeArgs(d.brainDir), d.timeoutMs);
       } catch (e) {
         return await fail("automation_generate_failed", `runner threw: ${message(e)}`);
       }
