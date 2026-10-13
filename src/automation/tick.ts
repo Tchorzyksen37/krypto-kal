@@ -69,6 +69,14 @@ export function metaMatchesSlot(meta: ReportMeta, slot: Slot): boolean {
 const describeMeta = (meta: ReportMeta): string =>
   `window ${JSON.stringify(meta.window ?? null)}, session ${JSON.stringify(meta.session ?? null)}`;
 const isValidated = (meta: ReportMeta | undefined): meta is ReportMeta => !!meta && Array.isArray(meta.validated);
+// The end of what claude printed, on one line (the alert log is one bullet per line). A run that exits 0 without
+// writing its report usually says why there (a denied tool, a question, a login prompt).
+const OUTPUT_TAIL_CHARS = 500;
+export function outputTail(output: string): string {
+  const flat = output.replace(/\s+/g, " ").trim();
+  if (!flat) return "(empty)";
+  return flat.length > OUTPUT_TAIL_CHARS ? `...${flat.slice(-OUTPUT_TAIL_CHARS)}` : flat;
+}
 const message = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
 // Failures that cost a claude run (or a check or a handoff) and therefore count toward the cap.
@@ -163,9 +171,14 @@ export async function tick(d: TickDeps): Promise<TickResult> {
         return await fail("automation_generate_failed", `claude ${why}: ${run.output.slice(-500)}`);
       }
       const written = readMeta(metaPath);
-      if (!written) return await fail("automation_generate_failed", `no valid report meta at ${metaPath}`);
+      if (!written) {
+        return await fail("automation_generate_failed", `no valid report meta at ${metaPath}; claude output: ${outputTail(run.output)}`);
+      }
       if (!metaMatchesSlot(written, due)) {
-        return await fail("automation_report_mismatch", `the run wrote ${describeMeta(written)} to ${metaPath}, not this slot's`);
+        return await fail(
+          "automation_report_mismatch",
+          `the run wrote ${describeMeta(written)} to ${metaPath}, not this slot's; claude output: ${outputTail(run.output)}`,
+        );
       }
 
       try {
