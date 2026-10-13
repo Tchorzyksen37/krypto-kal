@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildInvocation, claudeArgs, spawnOutput, speculatePrompt } from "./run-claude.ts";
+import { absoluteRulePath, buildInvocation, claudeArgs, spawnOutput, speculatePrompt } from "./run-claude.ts";
 import type { Slot } from "./slots.ts";
 
 const slot: Slot = {
@@ -21,18 +21,69 @@ test("speculatePrompt names the slot, window, session and file name", () => {
   assert.ok(p.includes("Do not offer to hand bets to the bot."));
 });
 
-test("claudeArgs has the allowlist and no bypass flag", () => {
+// The values of a variadic flag: everything after it up to the next `--flag`.
+function flagValues(args: string[], flag: string): string[] {
+  const i = args.indexOf(flag);
+  if (i < 0) return [];
+  const rest = args.slice(i + 1);
+  const end = rest.findIndex((a) => a.startsWith("--"));
+  return end < 0 ? rest : rest.slice(0, end);
+}
+
+test("absoluteRulePath turns Windows paths into the // POSIX form of permission rules", () => {
+  assert.equal(absoluteRulePath("C:\\vault"), "//c/vault");
+  assert.equal(absoluteRulePath("C:/vault"), "//c/vault");
+  assert.equal(absoluteRulePath("C:\\Users\\a b\\My Vault\\"), "//c/Users/a b/My Vault");
+  assert.equal(absoluteRulePath("D:\\x\\y"), "//d/x/y");
+  assert.equal(absoluteRulePath("/home/u/vault/"), "//home/u/vault");
+  assert.equal(absoluteRulePath("\\\\server\\share\\vault"), "//server/share/vault");
+});
+
+test("claudeArgs allows Edit of the speculation folder by an absolute // rule and no Write rule", () => {
+  for (const [dir, want] of [
+    ["C:\\vault", "Edit(//c/vault/output/speculation/**)"],
+    ["C:/vault", "Edit(//c/vault/output/speculation/**)"],
+    ["C:\\Users\\mtchorze\\OneDrive\\Documents\\my vault", "Edit(//c/Users/mtchorze/OneDrive/Documents/my vault/output/speculation/**)"],
+  ] as const) {
+    const allowed = flagValues(claudeArgs(dir), "--allowedTools");
+    assert.ok(allowed.includes(want), `${dir}: ${allowed.join(" ")}`);
+    assert.equal(allowed.filter((a) => a.startsWith("Edit(")).length, 1);
+    assert.ok(!allowed.some((a) => a.startsWith("Write")), allowed.join(" "));
+  }
+});
+
+test("claudeArgs has a narrow allowlist, denies .env and has no bypass flag", () => {
   const args = claudeArgs("C:/v");
   assert.equal(args[0], "-p");
-  assert.ok(args.includes("--allowedTools"));
+  const allowed = flagValues(args, "--allowedTools");
   for (const pat of [
-    "mcp__krypto-kal__*",
+    "mcp__krypto-kal__speculation_context",
+    "mcp__krypto-kal__kraken_futures_candles",
+    "mcp__krypto-kal__yahoo_quote",
+    "mcp__krypto-kal__yahoo_history",
+    "mcp__krypto-kal__coinalyze_ohlcv_history",
+    "mcp__krypto-kal__x_recent",
+    "mcp__krypto-kal__brain_read",
+    "mcp__krypto-kal__brain_related",
     "Read",
-    "Write(C:/v/output/speculation/**)",
-    "Edit(C:/v/output/speculation/**)",
     "Bash(node src/speculation/check.ts:*)",
     "Bash(node src/speculation/sessions.ts:*)",
-  ]) assert.ok(args.includes(pat), pat);
+  ]) assert.ok(allowed.includes(pat), pat);
+  assert.ok(!allowed.some((a) => a.includes("*") && a.startsWith("mcp__")), "no MCP wildcard");
+  for (const banned of [
+    "brain_write",
+    "brain_ingest_mark",
+    "x_sync",
+    "server_stats",
+    "speculation_score",
+    "kraken_futures_positions",
+    "kraken_futures_open_orders",
+    "kraken_futures_fills",
+    "kraken_futures_pnl",
+    "bot_status",
+  ]) assert.ok(!allowed.includes(`mcp__krypto-kal__${banned}`), banned);
+  assert.ok(!allowed.includes("WebSearch") && !allowed.includes("WebFetch"));
+  assert.deepEqual(flagValues(args, "--disallowedTools"), ["Read(./.env)", "Read(./.env.*)"]);
   assert.ok(!args.join(" ").includes("dangerously"));
 });
 

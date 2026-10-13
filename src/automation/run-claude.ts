@@ -23,19 +23,61 @@ export function speculatePrompt(slot: Slot): string {
   );
 }
 
-// No bypass flag: anything outside this list is denied in headless mode.
-// The Windows form of the Write/Edit path patterns is unverified; the first real `claude -p` run checks it.
-export function claudeArgs(brainDir: string): string[] {
-  const dir = brainDir.replace(/\\/g, "/").replace(/\/+$/, "");
+// A directory in the form Claude Code's Read/Edit rules use for an absolute path (docs: "Configure permissions"):
+// a `//` prefix anchors at the filesystem root, and on Windows paths are normalized to POSIX form first
+// (`C:\Users\alice` -> `/c/Users/alice`). A UNC path keeps its `//server/share` form, which is unverified.
+export function absoluteRulePath(dir: string): string {
+  const p = dir.replace(/\\/g, "/").replace(/\/+$/, "");
+  const drive = /^([A-Za-z]):(\/.*)?$/.exec(p);
+  if (drive) return `//${drive[1]!.toLowerCase()}${drive[2] ?? ""}`;
+  return "//" + p.replace(/^\/+/, "");
+}
+
+// Read-only MCP tools the speculate skill calls. Deliberately absent: every writer or budget spender
+// (brain_write, brain_ingest_mark, x_sync, server_stats with reset, speculation_score) and the account tools
+// (kraken_futures_positions/open_orders/fills/pnl, bot_status): a slot report does not need the user's positions.
+const SPECULATE_MCP_TOOLS = [
+  "speculation_context",
+  "market_view",
+  "kraken_futures_candles",
+  "kraken_ticker",
+  "kraken_order_book",
+  "yahoo_quote",
+  "yahoo_history",
+  "yahoo_search",
+  "coinalyze_current",
+  "coinalyze_future_markets",
+  "coinalyze_ohlcv_history",
+  "coinalyze_open_interest_history",
+  "coinalyze_funding_rate_history",
+  "coinalyze_long_short_ratio_history",
+  "coinalyze_liquidation_history",
+  "coinalyze_liquidation_heatmap_estimate",
+  "x_recent",
+  "brain_list",
+  "brain_read",
+  "brain_search",
+  "brain_related",
+];
+
+export const mcpTool = (name: string): string => `mcp__krypto-kal__${name}`;
+
+// No bypass flag: anything outside the allowlist is denied in headless mode, and deny rules win over allow rules.
+// File writes are checked against Edit(path) rules only (a Write(path) rule is never consulted), so the one Edit
+// rule is what lets the run write its report. Read(./.env) is relative to the working directory, the repo root.
+// WebSearch and WebFetch are not allowed: calendar items the run cannot read are reported as unknown.
+export function claudeArgs(brainDir: string, extraMcpTools: string[] = []): string[] {
   return [
     "-p",
     "--allowedTools",
-    "mcp__krypto-kal__*",
+    ...SPECULATE_MCP_TOOLS.concat(extraMcpTools).map(mcpTool),
     "Read",
-    `Write(${dir}/output/speculation/**)`,
-    `Edit(${dir}/output/speculation/**)`,
+    `Edit(${absoluteRulePath(brainDir)}/output/speculation/**)`,
     "Bash(node src/speculation/check.ts:*)",
     "Bash(node src/speculation/sessions.ts:*)",
+    "--disallowedTools",
+    "Read(./.env)",
+    "Read(./.env.*)",
   ];
 }
 

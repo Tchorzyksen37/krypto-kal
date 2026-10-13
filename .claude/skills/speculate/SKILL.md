@@ -34,6 +34,11 @@ mode, otherwise it is a normal session run. In slot mode:
   starts fall on :00 or :30 UTC and none lies in the 20 minutes after an even hour; a larger
   `SPECULATION_LEAD_MINUTES` could make it pick the next session). In that case state under KNOWN / UNKNOWN that the
   tool's session block described a different session, and that the `volume` share line is for the tool's session.
+  A slot that falls between two sessions (the gap after the US close, for example) runs with the next session's
+  limits: that is the session the prompt names.
+- **Tools.** The automation allows only read-only data tools: no web search, no `x_sync`, no account tools
+  (`kraken_futures_positions`). List what you cannot read (the release calendar, earnings dates, the user's positions,
+  an X archive older than the last sync) under UNKNOWN as "calendar unknown" / "not available in automated runs".
 - **Time references.** Everywhere this file says "the session to report on", "this session", "the window start" or
   "since window start" (steps 1, 2, 3, 6, 7, 8), in slot mode it means the prompt's window: "this session so far" is
   measured from the slot start, and the window is the 2-hour slot.

@@ -106,9 +106,19 @@ if ($Uninstall) {
     }
     if ($PSCmdlet.ShouldProcess("$TaskPath$name", 'Stop and unregister scheduled task')) {
       # Stopping ends the task's top process; node under it may be left running (see STOPPING above).
-      Stop-ScheduledTask -TaskPath $TaskPath -TaskName $name
-      Unregister-ScheduledTask -TaskPath $TaskPath -TaskName $name -Confirm:$false
-      Write-Line "Removed $TaskPath$name"
+      # A failure on one task is printed and the others are still removed; a failed stop does not
+      # prevent the unregister.
+      try {
+        try {
+          Stop-ScheduledTask -TaskPath $TaskPath -TaskName $name
+        } catch {
+          Write-Line "Could not stop $TaskPath${name}: $($_.Exception.Message)"
+        }
+        Unregister-ScheduledTask -TaskPath $TaskPath -TaskName $name -Confirm:$false
+        Write-Line "Removed $TaskPath$name"
+      } catch {
+        Write-Line "Could not remove $TaskPath${name}: $($_.Exception.Message)"
+      }
     }
   }
   if ($found -eq 0) { Write-Line "None of the tasks are installed; nothing to remove." }

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ReportMeta } from "../speculation/types.ts";
@@ -14,6 +14,10 @@ import type { TickDeps } from "./tick.ts";
 const NOW = Date.UTC(2026, 9, 12, 14, 1); // one minute into the 14:00Z slot
 const SLOT = slotAt(NOW);
 const OK_RUN: ClaudeRun = { ok: true, exitCode: 0, timedOut: false, output: "done" };
+const LATER = NOW + 600_000; // the clock after a 10-minute claude run
+const SLOT_WINDOW = [new Date(SLOT.startMs).toISOString(), new Date(SLOT.endMs).toISOString()];
+const SESSION_WINDOW = ["2026-10-12T13:30:00.000Z", "2026-10-12T17:30:00.000Z"];
+const OTHER_SESSION = SLOT.session === "us" ? "night_asia" : "us";
 
 interface Harness {
   deps: TickDeps;
@@ -23,11 +27,13 @@ interface Harness {
   checks: string[];
   handoffs: { meta: ReportMeta; nowMs: number; source: string }[];
   alerts: { kind: string; detail: string }[];
+  probes: number;
 }
 
-function writeMeta(path: string, validated: boolean): void {
+// A meta for the harness slot; `extra` overrides fields (window, session, marker ...).
+function writeMeta(path: string, validated: boolean, extra: Record<string, unknown> = {}): void {
   mkdirSync(join(path, ".."), { recursive: true });
-  const meta: Record<string, unknown> = { bets: [] };
+  const meta: Record<string, unknown> = { session: SLOT.session, window: SLOT_WINDOW, bets: [], ...extra };
   if (validated) meta.validated = [];
   writeFileSync(path, JSON.stringify(meta));
 }
@@ -37,9 +43,15 @@ async function withHarness(fn: (h: Harness) => Promise<void>): Promise<void> {
   const stateDir = join(root, "state");
   const brainDir = join(root, "brain");
   const metaPath = join(brainDir, "output", "speculation", "2026-10-12", "1400Z.meta.json");
-  const h: Harness = { stateDir, metaPath, prompts: [], checks: [], handoffs: [], alerts: [], deps: undefined as unknown as TickDeps };
+  const h: Harness = { stateDir, metaPath, prompts: [], checks: [], handoffs: [], alerts: [], probes: 0, deps: undefined as unknown as TickDeps };
   h.deps = {
     nowMs: NOW,
+    now: () => LATER,
+    serverPort: 3000,
+    probeServer: async () => {
+      h.probes++;
+      return true;
+    },
     stateDir,
     brainDir,
     timeoutMs: 60_000,
@@ -50,7 +62,8 @@ async function withHarness(fn: (h: Harness) => Promise<void>): Promise<void> {
     },
     check: async (path) => {
       h.checks.push(path);
-      writeMeta(path, true);
+      const meta = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+      writeFileSync(path, JSON.stringify({ ...meta, validated: [] }));
     },
     handoff: (meta, nowMs, source): HandoffResult => {
       h.handoffs.push({ meta, nowMs, source });
@@ -247,15 +260,16 @@ test("a stale unvalidated meta does not pass as this run's report", async () => 
 test("a stale unvalidated meta is replaced by the run's new one", async () => {
   await withHarness(async (h) => {
     mkdirSync(join(h.metaPath, ".."), { recursive: true });
-    writeFileSync(h.metaPath, JSON.stringify({ bets: [], marker: "old" }));
+    const ours = { session: SLOT.session, window: SLOT_WINDOW, bets: [] };
+    writeFileSync(h.metaPath, JSON.stringify({ ...ours, marker: "old" }));
     h.deps.runner = async () => {
-      writeFileSync(h.metaPath, JSON.stringify({ bets: [], marker: "new" }), { flag: "wx" });
+      writeFileSync(h.metaPath, JSON.stringify({ ...ours, marker: "new" }), { flag: "wx" });
       return OK_RUN;
     };
     let seen: unknown;
     h.deps.check = async (path) => {
       seen = JSON.parse(readFileSync(path, "utf8")).marker;
-      writeFileSync(path, JSON.stringify({ bets: [], marker: "new", validated: [] }));
+      writeFileSync(path, JSON.stringify({ ...ours, marker: "new", validated: [] }));
     };
     const r = await tick(h.deps);
     assert.equal(r.status, "handed_off");
@@ -322,5 +336,171 @@ test("an already validated meta skips the runner and the check", async () => {
     assert.equal(h.prompts.length, 0);
     assert.equal(h.checks.length, 0);
     assert.equal(h.handoffs.length, 1);
+  });
+});
+
+test("the handoff gets the clock after the run, not the tick start", async () => {
+  await withHarness(async (h) => {
+    await tick(h.deps);
+    assert.equal(h.handoffs[0]!.nowMs, LATER);
+  });
+});
+
+test("a lock younger than the timeout plus 5 minutes is not taken over", async () => {
+  await withHarness(async (h) => {
+    mkdirSync(h.stateDir, { recursive: true });
+    const lock = join(h.stateDir, "tick.lock");
+    writeFileSync(lock, "other");
+    const t = new Date(NOW - (h.deps.timeoutMs + 240_000));
+    utimesSync(lock, t, t);
+    const r = await tick(h.deps);
+    assert.equal(r.status, "busy");
+    assert.equal(h.prompts.length, 0);
+  });
+});
+
+// --- foreign reports (a manual /speculate whose file name equals the slot's) ---
+
+for (const [name, extra] of [
+  ["a session window", { window: SESSION_WINDOW }],
+  ["another session", { session: OTHER_SESSION }],
+] as const) {
+  test(`an existing unvalidated meta with ${name} is left alone: no delete, no run, no handoff`, async () => {
+    await withHarness(async (h) => {
+      writeMeta(h.metaPath, false, { ...extra, marker: "manual" });
+      const before = readFileSync(h.metaPath, "utf8");
+      const r = await tick(h.deps);
+      assert.equal(r.status, "failed");
+      assert.match(r.detail, /^foreign_report/);
+      assert.equal(readFileSync(h.metaPath, "utf8"), before);
+      assert.equal(h.prompts.length, 0);
+      assert.equal(h.probes, 0);
+      assert.equal(h.checks.length, 0);
+      assert.equal(h.handoffs.length, 0);
+      assert.deepEqual(h.alerts.map((a) => a.kind), ["automation_report_mismatch"]);
+      assert.equal(latest(h.stateDir, SLOT.id)?.status, "failed");
+    });
+  });
+}
+
+test("a validated foreign meta is not handed off", async () => {
+  await withHarness(async (h) => {
+    writeMeta(h.metaPath, true, { window: SESSION_WINDOW });
+    const r = await tick(h.deps);
+    assert.equal(r.status, "failed");
+    assert.match(r.detail, /^foreign_report/);
+    assert.equal(h.handoffs.length, 0);
+    assert.deepEqual(h.alerts.map((a) => a.kind), ["automation_report_mismatch"]);
+  });
+});
+
+test("the window is compared as timestamps, not strings", async () => {
+  await withHarness(async (h) => {
+    writeMeta(h.metaPath, true, { window: ["2026-10-12T14:00:00Z", "2026-10-12T16:00:00+00:00"] });
+    const r = await tick(h.deps);
+    assert.equal(r.status, "handed_off");
+  });
+});
+
+test("a foreign report alerts once per slot and does not count toward the retry cap", async () => {
+  await withHarness(async (h) => {
+    writeMeta(h.metaPath, false, { session: OTHER_SESSION });
+    for (let i = 0; i < 4; i++) assert.equal((await tick(h.deps)).status, "failed");
+    assert.deepEqual(h.alerts.map((a) => a.kind), ["automation_report_mismatch"]);
+    assert.equal(readLedger(h.stateDir).filter((r) => r.slot === SLOT.id && r.status === "failed").length, 4);
+    assert.equal(h.prompts.length, 0);
+  });
+});
+
+test("an existing meta that is not JSON is deleted and the slot is generated", async () => {
+  await withHarness(async (h) => {
+    mkdirSync(join(h.metaPath, ".."), { recursive: true });
+    writeFileSync(h.metaPath, "{garbage");
+    const r = await tick(h.deps);
+    assert.equal(r.status, "handed_off");
+    assert.equal(h.prompts.length, 1);
+  });
+});
+
+test("a run that writes the session window instead of the slot window fails without check or handoff", async () => {
+  await withHarness(async (h) => {
+    h.deps.runner = async (prompt) => {
+      h.prompts.push(prompt);
+      writeMeta(h.metaPath, false, { window: SESSION_WINDOW });
+      return OK_RUN;
+    };
+    const r = await tick(h.deps);
+    assert.equal(r.status, "failed");
+    assert.ok(!r.detail.startsWith("foreign_report"), r.detail);
+    assert.equal(h.checks.length, 0);
+    assert.equal(h.handoffs.length, 0);
+    assert.deepEqual(h.alerts.map((a) => a.kind), ["automation_report_mismatch"]);
+  });
+});
+
+// --- retry cap ---
+
+test("after 2 failed attempts the slot is skipped with one gave-up alert and no third run", async () => {
+  await withHarness(async (h) => {
+    h.deps.runner = async (prompt) => {
+      h.prompts.push(prompt);
+      return { ok: false, exitCode: 1, timedOut: false, output: "boom" };
+    };
+    assert.equal((await tick(h.deps)).status, "failed");
+    assert.equal((await tick(h.deps)).status, "failed");
+    const third = await tick(h.deps);
+    assert.equal(third.status, "skipped");
+    assert.equal(third.detail, "gave up after 2 failed attempts");
+    assert.equal(h.prompts.length, 2);
+    assert.equal(latest(h.stateDir, SLOT.id)?.status, "skipped");
+    assert.equal(latest(h.stateDir, SLOT.id)?.detail, "gave up after 2 failed attempts");
+    assert.deepEqual(h.alerts.map((a) => a.kind), ["automation_generate_failed", "automation_generate_failed", "automation_gave_up"]);
+    assert.equal((await tick(h.deps)).status, "nothing_due");
+    assert.equal(h.alerts.length, 3);
+  });
+});
+
+// --- MCP server probe ---
+
+test("a server that does not answer fails the slot without starting claude", async () => {
+  await withHarness(async (h) => {
+    h.deps.probeServer = async () => {
+      h.probes++;
+      return false;
+    };
+    const r = await tick(h.deps);
+    assert.equal(r.status, "failed");
+    assert.equal(r.detail, "server_down: MCP server not reachable on port 3000");
+    assert.equal(h.prompts.length, 0);
+    assert.deepEqual(h.alerts.map((a) => a.kind), ["automation_server_down"]);
+  });
+});
+
+test("server_down alerts once per slot and does not count toward the cap", async () => {
+  await withHarness(async (h) => {
+    h.deps.probeServer = async () => false;
+    for (let i = 0; i < 3; i++) assert.equal((await tick(h.deps)).status, "failed");
+    assert.deepEqual(h.alerts.map((a) => a.kind), ["automation_server_down"]);
+    h.deps.probeServer = async () => true;
+    h.deps.runner = async (prompt) => {
+      h.prompts.push(prompt);
+      return { ok: false, exitCode: 1, timedOut: false, output: "boom" };
+    };
+    assert.equal((await tick(h.deps)).status, "failed");
+    assert.equal((await tick(h.deps)).status, "failed");
+    assert.equal(h.prompts.length, 2);
+    assert.equal((await tick(h.deps)).status, "skipped");
+  });
+});
+
+test("the probe runs before claude and not when a validated meta exists", async () => {
+  await withHarness(async (h) => {
+    writeMeta(h.metaPath, true);
+    await tick(h.deps);
+    assert.equal(h.probes, 0);
+  });
+  await withHarness(async (h) => {
+    await tick(h.deps);
+    assert.equal(h.probes, 1);
   });
 });

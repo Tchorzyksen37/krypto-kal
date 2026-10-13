@@ -55,12 +55,23 @@ Read this before using any bet.
    22:00Z). Check with `npm run auto -- status`. Each report covers one 2-hour slot and is named by the slot start
    (`output/speculation/YYYY-MM-DD/HHMMZ.md`, UTC), and its bets can only fill until the slot ends.
 
-   The machine must be awake and the server running. A missed run is just a missing report; there is no catch-up.
+   The machine must be awake and the server running (a tick checks the server first and records `server_down`
+   instead of starting a run without data). A late tick still generates the current slot until its entry cutoff;
+   older missed slots are logged as skipped, not generated. A slot that fails twice is given up (skipped, one alert).
    It must run locally: a cloud routine cannot reach `127.0.0.1` or your vault.
+
+   Automated reports run with a narrow tool allowlist: read-only market, news-archive and wiki tools, no web search
+   (WebSearch is deliberately not allowed), no X sync and no account tools. Release and earnings calendar items they
+   cannot read appear as "calendar unknown" under UNKNOWN.
+
+   A manual `/speculate` names its files by the session start in UTC, which can equal a slot's file name (in summer
+   Europe open starts 06:00Z and Night 20:00Z). The tick then leaves your report alone, does not generate that slot
+   and alerts `automation_report_mismatch` once.
 
    *Manual fallback:* instead of the install script, create scheduled tasks in Claude Desktop / Claude Code on the
    same machine that run the `speculate` skill before each session (Europe/Warsaw time): 07:40 Europe open
    (08:00-12:00), 13:10 Europe/US overlap (13:30-17:30), 17:10 US (17:30-22:00), 21:40 Night (22:00-08:00).
+   The manual setup has no catch-up: a missed run is just a missing report.
 3. **Optional settings** in `.env`: `SPECULATION_SYMBOLS` (core symbols, default `BTC,ETH,XRP`),
    `SPECULATION_SCREEN_EXTRA` (extra screened symbols, default 3, `0` turns screening off), `SPECULATION_FEE_BPS`
    (default 5), `SPECULATION_TZ` (default `Europe/Warsaw`). Full list in [CLAUDE.md](../CLAUDE.md).
