@@ -12,13 +12,19 @@ const slot: Slot = {
 };
 
 test("speculatePrompt names the slot, window, session and file name", () => {
-  const p = speculatePrompt(slot);
+  const p = speculatePrompt(slot, "C:\\vault\\brain");
   assert.ok(p.includes("20261012-1400Z"));
   assert.ok(p.includes("2026-10-12T14:00:00.000Z"));
   assert.ok(p.includes("2026-10-12T16:00:00.000Z"));
   assert.ok(p.includes("session us"));
   assert.ok(p.includes("HHMMZ=1400Z"));
   assert.ok(p.includes("Do not offer to hand bets to the bot."));
+});
+
+test("speculatePrompt states BRAIN, because the run may not read .env", () => {
+  const p = speculatePrompt(slot, "C:\\vault\\brain");
+  assert.ok(p.includes("BRAIN is C:\\vault\\brain"));
+  assert.ok(p.includes("write the report and meta files with the Edit or Write tool"));
 });
 
 // The values of a variadic flag: everything after it up to the next `--flag`.

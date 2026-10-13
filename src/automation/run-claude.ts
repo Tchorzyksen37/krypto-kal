@@ -14,9 +14,13 @@ export type ClaudeRunner = (prompt: string, args: string[], timeoutMs: number) =
 
 const OUTPUT_CAP = 20_000;
 
-export function speculatePrompt(slot: Slot): string {
+// The run is denied Read(./.env), so the skill's "BRAIN is BRAIN_DIR from .env" cannot be resolved by the model;
+// the prompt states it. brain_write is not allowed in a run, so files are written with Edit/Write under BRAIN.
+export function speculatePrompt(slot: Slot, brainDir: string): string {
   const hhmm = new Date(slot.startMs).toISOString().slice(11, 16).replace(":", "");
   return (
+    `BRAIN is ${brainDir} (do not read .env; brain_write is not available, so write the report and meta files ` +
+    `with the Edit or Write tool under BRAIN/output/speculation/). ` +
     `Run the speculate skill for the 2-hour slot ${slot.id}: window start ${new Date(slot.startMs).toISOString()}, ` +
     `window end ${new Date(slot.endMs).toISOString()}, session ${slot.session}. ` +
     `Use exactly this window as the report's window and file name HHMMZ=${hhmm}Z. Do not offer to hand bets to the bot.`

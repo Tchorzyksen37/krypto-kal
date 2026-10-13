@@ -27,7 +27,7 @@ const STATE_DIR = "~/.krypto-kal/automation";
 const TIMEOUT_MS = 900_000;
 const PROBE_TIMEOUT_MS = 3_000;
 const RUN_LOG = "run-log.jsonl";
-const SCORE_PROMPT = "Run the speculation-score skill.";
+const scorePrompt = (brainDir: string): string => `BRAIN is ${brainDir} (do not read .env). Run the speculation-score skill.`;
 // MCP tools the speculation-score skill calls beyond the speculate allowlist: the scorer itself, and the fills
 // for its fallback when the tool is unavailable (kraken_futures_candles is already in the base list).
 const SCORE_MCP_TOOLS = ["speculation_score", "kraken_futures_fills"];
@@ -156,7 +156,7 @@ export interface ScoreDeps {
 export async function runScore(d: ScoreDeps): Promise<{ ok: boolean; detail: string }> {
   let detail: string;
   try {
-    const run = await d.runner(SCORE_PROMPT, scoreArgs(d.brainDir), d.timeoutMs);
+    const run = await d.runner(scorePrompt(d.brainDir), scoreArgs(d.brainDir), d.timeoutMs);
     if (run.ok) return { ok: true, detail: run.output.trim().slice(-2000) };
     detail = `claude ${run.timedOut ? "timed out" : `exit code ${run.exitCode}`}: ${run.output.slice(-500)}`;
   } catch (e) {
