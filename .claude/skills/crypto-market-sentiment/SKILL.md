@@ -69,6 +69,10 @@ Godziny UTC wynikają z czasu letniego lub zimowego; USA i Europa zmieniają cza
 
 Szczegółowa procedura (świece 1h, wzory, jak interpretować) jest w `references/derivatives-playbook.md`, sekcja "Analiza sesyjna". W etapie makro dodaj też kontekst sesyjny (indeksy azjatyckie i europejskie, decyzje banków, publikacje w danej sesji) - patrz `references/macro-checklist.md`.
 
+## Krok 2c: domknij braki danych
+
+Przeczytaj `references/gap-checks.md` i wykonaj zawarte tam polecenia dla każdej kategorii, której nie masz po krokach 1-2b (Fear & Greed, przepływy ETF, dominacja BTC, premie regionalne, FedWatch, konsensus publikacji, prognozy ropy, zamknięcia indeksów, klastry likwidacji, opcje, rozbicie sesyjne z 14 dni). Do sekcji "Do sprawdzenia" trafia tylko to, czego mimo tych poleceń nie udało się ustalić, razem z informacją, co próbowano. Pomiń kategorie spoza zakresu ustalonego w kroku 0.
+
 ## Krok 3: synteza i raport
 
 Przeczytaj `references/report-template.md` i trzymaj się tej struktury. Zacznij od werdyktu w 3-4 zdaniach (nastrój, faza, główne ryzyko, która sesja napędza ruch), a szczegóły dawaj niżej. Tabele stosuj do kalendarza i do scenariuszy, resztę pisz zwięzłą prozą.
@@ -82,5 +86,5 @@ Jeśli użytkownik chce zapisać wynik w Obsidianie, zapisz `BRAIN/output/sentim
 - **Jednostki.** Wolumen z Coinalyze bywa w jednostkach aktywa bazowego, nie w USD. Sprawdź, porównując z znanym wolumenem dobowym, zanim podasz kwoty w dolarach. Wskaźniki względne (udział kupujących, zmiana %) są bezpieczniejsze.
 - **Long/short kont to stan, nie przepływ.** Ratio kont liczy konta, nie wielkość pozycji, i samo w sobie nie dowodzi, że longi są dalej otwierane. Patrz na jego zmianę w czasie i zestawiaj z funding i taker flow.
 - **Mała próba.** Progi wyznaczone z kilku epizodów to heurystyki. Mów o tym wprost.
-- **Heatmapa likwidacji to estymacja.** `coinalyze_liquidation_heatmap_estimate` (interwał `4hour`, limit 500+) modeluje klastry z OI, ceny i long/short; zawsze oznaczaj ją jako ESTIMATE. Danych opcji w MCP nie ma: jeśli są potrzebne, wskaż je jako brakujące.
+- **Heatmapa likwidacji to estymacja.** `coinalyze_liquidation_heatmap_estimate` (interwał `4hour`, limit 500+) modeluje klastry z OI, ceny i long/short; zawsze oznaczaj ją jako ESTIMATE. Danych opcji w MCP nie ma: pobierz je poleceniem z `references/gap-checks.md` (Deribit), a dopiero gdy się nie uda, wskaż jako brakujące.
 - **Sprzeczne źródła makro.** Gdy dwa źródła podają różne liczby, podaj widełki i źródła.

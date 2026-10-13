@@ -77,6 +77,6 @@ Pod tabelą:
 
 ## 6. Do sprawdzenia / braki danych
 
-Lista brakujących danych (np. opcje, wykres CVD z dłuższego okresu) i rzeczy niepotwierdzone (np. wystąpienia, które jeszcze się nie odbyły lub nie zostały zweryfikowane).
+Tylko to, czego nie udało się ustalić po poleceniach z `references/gap-checks.md`. Format wiersza: `<brak> - próbowano: <polecenie>; wynik: <błąd / dane sprzed X>`. Dodaj rzeczy niepotwierdzone (np. wystąpienia, które jeszcze się nie odbyły lub nie zostały zweryfikowane) oraz dane z natury niedostępne w MCP (rzeczywiste poziomy likwidacji, zamiary dużych graczy).
 
 *Analiza danych, nie porada inwestycyjna.*
