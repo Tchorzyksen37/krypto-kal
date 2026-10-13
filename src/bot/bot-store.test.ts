@@ -2,6 +2,8 @@
 // Run: node --test bot/bot-store.test.ts
 
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { mkdtempSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
@@ -253,5 +255,31 @@ describe("persistence", () => {
     const second = new BotStore(path);
     assert.ok(second.putPolicy(policy(), 2_000) > a);
     second.close();
+  });
+});
+
+describe("concurrent processes", () => {
+  // The trader and the watchdog open the same file at the same moment. The busy timeout must already be set when the
+  // journal mode is switched, otherwise the second opener fails at once with "database is locked".
+  test("opening waits for a lock held by another process instead of failing at once", async () => {
+    const path = join(mkdtempSync(join(tmpdir(), "bot-store-")), "bot.db");
+    const holder = spawn(process.execPath, [
+      "-e",
+      `const { DatabaseSync } = require("node:sqlite");
+       const db = new DatabaseSync(process.argv[1]);
+       db.exec("CREATE TABLE held (x)");
+       db.exec("BEGIN EXCLUSIVE");
+       console.log("locked");
+       setTimeout(() => { db.exec("COMMIT"); db.close(); }, 600);`,
+      path,
+    ]);
+    await once(holder.stdout, "data"); // the child prints once it holds the lock
+    const started = Date.now();
+    const opened = new BotStore(path); // blocks until the child commits
+    assert.ok(Date.now() - started >= 200, "it should have waited for the lock");
+    opened.putMenu(menu());
+    assert.deepEqual(opened.getMenu("m1"), menu());
+    opened.close();
+    await once(holder, "exit");
   });
 });

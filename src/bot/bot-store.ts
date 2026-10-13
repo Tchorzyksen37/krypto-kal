@@ -44,9 +44,12 @@ export class BotStore {
     const file = expandHome(path);
     if (file !== ":memory:") mkdirSync(dirname(file), { recursive: true });
     this.db = new DatabaseSync(file);
+    // First, in its own statement: the trader and watchdog processes open the same file at the same moment, and
+    // switching the journal mode (or recovering a WAL left by a stopped process) needs a lock. With the timeout
+    // already set they wait for each other instead of failing with "database is locked".
+    this.db.exec("PRAGMA busy_timeout = 5000");
     this.db.exec(`
       PRAGMA journal_mode = WAL;
-      PRAGMA busy_timeout = 5000; -- the trader and watchdog processes write the same file; wait instead of failing
       CREATE TABLE IF NOT EXISTS menus (
         id TEXT PRIMARY KEY, data TEXT NOT NULL
       );
