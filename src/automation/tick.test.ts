@@ -147,6 +147,26 @@ test("an ok run without a meta file fails and does not hand off", async () => {
   });
 });
 
+test("an ok run without a meta file puts the tail of claude's output on one line in the failure", async () => {
+  await withHarness(async (h) => {
+    h.deps.runner = async () => ({ ...OK_RUN, output: `${"x".repeat(2000)}\nPermission denied:\n  Edit(report)\n` });
+    const r = await tick(h.deps);
+    assert.equal(r.status, "failed");
+    assert.match(r.detail, /claude output: \.\.\.x+ Permission denied: Edit\(report\)$/);
+    assert.ok(r.detail.length < 800);
+    assert.equal(latest(h.stateDir, SLOT.id)?.detail, r.detail);
+    assert.equal(h.alerts[0]!.detail.includes("\n"), false);
+    assert.match(h.alerts[0]!.detail, /Permission denied/);
+  });
+});
+
+test("an ok run with empty output says so", async () => {
+  await withHarness(async (h) => {
+    h.deps.runner = async () => ({ ...OK_RUN, output: "" });
+    assert.match((await tick(h.deps)).detail, /claude output: \(empty\)$/);
+  });
+});
+
 test("a meta file with invalid JSON fails generation", async () => {
   await withHarness(async (h) => {
     h.deps.runner = async () => {
