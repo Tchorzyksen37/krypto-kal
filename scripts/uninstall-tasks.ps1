@@ -72,8 +72,13 @@ if ($targets.Count -eq 0) {
     if ($cmd.Length -gt 110) { $cmd = $cmd.Substring(0, 110) + '...' }
     if ($DryRun) { Write-Line ("WhatIf: would stop {0} {1}: {2}" -f $t.Name, $t.ProcessId, $cmd) }
     if ($PSCmdlet.ShouldProcess("$($t.Name) $($t.ProcessId)", 'Stop process tree')) {
-      # taskkill /t ends the whole tree; a process that already went away with its parent is not an error.
-      & taskkill.exe /pid $t.ProcessId /t /f 2>&1 | Out-Null
+      # taskkill /t ends the whole tree, so later entries may already be gone: that is not an error. The
+      # redirect is done by cmd, because PowerShell 5.1 turns native stderr into a terminating error under Stop.
+      if ($null -eq (Get-Process -Id $t.ProcessId -ErrorAction SilentlyContinue)) {
+        Write-Line ("Already gone {0} {1}" -f $t.Name, $t.ProcessId)
+        continue
+      }
+      & cmd.exe /c "taskkill /pid $($t.ProcessId) /t /f >nul 2>&1"
       Write-Line ("Stopped {0} {1}: {2}" -f $t.Name, $t.ProcessId, $cmd)
     }
   }
