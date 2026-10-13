@@ -201,6 +201,35 @@ describe("sessions", () => {
     assert.equal(b.fill_from, "2026-10-03T13:00:00.000Z");
     assert.equal(b.entry_deadline, "2026-10-03T13:45:00.000Z"); // overlap session: 45 min
   });
+
+  test("the entry deadline never passes the window end", () => {
+    // 2-hour slot inside the night session (180 min deadline): capped at the slot end
+    const m = meta([xrpLong], { session: "night_asia", window: ["2026-10-03T20:00:00Z", "2026-10-03T22:00:00Z"], generated: "2026-10-03T20:10:00Z" });
+    const r = validateBets(m);
+    assert.equal(r.dropped.length, 0, JSON.stringify(r.dropped));
+    const b = r.bets[0]!;
+    assert.equal(b.id, "20261003-2000Z-XRP-1");
+    assert.equal(b.fill_from, "2026-10-03T20:10:00.000Z");
+    assert.equal(b.entry_deadline, "2026-10-03T22:00:00.000Z");
+    assert.equal(b.latest_close, "2026-10-03T22:45:00.000Z");
+  });
+
+  test("a window longer than the entry deadline leaves the deadline alone", () => {
+    const m = meta([xrpLong], { session: "eu_us_overlap", window: ["2026-10-03T11:30:00Z", "2026-10-03T15:30:00Z"], generated: "2026-10-03T11:30:00Z" });
+    const b = validateBets(m).bets[0]!;
+    assert.equal(b.entry_deadline, "2026-10-03T12:15:00.000Z");
+    assert.equal(b.latest_close, "2026-10-03T13:00:00.000Z");
+  });
+
+  test("a run after the window closed drops every bet", () => {
+    const btc: BetInput = { symbol: "BTC", side: "long", entry: 64950, stop_loss: 64700, take_profit: 65500, ttl_minutes: 45, probability: 0.45 };
+    const m = meta([xrpLong, btc], { generated: "2026-10-03T15:10:00Z" });
+    const r = validateBets(m);
+    assert.equal(r.bets.length, 0);
+    assert.deepEqual(r.dropped.map((d) => d.bet.symbol), ["XRP", "BTC"]);
+    for (const d of r.dropped) assert.equal(d.reason, "the report's window closed before it was checked");
+    assert.match(renderBestBets(r, m), /No bet this session/);
+  });
 });
 
 describe("bias", () => {

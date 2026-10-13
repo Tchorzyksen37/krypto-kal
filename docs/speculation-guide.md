@@ -10,7 +10,7 @@ Design details: [superpowers/plans/2026-10-03-speculation-mode.md](superpowers/p
 
 ## 1. What it is
 
-Four times a day, Claude writes a **speculative** report about the coming trading session into your Obsidian vault.
+Every 2 hours (automated, or four times a day by session when run by hand), Claude writes a **speculative** report about the coming trading window into your Obsidian vault.
 It takes what is measured (prices, open interest, funding, liquidations, macro, X posts), what cannot be seen, and
 what is possible but unconfirmed, and states the most probable continuation of the session:
 
@@ -33,7 +33,7 @@ Read this before using any bet.
   of edge. A losing streak of 5-8 bets is normal even if the edge is real.
 - **Break-even is not 50%.** With reward:risk `RR`, a bet breaks even at a win rate of `1 / (1 + RR)` before fees
   (33% at 2:1, 45% at 1.2:1). Fees and slippage push that up.
-- **You need many bets before concluding anything.** With 4 reports a day and many bets never reaching their entry,
+- **You need many bets before concluding anything.** With several reports a day and many bets never reaching their entry,
   expect roughly 30 filled bets after 1-2 weeks. That is enough to spot something badly broken, not enough to prove
   an edge. Telling a 40% from a 45% win rate takes hundreds of bets.
 - **"No bet" is a good answer.** Especially at night. A report without bets is not a failure.
@@ -50,18 +50,28 @@ Read this before using any bet.
    - `KRAKEN_FUTURES_RO_API_KEY` / `KRAKEN_FUTURES_RO_API_SECRET` (read-only: your positions and fills, used for scoring),
    - `BRAIN_DIR` pointing at the vault (`C:\Users\mtchorze\OneDrive\Documents\pierdoly`),
    - optionally `X_BEARER_TOKEN` for fresh X posts.
-2. **Scheduled tasks.** In Claude Desktop / Claude Code on the same machine, create four scheduled tasks that run the
-   `speculate` skill (Europe/Warsaw time):
+2. **Scheduled tasks (automated).** Install with `powershell -File scripts/install-tasks.ps1`; it registers the
+   Windows Task Scheduler tasks that run `npm run auto -- tick` on the 2-hour grid of even UTC hours (00:00Z ...
+   22:00Z). Check with `npm run auto -- status`. Each report covers one 2-hour slot and is named by the slot start
+   (`output/speculation/YYYY-MM-DD/HHMMZ.md`, UTC), and its bets can only fill until the slot ends.
 
-   | Fires | Report | Session window (local) |
-   |---|---|---|
-   | 07:40 | Europe open | 08:00-12:00 |
-   | 13:10 | Europe/US overlap | 13:30-17:30 |
-   | 17:10 | US session | 17:30-22:00 |
-   | 21:40 | Night (Asia) | 22:00-08:00 |
+   The machine must be awake and the server running (a tick checks the server first and records `server_down`
+   instead of starting a run without data). A late tick still generates the current slot until its entry cutoff;
+   older missed slots are logged as skipped, not generated. A slot that fails twice is given up (skipped, one alert).
+   It must run locally: a cloud routine cannot reach `127.0.0.1` or your vault.
 
-   The machine must be awake and the server running. A missed run is just a missing report; there is no catch-up.
-   They must run locally: a cloud routine cannot reach `127.0.0.1` or your vault.
+   Automated reports run with a narrow tool allowlist: read-only market, news-archive and wiki tools, no web search
+   (WebSearch is deliberately not allowed), no X sync and no account tools. Release and earnings calendar items they
+   cannot read appear as "calendar unknown" under UNKNOWN.
+
+   A manual `/speculate` names its files by the session start in UTC, which can equal a slot's file name (in summer
+   Europe open starts 06:00Z and Night 20:00Z). The tick then leaves your report alone, does not generate that slot
+   and alerts `automation_report_mismatch` once.
+
+   *Manual fallback:* instead of the install script, create scheduled tasks in Claude Desktop / Claude Code on the
+   same machine that run the `speculate` skill before each session (Europe/Warsaw time): 07:40 Europe open
+   (08:00-12:00), 13:10 Europe/US overlap (13:30-17:30), 17:10 US (17:30-22:00), 21:40 Night (22:00-08:00).
+   The manual setup has no catch-up: a missed run is just a missing report.
 3. **Optional settings** in `.env`: `SPECULATION_SYMBOLS` (core symbols, default `BTC,ETH,XRP`),
    `SPECULATION_SCREEN_EXTRA` (extra screened symbols, default 3, `0` turns screening off), `SPECULATION_FEE_BPS`
    (default 5), `SPECULATION_TZ` (default `Europe/Warsaw`). Full list in [CLAUDE.md](../CLAUDE.md).
@@ -71,7 +81,7 @@ session reports on the running session; its bets can only fill from the moment i
 
 ## 4. Daily workflow
 
-1. **A report appears** in `output/speculation/YYYY-MM-DD/HHMMZ.md` (HHMM is the session start in UTC, e.g.
+1. **A report appears** in `output/speculation/YYYY-MM-DD/HHMMZ.md` (HHMM is the slot or session start in UTC, e.g.
    `1130Z` = 13:30 Warsaw summer time).
 2. **Read the top first.** The Bias block says LONG / SHORT / NEUTRAL. Then the session profile and "who is
    trading". Then risks: they tell you what would make the call wrong.

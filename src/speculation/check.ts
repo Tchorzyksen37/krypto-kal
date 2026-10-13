@@ -114,6 +114,15 @@ export function optionsFor(meta: ReportMeta, options: Partial<CheckOptions> = {}
 
 export function validateBets(meta: ReportMeta, options: Partial<CheckOptions> = {}): CheckResult {
   const o = optionsFor(meta, options);
+  const windowStart = Date.parse(meta.window[0]);
+  // A manual run after the window opened can only be filled from the moment it was generated.
+  const start = Math.max(windowStart, Date.parse(meta.generated) || windowStart);
+  // Entries never outlive the report's window (a 2-hour slot ends before a session's deadline).
+  const windowEnd = Date.parse(meta.window[1]);
+  const deadline = Number.isFinite(windowEnd) ? Math.min(start + o.entryDeadlineMinutes * MIN, windowEnd) : start + o.entryDeadlineMinutes * MIN;
+  if (deadline <= start) {
+    return { bets: [], dropped: meta.bets.map((b) => ({ bet: b, reason: "the report's window closed before it was checked" })) };
+  }
   const bySymbol = new Map(meta.symbols.map((s) => [s.symbol, s]));
   const dropped: DroppedBet[] = [];
   const ok: (BetInput & { rr: number; score: number })[] = []; // score = expected R after fees
@@ -140,12 +149,8 @@ export function validateBets(meta: ReportMeta, options: Partial<CheckOptions> = 
     }
   }
 
-  const windowStart = Date.parse(meta.window[0]);
   const d = new Date(windowStart);
   const prefix = `${d.getUTCFullYear()}${pad(d.getUTCMonth() + 1)}${pad(d.getUTCDate())}-${pad(d.getUTCHours())}${pad(d.getUTCMinutes())}Z`;
-  // A manual run after the window opened can only be filled from the moment it was generated.
-  const start = Math.max(windowStart, Date.parse(meta.generated) || windowStart);
-  const deadline = start + o.entryDeadlineMinutes * MIN;
   const bets: Bet[] = kept.map((b, i) => {
     const { score: _score, ...rest } = b;
     const symBias = bySymbol.get(b.symbol)!.bias ?? "neutral";

@@ -5,7 +5,8 @@ description: Score past speculation bets using Kraken Futures fills and futures 
 
 # Speculation score
 
-Evaluates whether the speculation reports (four sessions a day) are worth anything. Design: section 9 of
+Evaluates whether the speculation reports (automated 2-hour slots, or one per session when run by hand) are worth
+anything. Design: section 9 of
 `docs/superpowers/plans/2026-10-03-speculation-mode.md`. Chat in English. The user does not upload anything:
 all data comes from the Kraken Futures API through the MCP tools.
 
