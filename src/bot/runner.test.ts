@@ -12,9 +12,9 @@ import { BotStore } from "./bot-store.ts";
 import { FakeClock } from "./clock.ts";
 import { defaultEngineRecord, loadEngineRecord, saveEngineRecord } from "./engine-state.ts";
 import { FeedingMarket, KrakenMarketData, type FuturesPublicApi } from "./market-data.ts";
-import { type Runtime, loop, startup, traderStep, watchdogStep } from "./runner.ts";
+import { type Runtime, loop, startup, traderStep, watchdogStep, writeDayReport } from "./runner.ts";
 import { T0, px } from "./sim-fixtures.ts";
-import { world } from "./trader-fixtures.ts";
+import { BTC, ETH, world } from "./trader-fixtures.ts";
 
 class Capture implements AlertSink {
   got: Alert[] = [];
@@ -101,6 +101,8 @@ describe("runner steps", () => {
 
   test("an unreachable funding endpoint is one incident per cause and hour, not one per step", async () => {
     const { w, rt } = runtime();
+    w.tick(99250);
+    await w.ex.placeOrder({ symbol: "PF_XBTUSD", side: "buy", orderType: "mkt", size: 0.004, reduceOnly: false, cliOrdId: "manual-1" }); // funding is only read while something is held
     w.market.fundingRates = async () => { throw new Error("HTTP 403"); };
     for (let i = 0; i < 5; i++) {
       w.tick(99250);
@@ -196,5 +198,44 @@ describe("market data", () => {
     assert.equal((await broken.ticker()).last, 100000);
     assert.equal(errors.length, 1);
     assert.ok(px(1, 1)); // fixtures stay importable
+  });
+});
+
+describe("runner – several symbols", () => {
+  const runtime2 = (o: { brainDir?: string } = {}) => {
+    const w = world({ symbols: [BTC, ETH] });
+    const rt: Runtime = { deps: w.deps, sim: w.ex, sinks: [new Capture()], ...(o.brainDir ? { brainDir: o.brainDir } : {}) };
+    return { w, rt };
+  };
+
+  test("hourly funding accrues for the held symbol only and is skipped while flat", async () => {
+    const { w, rt } = runtime2();
+    const accrued: (string | undefined)[] = [];
+    const accrue = rt.sim.accrueFunding.bind(rt.sim);
+    rt.sim.accrueFunding = (rates, symbol) => {
+      accrued.push(symbol);
+      accrue(rates, symbol);
+    };
+    w.tick(99250);
+    w.tickEth(2980);
+    await traderStep(rt); // flat: nothing accrued, but the hour is still marked
+    assert.deepEqual(accrued, []);
+    assert.equal(w.store.listDocs("funding_mark", 0).length, 1);
+
+    await w.ex.placeOrder({ symbol: ETH, side: "buy", orderType: "mkt", size: 0.05, reduceOnly: false, cliOrdId: "manual-1" });
+    w.clock.advance(3_600_000);
+    w.tick(99250);
+    w.tickEth(2980);
+    await traderStep(rt);
+    assert.deepEqual(accrued, [ETH]);
+  });
+
+  test("the vault report path is unchanged", async () => {
+    const brainDir = mkdtempSync(join(tmpdir(), "runner-brain-"));
+    const { w, rt } = runtime2({ brainDir });
+    w.tick(99250);
+    const path = await writeDayReport(rt, w.clock.now());
+    assert.equal(path, join(brainDir, "output", "bot", `report-${new Date(w.clock.now()).toISOString().slice(0, 10)}.md`));
+    assert.ok(existsSync(path!));
   });
 });

@@ -60,7 +60,7 @@ export class FakeMarket implements MarketData {
   last = 99250;
   center = 100000; // the hourly candles' open and close
   range = 800; // their high-low range, so the ATR
-  calls = { ticker: 0, candles: 0, contract: 0 }; // how often each read was made
+  calls = { ticker: 0, candles: 0, contract: 0, funding: 0 }; // how often each read was made
   ageMs = 0; // how old the quote is
   failTicker = false;
   failContract = false;
@@ -89,6 +89,7 @@ export class FakeMarket implements MarketData {
     return contract;
   }
   async fundingRates() {
+    this.calls.funding++;
     return [{ t: this.clock.now() - 1000, rate: this.rate }];
   }
 }

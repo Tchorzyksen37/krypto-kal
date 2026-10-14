@@ -14,7 +14,9 @@ import { describe, test } from "node:test";
 import type { TradeRecord } from "./engine.ts";
 import { type FuturesOpenOrder, type FuturesPosition, type OrderRequest, makeCliOrdId } from "./executor.ts";
 import { config } from "./sim-fixtures.ts";
-import { SL, TP1, TP2, arm, openPosition, world } from "./trader-fixtures.ts";
+import { BTC, ETH, SL, TP1, TP2, Wrapped, arm, openPosition, world } from "./trader-fixtures.ts";
+import { DryRunExecutor } from "./dry-run-executor.ts";
+import { saveEngineRecord } from "./engine-state.ts";
 import { type ProtectionInput, checkProtection, watchdogTick } from "./watchdog.ts";
 
 const GRACE = config.protect_timeout_sec * 2 * 1000; // 10 s
@@ -372,5 +374,43 @@ describe("watchdogTick", () => {
     await watchdogTick(w.deps);
     const rows = w.store.listJournal(0, "watchdog");
     assert.ok(rows.some((r) => r.decision.includes("place:bot-2-sl-100") && r.reason.includes("no_sl")));
+  });
+});
+
+describe("watchdog – several symbols", () => {
+  const SYMBOLS = [BTC, ETH];
+  const ethTrade = (): TradeRecord => ({
+    policyId: 2, symbol: ETH, direction: "long", entryCliOrdId: makeCliOrdId(2, "entry", 0), entryPrice: 2980,
+    plan: { size: 0.05, stop: 2900, ladder: [{ price: 3150, size: 0.025 }, { price: 3300, size: 0.025 }], leverage: 2 },
+    horizonEndMs: Date.now() + 1e9, protectSeq: 0,
+  });
+  const holdEth = async (w: ReturnType<typeof world>) => {
+    w.tick(99250);
+    w.tickEth(2980);
+    await w.ex.placeOrder({ symbol: ETH, side: "buy", orderType: "mkt", size: 0.05, reduceOnly: false, cliOrdId: "bot-2-entry-0" });
+  };
+
+  test("finds the position and orders on any allowed symbol and places repair orders on the position's symbol", async () => {
+    const w = world({ symbols: SYMBOLS });
+    await holdEth(w);
+    saveEngineRecord(w.store, { ...w.rec(), state: "OPEN", sinceMs: w.clock.now(), trade: ethTrade() });
+    assert.deepEqual(kinds(await watchdogTick(w.deps)), ["no_sl", "no_tp"]);
+    w.clock.advance(GRACE + 1000);
+    await watchdogTick(w.deps);
+    const sl = await w.order("bot-2-sl-100");
+    assert.deepEqual([sl?.symbol, sl?.orderType, sl?.stopPrice, sl?.reduceOnly], [ETH, "stp", 2900, true]);
+  });
+
+  test("a position outside config.symbols is not repaired and reports unexplained_position", async () => {
+    const w = world({ symbols: SYMBOLS });
+    await holdEth(w);
+    saveEngineRecord(w.store, { ...w.rec(), state: "OPEN", sinceMs: w.clock.now(), trade: ethTrade() });
+    const narrow = { ...w.deps.config, symbols: [BTC] };
+    const { marketFor: _unused, ...rest } = w.deps;
+    const deps = { ...rest, config: narrow, executor: new Wrapped(new DryRunExecutor({ store: w.store, clock: w.clock, config: narrow })) };
+    assert.deepEqual(kinds(await watchdogTick(deps)), ["unexplained_position"]);
+    w.clock.advance(GRACE + 1000);
+    await watchdogTick(deps);
+    assert.deepEqual(await w.ids(), []); // nothing placed for a position that is not the bot's to manage
   });
 });

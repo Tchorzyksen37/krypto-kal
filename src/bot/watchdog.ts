@@ -16,9 +16,9 @@
 
 import { createLogger } from "../core/logger.ts";
 import type { BotStore } from "./bot-store.ts";
-import type { BotConfig } from "./config.ts";
+import { type BotConfig, isAllowedSymbol } from "./config.ts";
 import type { TradeRecord } from "./engine.ts";
-import { loadEngineRecord } from "./engine-state.ts";
+import { type EngineRecord, loadEngineRecord } from "./engine-state.ts";
 import {
   type FuturesOpenOrder, type FuturesPosition, type OrderRequest, type OrderRole, isBotOrder, makeCliOrdId, parseCliOrdId,
 } from "./executor.ts";
@@ -38,7 +38,7 @@ export interface ProtectionIssue {
 
 export interface ProtectionInput {
   position: FuturesPosition | null;
-  orders: FuturesOpenOrder[]; // on the traded symbol
+  orders: FuturesOpenOrder[]; // on every configured symbol
   trade: TradeRecord | null; // the engine's record of the trade, if any
   filledRoles: OrderRole[]; // target rungs that already filled
   config: BotConfig;
@@ -127,16 +127,24 @@ export async function watchdogTick(d: TraderDeps): Promise<ProtectionIssue[]> {
   const now = clock.now();
   const wd = loadState(store);
 
-  let rec;
+  let rec: EngineRecord;
   let position: FuturesPosition | null;
   let orders: FuturesOpenOrder[];
   let filledRoles: OrderRole[] = [];
+  let explained = true;
   try {
     rec = loadEngineRecord(store);
     const [positions, open] = await Promise.all([executor.getPositions(), executor.getOpenOrders()]);
-    position = positions.find((p) => p.symbol === config.symbol) ?? null;
-    orders = open.filter((o) => o.symbol === config.symbol);
-    if (rec.trade) {
+    // The position to look after: the trade's symbol if held, else any allowed one, else (to report it) one outside.
+    position = positions.find((p) => isAllowedSymbol(config, p.symbol) && p.symbol === rec.trade?.symbol)
+      ?? positions.find((p) => isAllowedSymbol(config, p.symbol)) ?? positions[0] ?? null;
+    orders = open.filter((o) => isAllowedSymbol(config, o.symbol));
+    // A position that is not on a configured symbol, or not on the symbol the record names, is not explained by the
+    // record: it is reported and never repaired.
+    if (position && rec.trade && (!isAllowedSymbol(config, position.symbol) || (rec.trade.symbol && rec.trade.symbol !== position.symbol))) {
+      explained = false;
+    }
+    if (rec.trade && explained) {
       const fills = await executor.getFills(new Date(rec.tradeStartedMs ?? now - 24 * 3_600_000));
       filledRoles = filledTargets(fills, rec.trade.policyId);
     }
@@ -147,7 +155,8 @@ export async function watchdogTick(d: TraderDeps): Promise<ProtectionIssue[]> {
     return issues; // the clock of a pending repair keeps running
   }
 
-  const issues = checkProtection({ position, orders, trade: rec.trade, filledRoles, config });
+  const trade = explained ? rec.trade : null;
+  const issues = checkProtection({ position, orders, trade, filledRoles, config });
   if (issues.length === 0) {
     wd.sinceMs = null;
     wd.failedRepairs = 0;
@@ -158,7 +167,7 @@ export async function watchdogTick(d: TraderDeps): Promise<ProtectionIssue[]> {
 
   if (wd.sinceMs === null || now < wd.sinceMs) wd.sinceMs = now; // a clock that went backwards restarts the wait
   const graceMs = config.protect_timeout_sec * 2 * 1000;
-  const actions = now - wd.sinceMs >= graceMs ? await repair(d, wd, issues, position, orders, rec.trade, filledRoles) : [];
+  const actions = now - wd.sinceMs >= graceMs ? await repair(d, wd, issues, position, orders, trade, filledRoles) : [];
   report(d, wd, issues, actions, now);
   saveState(store, wd);
   return issues;
@@ -213,14 +222,14 @@ async function repair(
       const id = makeCliOrdId(trade.policyId, "sl", SL_SEQ_BASE + wd.slAttempts++);
       wd.failedRepairs++;
       await attempt(`place:${id}`, () => place({
-        symbol: config.symbol, side: closing, orderType: "stp", size: position.size, stopPrice: trade.lastStop ?? trade.plan.stop,
+        symbol: position.symbol, side: closing, orderType: "stp", size: position.size, stopPrice: trade.lastStop ?? trade.plan.stop,
         reduceOnly: true, triggerSignal: "mark", cliOrdId: id,
       }));
     } else {
       // It did not work: a position with no stop is closed.
       const id = makeCliOrdId(trade.policyId, "close", CLOSE_SEQ_BASE + wd.closeAttempts++);
       await attempt(`place:${id}`, () => place({
-        symbol: config.symbol, side: closing, orderType: "mkt", size: position.size, reduceOnly: true, cliOrdId: id,
+        symbol: position.symbol, side: closing, orderType: "mkt", size: position.size, reduceOnly: true, cliOrdId: id,
       }));
     }
     return actions;
@@ -243,7 +252,7 @@ async function repair(
     if (rung && missing > EPS) {
       const id = makeCliOrdId(trade.policyId, rung.role, TP_SEQ_BASE + wd.tpAttempts++);
       await attempt(`place:${id}`, () => place({
-        symbol: config.symbol, side: closing, orderType: "lmt", size: missing, limitPrice: rung.price, reduceOnly: true, cliOrdId: id,
+        symbol: position.symbol, side: closing, orderType: "lmt", size: missing, limitPrice: rung.price, reduceOnly: true, cliOrdId: id,
       }));
     }
   }

@@ -14,7 +14,9 @@ import { describe, test } from "node:test";
 import type { FuturesCandle } from "../providers/kraken/kraken-futures-client.ts";
 import { saveEngineRecord } from "./engine-state.ts";
 import { reconcile } from "./reconcile.ts";
-import { E, MIN, SL, TP1, TP2, arm, openPosition, reasons, world } from "./trader-fixtures.ts";
+import { BTC, ETH, E, MIN, SL, TP1, TP2, Wrapped, arm, openPosition, reasons, world } from "./trader-fixtures.ts";
+import { DryRunExecutor } from "./dry-run-executor.ts";
+import type { Replayer } from "./reconcile.ts";
 import { T0, config } from "./sim-fixtures.ts";
 
 const kinds = (r: { incidents: { kind: string }[] }) => r.incidents.map((i) => i.kind).sort();
@@ -322,5 +324,76 @@ describe("downtime (the simulated exchange)", () => {
     const r = await reconcile(w.deps, { replayer: w.ex });
     assert.equal(r.clean, true);
     assert.deepEqual(r.incidents, []);
+  });
+});
+
+describe("several symbols", () => {
+  const SYMBOLS = [BTC, ETH];
+  const buy = (w: ReturnType<typeof world>, symbol: string, size: number, cliOrdId: string) =>
+    w.ex.placeOrder({ symbol, side: "buy", orderType: "mkt", size, reduceOnly: false, cliOrdId });
+
+  test("replays and accrues funding for the exposed symbol using that symbol's market", async () => {
+    const w = world({ symbols: SYMBOLS, reconciled: false });
+    w.tick(99250);
+    w.tickEth(2980);
+    await buy(w, ETH, 0.05, "bot-2-entry-0");
+    const seen: { replay: (string | undefined)[]; funding: (string | undefined)[] } = { replay: [], funding: [] };
+    const replayer: Replayer = {
+      replay: (_c, _i, symbol) => void seen.replay.push(symbol),
+      accrueFunding: (_r, symbol) => void seen.funding.push(symbol),
+      lastTickMs: () => w.clock.now() - 5 * MIN,
+    };
+    await reconcile(w.deps, { replayer });
+    assert.deepEqual(seen, { replay: [ETH], funding: [ETH] });
+    assert.ok(w.ethMarket.calls.candles > 0 && w.ethMarket.calls.funding > 0);
+    assert.equal(w.market.calls.candles, 0);
+    assert.equal(w.market.calls.funding, 0);
+  });
+
+  test("two positions on different symbols: unclean, halt multiple_positions", async () => {
+    const w = world({ symbols: SYMBOLS, reconciled: false });
+    w.tick(99250);
+    w.tickEth(2980);
+    await buy(w, BTC, 0.004, "manual-1");
+    await buy(w, ETH, 0.05, "manual-2");
+    const r = await reconcile(w.deps, { replayer: w.ex });
+    assert.equal(r.clean, false);
+    assert.equal(w.rec().state, "HALTED");
+    assert.deepEqual([w.rec().halt?.reason, w.rec().halt?.manualAck], ["multiple_positions", true]);
+    assert.ok(kinds(r).includes("multiple_positions"));
+  });
+
+  test("a position on a symbol outside config.symbols: unclean, halt position_outside_symbols", async () => {
+    const w = world({ symbols: SYMBOLS, reconciled: false });
+    w.tick(99250);
+    w.tickEth(2980);
+    await buy(w, ETH, 0.05, "manual-2");
+    const narrow = { ...w.deps.config, symbols: [BTC] };
+    const { marketFor: _unused, ...rest } = w.deps;
+    const sim = new DryRunExecutor({ store: w.store, clock: w.clock, config: narrow });
+    const r = await reconcile({ ...rest, config: narrow, executor: new Wrapped(sim) }, { replayer: sim });
+    assert.equal(r.clean, false);
+    assert.deepEqual([w.rec().halt?.reason, w.rec().halt?.manualAck], ["position_outside_symbols", true]);
+  });
+
+  test("an orphan bot order on another allowed symbol is cancelled", async () => {
+    const w = world({ symbols: SYMBOLS, reconciled: false });
+    w.tick(99250);
+    w.tickEth(2980);
+    await w.ex.placeOrder({ symbol: ETH, side: "buy", orderType: "lmt", size: 0.05, limitPrice: 2900, reduceOnly: false, cliOrdId: "bot-9-entry-0" });
+    const r = await reconcile(w.deps, { replayer: w.ex });
+    assert.equal(r.clean, true);
+    assert.deepEqual(await w.ids(), []);
+    assert.ok(kinds(r).includes("orphan_bot_order"));
+  });
+
+  test("a foreign order on any allowed symbol is reported and left alone", async () => {
+    const w = world({ symbols: SYMBOLS, reconciled: false });
+    w.tick(99250);
+    w.tickEth(2980);
+    await w.ex.placeOrder({ symbol: ETH, side: "buy", orderType: "lmt", size: 0.05, limitPrice: 2900, reduceOnly: false, cliOrdId: "manual-9" });
+    const r = await reconcile(w.deps, { replayer: w.ex });
+    assert.ok(kinds(r).includes("foreign_order"));
+    assert.deepEqual(await w.ids(), ["manual-9"]);
   });
 });

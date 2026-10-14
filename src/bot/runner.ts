@@ -15,7 +15,7 @@ import type { DryRunExecutor } from "./dry-run-executor.ts";
 import { dayStartMs, tradingDay } from "./limits.ts";
 import { reconcile, type ReconcileResult } from "./reconcile.ts";
 import { buildReport, renderReport } from "./report.ts";
-import { type TraderDeps, runCycle } from "./trader.ts";
+import { type TraderDeps, marketOf, runCycle } from "./trader.ts";
 import { watchdogTick } from "./watchdog.ts";
 
 const log = createLogger("bot-runner");
@@ -63,7 +63,10 @@ export async function traderStep(rt: Runtime): Promise<void> {
   const hour = Math.floor(clock.now() / HOUR_MS);
   if (store.getKv(LAST_FUNDING_KEY) !== String(hour)) {
     try {
-      rt.sim.accrueFunding(await rt.deps.market.fundingRates());
+      // Only a held symbol can owe funding; while flat nothing is read.
+      for (const { symbol } of await rt.sim.getPositions()) {
+        rt.sim.accrueFunding(await marketOf(rt.deps, symbol).fundingRates(), symbol);
+      }
       const account = await rt.sim.getAccount();
       store.putDoc("funding_mark", String(hour), clock.now(), { t: clock.now(), funding: account.funding });
       store.setKv(LAST_FUNDING_KEY, String(hour));
