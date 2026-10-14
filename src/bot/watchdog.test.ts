@@ -24,7 +24,7 @@ const kinds = (issues: { kind: string }[]) => issues.map((i) => i.kind).sort();
 
 const ID = 2;
 const trade: TradeRecord = {
-  policyId: ID, direction: "long", entryCliOrdId: makeCliOrdId(ID, "entry", 0), entryPrice: 99245,
+  policyId: ID, symbol: "PF_XBTUSD", direction: "long", entryCliOrdId: makeCliOrdId(ID, "entry", 0), entryPrice: 99245,
   plan: { size: 0.004, stop: 98000, ladder: [{ price: 102000, size: 0.002 }, { price: 104000, size: 0.002 }], leverage: 2 },
   horizonEndMs: Date.now() + 1e9, protectSeq: 0,
 };

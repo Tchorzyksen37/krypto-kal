@@ -37,7 +37,7 @@ const policy = (over: Partial<Policy> = {}): Policy => ({
 const contract: Contract = { tickSize: 0.5, sizeStep: 0.0001, minSize: 0.0001 };
 
 const base = (over: Partial<Snapshot> = {}): Snapshot => ({
-  nowMs: NOW, lastClockMs: NOW - 1000, state: "FLAT", stateSinceMs: NOW - 60_000, halt: null, trade: null,
+  nowMs: NOW, lastClockMs: NOW - 1000, symbol: "PF_XBTUSD", positionIssue: null, state: "FLAT", stateSinceMs: NOW - 60_000, halt: null, trade: null,
   position: null, openOrders: [], price: px(99250, NOW), priceAgeSec: 1, atr: 800,
   policy: { id: ID, policy: policy(), scenario: longScenario }, inZoneSinceMs: NOW - 60_000,
   reconciled: true, foreignExposure: false, dailyLossBreached: false, liquidated: false, cooldownUntilMs: null,
@@ -47,7 +47,7 @@ const base = (over: Partial<Snapshot> = {}): Snapshot => ({
 const shortPolicy = { id: ID, policy: policy({ bias: -0.6, allowed_directions: ["short"] }), scenario: shortScenario };
 
 const trade = (over: Partial<TradeRecord> = {}): TradeRecord => ({
-  policyId: ID, direction: "long", entryCliOrdId: makeCliOrdId(ID, "entry", 0), entryPrice: 99245,
+  policyId: ID, symbol: "PF_XBTUSD", direction: "long", entryCliOrdId: makeCliOrdId(ID, "entry", 0), entryPrice: 99245,
   plan: { size: 0.004, stop: 98000, ladder: [{ price: 102000, size: 0.002 }, { price: 104000, size: 0.002 }], leverage: 2 },
   horizonEndMs: NOW + 24 * 60 * MIN, protectSeq: 0, ...over,
 });
@@ -731,5 +731,65 @@ describe("decide – properties over random snapshots", () => {
         if (req.reduceOnly && s.position) assert.ok(req.size <= s.position.size + 1e-12, `${req.cliOrdId} larger than the position`);
       }
     }
+  });
+});
+
+describe("decide – several symbols", () => {
+  const ETH = "PF_ETHUSD";
+  const two = { ...config, symbols: ["PF_XBTUSD", ETH] };
+  const ethPolicy = (over: Partial<Policy> = {}) => ({ id: ID, policy: policy({ symbol: ETH, ...over }), scenario: longScenario });
+
+  test("flat: the entry order and the TradeRecord carry the snapshot symbol", () => {
+    const a = decide(base({ symbol: ETH, policy: ethPolicy() }), two);
+    assert.equal(only(places(a)).symbol, ETH);
+    assert.equal(only(transitions(a)).trade?.symbol, ETH);
+  });
+
+  test("protection and close orders use the trade's symbol", () => {
+    const t = trade({ symbol: ETH });
+    const prot = decide(base({ symbol: ETH, state: "PROTECTING", stateSinceMs: NOW, trade: t, position: position({ symbol: ETH }), openOrders: [] }), two);
+    assert.ok(places(prot).length >= 2);
+    for (const r of places(prot)) assert.equal(r.symbol, ETH);
+    const stopped = decide(base({
+      symbol: ETH, state: "OPEN", trade: trade({ symbol: ETH, horizonEndMs: NOW - 1 }), position: position({ symbol: ETH }),
+      openOrders: protectedOrders().map((o) => ({ ...o, symbol: ETH })),
+    }), two);
+    assert.equal(only(places(stopped)).symbol, ETH);
+  });
+
+  test("positionIssue multiple_positions halts with manual acknowledgement", () => {
+    const h = only(halts(decide(base({ positionIssue: "multiple_positions" }), two)));
+    assert.deepEqual([h.reason, h.manualAck], ["multiple_positions", true]);
+  });
+
+  test("positionIssue position_outside_symbols halts", () => {
+    const h = only(halts(decide(base({ positionIssue: "position_outside_symbols", state: "OPEN", trade: trade(), position: position() }), two)));
+    assert.deepEqual([h.reason, h.manualAck], ["position_outside_symbols", true]);
+  });
+
+  test("a position issue does not re-halt an engine that is already HALTED", () => {
+    const a = decide(base({ state: "HALTED", halt: { reason: "multiple_positions", manualAck: true, untilMs: null }, positionIssue: "multiple_positions" }), two);
+    assert.deepEqual(halts(a), []);
+  });
+
+  test("a live policy for another symbol does not close or flip an open position", () => {
+    const flip = ethPolicy({ bias: -0.6, allowed_directions: ["short"] });
+    const a = decide(base({ state: "OPEN", trade: trade(), position: position(), openOrders: protectedOrders(), policy: flip }), two);
+    assert.deepEqual(skips(a), ["holding"]);
+    assert.deepEqual(places(a), []);
+  });
+
+  test("a resting entry is withdrawn with reason policy_symbol_changed when the live policy moves to another symbol", () => {
+    const a = decide(base({ state: "ENTERING", trade: trade(), openOrders: [entryOrder()], policy: ethPolicy() }), two);
+    assert.deepEqual(cancels(a), [makeCliOrdId(ID, "entry", 0)]);
+    const c = a.find((x) => x.type === "cancel");
+    assert.equal(c?.reason, "policy_symbol_changed");
+    assert.equal(only(transitions(a)).to, "FLAT");
+  });
+
+  test("botOrders sees leftovers on every allowed symbol in COOLDOWN", () => {
+    const left = order(makeCliOrdId(ID, "tp1", 0), { symbol: ETH });
+    const a = decide(base({ state: "COOLDOWN", cooldownUntilMs: NOW + 10 * MIN, openOrders: [left] }), two);
+    assert.deepEqual(cancels(a), [left.cliOrdId]);
   });
 });

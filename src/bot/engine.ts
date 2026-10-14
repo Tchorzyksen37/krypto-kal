@@ -10,7 +10,7 @@
 // Reduce-only mode is not a state: stale data, no policy or an expired policy only blocks entries. Positions keep
 // their stops (which may be tightened and never widened) and are not closed because a policy lapsed.
 
-import type { BotConfig } from "./config.ts";
+import { type BotConfig, isAllowedSymbol } from "./config.ts";
 import {
   type FuturesOpenOrder, type FuturesPosition, type OrderRequest, type OrderRole, type PriceEvent, isBotOrder,
   makeCliOrdId, parseCliOrdId,
@@ -24,6 +24,7 @@ export type EngineState = "FLAT" | "ENTERING" | "PROTECTING" | "OPEN" | "REDUCIN
 // The trade in progress, decided in FLAT and persisted by the trader until the position is gone.
 export interface TradeRecord {
   policyId: number;
+  symbol: string; // the contract this trade is on; every order of the trade uses it
   direction: "long" | "short";
   entryCliOrdId: string;
   entryPrice: number; // the limit price of the entry, the basis of 1R
@@ -42,12 +43,14 @@ export interface PolicyView {
 export interface Snapshot {
   nowMs: number;
   lastClockMs: number; // the newest time seen before this cycle
+  symbol: string; // the active symbol: the open trade's, else the held position's, else the live policy's
+  positionIssue: "multiple_positions" | "position_outside_symbols" | null; // exposure the bot cannot manage: halts
   state: EngineState;
   stateSinceMs: number;
   halt: { reason: string; manualAck: boolean; untilMs: number | null } | null;
   trade: TradeRecord | null;
-  position: FuturesPosition | null; // on the configured symbol
-  openOrders: FuturesOpenOrder[]; // on the configured symbol
+  position: FuturesPosition | null; // the position on the active symbol
+  openOrders: FuturesOpenOrder[]; // on every configured symbol
   price: PriceEvent | null;
   priceAgeSec: number | null;
   atr: number | null;
@@ -100,6 +103,7 @@ export function reduceOnlyReason(s: Snapshot, config: BotConfig): string | null 
 export function decide(s: Snapshot, config: BotConfig): Action[] {
   if (s.nowMs < s.lastClockMs) return timeUntrusted(s, config);
   if (s.liquidated) return [halt("liquidation_or_adl", true)];
+  if (s.positionIssue && s.state !== "HALTED") return [halt(s.positionIssue, true)];
   if (s.dailyLossBreached && s.state !== "HALTED") {
     // Halt until the next reset hour. Existing protection stays; only a resting entry is withdrawn.
     const entry = s.state === "ENTERING" && s.trade ? byId(s, s.trade.entryCliOrdId) : undefined;
@@ -176,13 +180,13 @@ function flat(s: Snapshot, config: BotConfig): Action[] {
 
   const cliOrdId = makeCliOrdId(p.id, "entry", s.counters.entriesToday);
   const trade: TradeRecord = {
-    policyId: p.id, direction: sc.direction, entryCliOrdId: cliOrdId, entryPrice: entry,
+    policyId: p.id, symbol: s.symbol, direction: sc.direction, entryCliOrdId: cliOrdId, entryPrice: entry,
     plan: { size: plan.size, stop: plan.stop, ladder: plan.ladder, leverage: plan.leverage },
     horizonEndMs: s.nowMs + sc.horizonHours * HOUR_MS, protectSeq: 0,
   };
   return [
     place({
-      symbol: config.symbol, side: dir > 0 ? "buy" : "sell", orderType: "lmt", size: plan.size, limitPrice: entry,
+      symbol: s.symbol, side: dir > 0 ? "buy" : "sell", orderType: "lmt", size: plan.size, limitPrice: entry,
       reduceOnly: false, cliOrdId, processBefore: new Date(s.nowMs + config.entry_timeout_sec * 1000).toISOString(),
     }, "entry"),
     go("ENTERING", "entry_placed", { trade }),
@@ -216,6 +220,7 @@ function abandonReason(s: Snapshot, config: BotConfig, trade: TradeRecord): stri
   if (blocked) return blocked;
   const dir = trade.direction === "long" ? 1 : -1;
   const p = s.policy!;
+  if (p.policy.symbol !== trade.symbol) return "policy_symbol_changed"; // the live policy is about another contract now
   if (!p.policy.allowed_directions.includes(trade.direction)) return "direction_not_allowed";
   if (p.policy.bias * dir < 0) return "bias_conflict";
   const sc = p.scenario;
@@ -249,7 +254,7 @@ function protectionActions(s: Snapshot, trade: TradeRecord, config: BotConfig): 
   const stop = findRole(s, trade, "sl");
   if (!stop) {
     out.push(place({
-      symbol: config.symbol, side: closing, orderType: "stp", size: pos.size, stopPrice: trade.lastStop ?? trade.plan.stop,
+      symbol: trade.symbol, side: closing, orderType: "stp", size: pos.size, stopPrice: trade.lastStop ?? trade.plan.stop,
       reduceOnly: true, triggerSignal: "mark", cliOrdId: makeCliOrdId(trade.policyId, "sl", trade.protectSeq),
     }, "protect_stop"));
   } else if (sizeDiffers(stop, pos.size)) {
@@ -265,7 +270,7 @@ function protectionActions(s: Snapshot, trade: TradeRecord, config: BotConfig): 
     const existing = findRole(s, trade, role);
     if (!existing) {
       out.push(place({
-        symbol: config.symbol, side: closing, orderType: "lmt", size: rung.size, limitPrice: rung.price, reduceOnly: true,
+        symbol: trade.symbol, side: closing, orderType: "lmt", size: rung.size, limitPrice: rung.price, reduceOnly: true,
         cliOrdId: makeCliOrdId(trade.policyId, role, trade.protectSeq),
       }, "protect_target"));
     } else if (sizeDiffers(existing, rung.size)) {
@@ -289,8 +294,9 @@ function open(s: Snapshot, config: BotConfig): Action[] {
 
   if (s.nowMs >= trade.horizonEndMs) return [closeAction(s, config, 0, "time_stop"), go("REDUCING", "time_stop")];
 
-  // An expired policy is not authoritative: it never closes a position. A live one can.
-  if (s.policy && Date.parse(s.policy.policy.valid_until) > s.nowMs) {
+  // An expired policy is not authoritative: it never closes a position. A live one can, but only a policy for the
+  // symbol of this trade: a view about another contract says nothing about this position.
+  if (s.policy && s.policy.policy.symbol === trade.symbol && Date.parse(s.policy.policy.valid_until) > s.nowMs) {
     const dir = trade.direction === "long" ? 1 : -1;
     if (!s.policy.policy.allowed_directions.includes(trade.direction)) return [closeAction(s, config, 0, "policy_void"), go("REDUCING", "policy_void")];
     if (s.policy.policy.bias * dir < 0) return [closeAction(s, config, 0, "policy_flip"), go("REDUCING", "policy_flip")];
@@ -367,7 +373,7 @@ function halted(s: Snapshot, config: BotConfig): Action[] {
 function closeAction(s: Snapshot, config: BotConfig, attempt: number, reason: string): Action {
   const pos = s.position!;
   return place({
-    symbol: config.symbol, side: pos.side === "long" ? "sell" : "buy", orderType: "mkt", size: pos.size, reduceOnly: true,
+    symbol: s.symbol, side: pos.side === "long" ? "sell" : "buy", orderType: "mkt", size: pos.size, reduceOnly: true,
     cliOrdId: makeCliOrdId(s.trade?.policyId ?? 0, "close", attempt),
   }, reason);
 }
@@ -396,7 +402,7 @@ function findRoleAny(s: Snapshot, role: OrderRole): BotOrder | undefined {
 
 // Open orders the bot created on the symbol. Anything else (a manual order) is never touched.
 function botOrders(s: Snapshot, config: BotConfig): BotOrder[] {
-  return s.openOrders.filter(hasId).filter((o) => isBotOrder(o.cliOrdId) && o.symbol === config.symbol);
+  return s.openOrders.filter(hasId).filter((o) => isBotOrder(o.cliOrdId) && isAllowedSymbol(config, o.symbol));
 }
 
 // An order whose remaining size differs from `size`. An exchange that omits the field is taken to be right.

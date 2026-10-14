@@ -16,30 +16,38 @@
 
 import type { BotStore } from "./bot-store.ts";
 import type { Clock } from "./clock.ts";
-import type { BotConfig } from "./config.ts";
+import { type BotConfig, isAllowedSymbol } from "./config.ts";
 import { type Action, type PolicyView, type Snapshot, decide } from "./engine.ts";
 import { type EngineRecord, loadEngineRecord, saveEngineRecord } from "./engine-state.ts";
 import { type Executor, type MarketData, type OrderRole, isBotOrder, parseCliOrdId } from "./executor.ts";
 import { atr } from "./indicators.ts";
 import { dailyLossBreached, dayStartMs, netRealizedSince, recordPlacedOrder, tradingDay } from "./limits.ts";
 import { createLogger } from "../core/logger.ts";
-import { effectivePolicy, resolveScenario } from "./policy.ts";
+import { type Policy, effectivePolicy, resolveScenario } from "./policy.ts";
 import type { Contract } from "./sizing.ts";
 
 const log = createLogger("trader");
 
 export const JOURNAL_HEARTBEAT_MS = 60_000;
-const CONTRACT_CACHE_KEY = "contract:cache";
+const CONTRACT_CACHE_KEY = "contract:cache"; // one contract before there were several symbols; read for the primary symbol
 const JOURNAL_LAST_KEY = "journal:last";
 const UNAVAILABLE_KEY = "journal:unavailable";
 
 export interface TraderDeps {
   executor: Executor;
-  market: MarketData;
+  market: MarketData; // the primary symbol's (config.symbols[0])
+  marketFor?: (symbol: string) => MarketData; // the market of any configured symbol; without it only the primary one exists
   store: BotStore;
   clock: Clock;
   config: BotConfig;
   configHash: string;
+}
+
+// The market of `symbol`. Without a factory only the primary symbol has one.
+export function marketOf(d: TraderDeps, symbol: string): MarketData {
+  if (d.marketFor) return d.marketFor(symbol);
+  if (symbol === d.config.symbols[0]) return d.market;
+  throw new Error(`no market for ${symbol}`);
 }
 
 // ---- snapshot -------------------------------------------------------------------------------------------------------
@@ -52,7 +60,7 @@ export async function buildSnapshot(d: TraderDeps): Promise<Snapshot> {
 }
 
 async function snapshotFrom(d: TraderDeps, rec: EngineRecord): Promise<Snapshot> {
-  const { executor, market, store, clock, config } = d;
+  const { executor, store, clock, config } = d;
   const nowMs = clock.now();
   const dayStart = dayStartMs(nowMs, config.day_reset_utc_hour);
   const fillsSince = Math.min(dayStart, rec.tradeStartedMs ?? dayStart);
@@ -60,8 +68,20 @@ async function snapshotFrom(d: TraderDeps, rec: EngineRecord): Promise<Snapshot>
   const [positions, orders, fills, account] = await Promise.all([
     executor.getPositions(), executor.getOpenOrders(), executor.getFills(new Date(fillsSince)), executor.getAccount(),
   ]);
-  const position = positions.find((p) => p.symbol === config.symbol) ?? null;
-  const openOrders = orders.filter((o) => o.symbol === config.symbol);
+  const allowed = positions.filter((p) => isAllowedSymbol(config, p.symbol));
+  const positionIssue = positions.length > allowed.length ? "position_outside_symbols" as const
+    : new Set(positions.map((p) => p.symbol)).size > 1 ? "multiple_positions" as const : null;
+  const policy = policyView(d);
+
+  // The active symbol: the open trade's (an old record has none: the held position's, else the primary symbol),
+  // else the held position's, else the live policy's, else the primary symbol.
+  const symbol = rec.trade?.symbol
+    ?? allowed[0]?.symbol
+    ?? (rec.trade ? config.symbols[0]! : (policy?.policy.symbol ?? config.symbols[0]!));
+  if (rec.trade && !rec.trade.symbol) rec.trade = { ...rec.trade, symbol }; // persisted by the cycle's next save
+  const position = allowed.find((p) => p.symbol === symbol) ?? null;
+  const openOrders = orders.filter((o) => isAllowedSymbol(config, o.symbol));
+  const market = marketOf(d, symbol);
 
   const quote = await attempt(() => market.ticker());
   const price = quote && [quote.last, quote.mark, quote.bid, quote.ask].every((x) => Number.isFinite(x) && x > 0) ? quote : null;
@@ -74,12 +94,14 @@ async function snapshotFrom(d: TraderDeps, rec: EngineRecord): Promise<Snapshot>
   const latest = rates?.length ? rates[rates.length - 1]!.rate : 0;
   const fundingBpsPerHour = Number.isFinite(latest) ? latest * 10_000 : 0;
 
-  const contract = await contractOf(d);
-  const policy = policyView(d);
+  const contract = await contractOf(d, symbol, market);
 
-  const scenario = policy?.scenario ?? null;
+  // A scenario describes one contract: it only counts against the price of the active symbol.
+  const scenario = policy && policy.policy.symbol === symbol ? policy.scenario : null;
   const fresh = price !== null && priceAgeSec !== null && priceAgeSec <= config.stale_data_max_age_sec;
   const inZone = !!(fresh && scenario && price.last >= scenario.entryLow && price.last <= scenario.entryHigh);
+  const timerSymbol = rec.inZoneSymbol ?? config.symbols[0]!; // an old record's timer was for the only symbol
+  const inZoneSince = timerSymbol === symbol ? rec.inZoneSinceMs : null; // the timer never carries over to another symbol
 
   const day = tradingDay(nowMs, config.day_reset_utc_hour);
   const trade = rec.trade;
@@ -90,9 +112,9 @@ async function snapshotFrom(d: TraderDeps, rec: EngineRecord): Promise<Snapshot>
     : 0;
 
   return {
-    nowMs, lastClockMs: rec.lastClockMs, state: rec.state, stateSinceMs: rec.sinceMs, halt: rec.halt, trade,
+    nowMs, lastClockMs: rec.lastClockMs, symbol, positionIssue, state: rec.state, stateSinceMs: rec.sinceMs, halt: rec.halt, trade,
     position, openOrders, price, priceAgeSec, atr: atrValue, policy,
-    inZoneSinceMs: inZone ? (rec.inZoneSinceMs ?? nowMs) : null,
+    inZoneSinceMs: inZone ? (inZoneSince ?? nowMs) : null,
     reconciled: rec.reconciled,
     foreignExposure: openOrders.some((o) => !isBotOrder(o.cliOrdId)),
     dailyLossBreached: dailyLossBreached({ realized: netRealizedSince(fills, dayStart, config), unrealized: account.unrealizedPnl, config }),
@@ -133,13 +155,14 @@ function policyView(d: TraderDeps): PolicyView | null {
 
 // The contract changes rarely: a failed read falls back to the last good one, and only a bot that has never
 // had one cannot build a snapshot.
-async function contractOf(d: TraderDeps): Promise<Contract> {
-  const fresh = await attempt(() => d.market.contract());
+async function contractOf(d: TraderDeps, symbol: string, market: MarketData): Promise<Contract> {
+  const key = `${CONTRACT_CACHE_KEY}:${symbol}`;
+  const fresh = await attempt(() => market.contract());
   if (fresh && [fresh.tickSize, fresh.sizeStep, fresh.minSize].every((x) => Number.isFinite(x) && x > 0)) {
-    d.store.setKv(CONTRACT_CACHE_KEY, JSON.stringify(fresh));
+    d.store.setKv(key, JSON.stringify(fresh));
     return fresh;
   }
-  const cached = d.store.getKv(CONTRACT_CACHE_KEY);
+  const cached = d.store.getKv(key) ?? (symbol === d.config.symbols[0] ? d.store.getKv(CONTRACT_CACHE_KEY) : undefined);
   if (cached) return JSON.parse(cached) as Contract;
   throw new Error("the contract specification is unavailable and none is cached");
 }
@@ -232,6 +255,7 @@ function withoutEntries(actions: Action[]): Action[] {
 async function execute(d: TraderDeps, snap: Snapshot, rec: EngineRecord, actions: Action[]): Promise<void> {
   const { executor, store, config } = d;
   rec.inZoneSinceMs = snap.inZoneSinceMs;
+  rec.inZoneSymbol = snap.inZoneSinceMs === null ? null : snap.symbol;
 
   // An entry is placed only once the new state is saved.
   const ordered = actions.some(isEntryPlace) ? [...actions.filter(isStateChange), ...actions.filter((a) => !isStateChange(a))] : actions;
@@ -304,6 +328,7 @@ function applyTransition(rec: EngineRecord, a: Extract<Action, { type: "transiti
     rec.halt = null;
     rec.cooldownUntilMs = null;
     rec.inZoneSinceMs = null; // an abandoned or finished entry must be confirmed again
+    rec.inZoneSymbol = null;
   }
 }
 
