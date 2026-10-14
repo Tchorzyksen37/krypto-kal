@@ -6,7 +6,7 @@ import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, test } from "node:test";
-import { DEFAULT_CHECK, type MarketSource, biasError, renderVerification, verifyPrices, breakEven, expectedR, feeR, upsertReportBets, upsertReportEntry, fmtPrice, patchBias, patchReport, renderBestBets, renderBias, runCheck, validateBets } from "./check.ts";
+import { DEFAULT_CHECK, type MarketSource, biasError, normalizeWindow, renderVerification, verifyPrices, breakEven, expectedR, feeR, upsertReportBets, upsertReportEntry, fmtPrice, patchBias, patchReport, renderBestBets, renderBias, runCheck, validateBets } from "./check.ts";
 import type { BetInput, LoggedBet, ReportLogEntry, ReportMeta } from "./types.ts";
 
 const meta = (bets: BetInput[], over: Partial<ReportMeta> = {}): ReportMeta => ({
@@ -283,6 +283,25 @@ describe("bias", () => {
     await writeFile(join(day, "1400Z.md"), "# Report\n", "utf8");
     await runCheck(p);
     assert.match(await readFile(join(day, "1400Z.md"), "utf8"), /Bias: LONG \(58%\)/);
+  });
+
+  test("normalizeWindow turns the {startUtc, endUtc} object into the [start, end] pair", () => {
+    const m = meta([xrpLong]);
+    m.window = { startUtc: "2026-10-14T16:00:00.000Z", endUtc: "2026-10-14T18:00:00.000Z" } as never;
+    assert.deepEqual(normalizeWindow(m).window, ["2026-10-14T16:00:00.000Z", "2026-10-14T18:00:00.000Z"]);
+  });
+
+  test("runCheck accepts a bias written in capitals and stores it in lower case", async () => {
+    const root = await mkdtemp(join(tmpdir(), "spec-bias-caps-"));
+    const day = join(root, "2026-10-03");
+    await mkdir(day, { recursive: true });
+    const p = join(day, "1400Z.meta.json");
+    const m = meta([xrpLong]);
+    await writeFile(p, JSON.stringify({ ...m, bias: { ...m.bias, direction: "LONG" }, symbols: m.symbols.map((s) => ({ ...s, bias: "SHORT" })) }), "utf8");
+    await runCheck(p);
+    const out = JSON.parse(await readFile(p, "utf8")) as ReportMeta;
+    assert.equal(out.bias!.direction, "long");
+    assert.ok(out.symbols.every((s) => s.bias === "short"));
   });
 });
 

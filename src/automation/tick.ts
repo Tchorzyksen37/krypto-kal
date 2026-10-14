@@ -6,6 +6,7 @@
 
 import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
+import { normalizeWindow } from "../speculation/check.ts";
 import type { ReportMeta } from "../speculation/types.ts";
 import type { HandoffResult } from "./handoff.ts";
 import { claudeArgs, speculatePrompt } from "./run-claude.ts";
@@ -52,7 +53,7 @@ function readMeta(path: string): ReportMeta | undefined {
   if (!existsSync(path)) return undefined;
   try {
     const meta = JSON.parse(readFileSync(path, "utf8")) as unknown;
-    return meta && typeof meta === "object" && !Array.isArray(meta) ? (meta as ReportMeta) : undefined;
+    return meta && typeof meta === "object" && !Array.isArray(meta) ? normalizeWindow(meta as ReportMeta) : undefined;
   } catch {
     return undefined;
   }

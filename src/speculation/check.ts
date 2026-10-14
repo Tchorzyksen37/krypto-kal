@@ -299,6 +299,17 @@ const DIRS = ["long", "short", "neutral"];
 const DRIVER_IDS = ["nasdaq", "yields", "dollar", "oil"];
 const MOVES = ["up", "down", "flat"];
 
+// `node src/speculation/sessions.ts` prints the window as {startUtc, endUtc}; the meta wants [start, end]. The model
+// sometimes copies the object, so both are accepted and the array form is what gets stored.
+export function normalizeWindow(meta: ReportMeta): ReportMeta {
+  const w = meta.window as unknown;
+  if (w && typeof w === "object" && !Array.isArray(w)) {
+    const { startUtc, endUtc } = w as { startUtc?: unknown; endUtc?: unknown };
+    if (typeof startUtc === "string" && typeof endUtc === "string") meta.window = [startUtc, endUtc];
+  }
+  return meta;
+}
+
 export function biasError(meta: ReportMeta): string | undefined {
   const b = meta.bias;
   if (!b || !DIRS.includes(b.direction)) return 'report must state its bias: meta.bias.direction = "long" | "short" | "neutral"';
@@ -406,10 +417,13 @@ export function upsertReportEntry(entries: ReportLogEntry[], meta: ReportMeta, r
 // `market` measures the real last price and ATR (the CLI passes the public Kraken Futures client); without it the
 // note says the prices were not checked.
 export async function runCheck(metaPath: string, options: Partial<CheckOptions> = {}, market?: MarketSource): Promise<CheckResult> {
-  const raw = JSON.parse(await readFile(metaPath, "utf8")) as ReportMeta;
+  const raw = normalizeWindow(JSON.parse(await readFile(metaPath, "utf8")) as ReportMeta);
   if (!Array.isArray(raw.symbols) || !Array.isArray(raw.bets) || !Array.isArray(raw.window)) {
     throw new Error("meta file needs symbols[], bets[] and window[]");
   }
+  // The skill text says LONG / SHORT / NEUTRAL, so the model sometimes writes the meta in capitals.
+  if (raw.bias && typeof raw.bias.direction === "string") raw.bias.direction = raw.bias.direction.toLowerCase() as typeof raw.bias.direction;
+  for (const s of raw.symbols) if (typeof s.bias === "string") s.bias = s.bias.toLowerCase() as typeof s.bias;
   const err = biasError(raw);
   if (err) throw new Error(err);
   const meta = market ? await verifyPrices(raw, market) : raw;
