@@ -15,10 +15,12 @@ export const ConfigSchema = z
     mode: z.enum(["dry-run", "live"]),
     live_enabled: z.boolean(),
     manual_approval: z.boolean(),
-    symbol: z.string().min(1),
+    symbol: z.string().min(1), // transitional primary symbol, replaced by `symbols` (removed later)
+    symbols: z.array(z.string().min(1)).min(1),
     trading_capital_usd: z.number().positive(),
     margin_mode: z.literal("isolated"), // a constant, not a setting
     max_leverage: z.number().positive(),
+    base_risk_per_trade_pct: pct, // risk at conviction 0.667; conviction scales it, the cap below still applies
     max_risk_per_trade_pct: pct,
     max_total_open_risk_pct: pct,
     conviction_multiplier_cap: z.number().min(0.5), // sizing clamps the multiplier to [0.5, cap]
@@ -51,7 +53,12 @@ export const ConfigSchema = z
     cycle_interval_sec: z.number().positive(), // the launcher's trader loop: one price feed and one cycle per interval
     db_path: z.string().min(1), // "~" is expanded by the code that opens the database
   })
-  .refine((c) => c.mode !== "live" || c.live_enabled, { message: 'mode "live" requires live_enabled: true' });
+  .refine((c) => c.mode !== "live" || c.live_enabled, { message: 'mode "live" requires live_enabled: true' })
+  .refine((c) => new Set(c.symbols).size === c.symbols.length, { message: "symbols must be unique" })
+  .refine((c) => c.symbols.includes(c.symbol), { message: "symbols must contain symbol" })
+  .refine((c) => c.base_risk_per_trade_pct <= c.max_risk_per_trade_pct, {
+    message: "base_risk_per_trade_pct must not exceed max_risk_per_trade_pct",
+  });
 
 export type BotConfig = z.infer<typeof ConfigSchema>;
 
@@ -61,9 +68,11 @@ const DEFAULTS: BotConfig = {
   live_enabled: false,
   manual_approval: false,
   symbol: "PF_XBTUSD",
+  symbols: ["PF_XBTUSD"],
   trading_capital_usd: 1000,
   margin_mode: "isolated",
   max_leverage: 2,
+  base_risk_per_trade_pct: 0.4,
   max_risk_per_trade_pct: 0.5,
   max_total_open_risk_pct: 0.5,
   conviction_multiplier_cap: 1.25,
@@ -96,6 +105,8 @@ const DEFAULTS: BotConfig = {
   cycle_interval_sec: 5,
   db_path: "~/.krypto-kal/bot.db",
 };
+
+export const isAllowedSymbol = (config: BotConfig, symbol: string): boolean => config.symbols.includes(symbol);
 
 export function defaultConfig(): BotConfig {
   return structuredClone(DEFAULTS);
