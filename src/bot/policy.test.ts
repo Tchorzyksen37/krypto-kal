@@ -191,6 +191,24 @@ describe("validatePolicy – menu and symbol", () => {
   });
 });
 
+describe("validatePolicy – several symbols", () => {
+  const two = { ...config, symbols: ["PF_XBTUSD", "PF_ETHUSD"] };
+  const ethMenu: LevelMenu = { ...menu, symbol: "PF_ETHUSD" };
+  const ethCtx = (getMenu: (id: string) => LevelMenu | undefined = () => ethMenu) => ctx({ config: two, getMenu });
+
+  test("validatePolicy accepts a symbol from config.symbols", () => {
+    accepted(raw({ symbol: "PF_ETHUSD" }), ethCtx());
+  });
+
+  test("validatePolicy rejects a symbol outside config.symbols", () => {
+    rejected(raw({ symbol: "PF_SOLUSD" }), /PF_SOLUSD/, ethCtx());
+  });
+
+  test("validatePolicy rejects a menu whose symbol differs from the policy's", () => {
+    rejected(raw({ symbol: "PF_ETHUSD" }), /menu/i, ethCtx(() => menu));
+  });
+});
+
 describe("validatePolicy – valid_until", () => {
   test("an unparsable timestamp is rejected", () => {
     rejected(raw({ valid_until: "tomorrow" }), /valid_until/);
@@ -393,5 +411,16 @@ describe("effectivePolicy", () => {
       assert.ok(e.conviction <= Math.min(...window.map((p) => p.conviction)) + 1e-12);
       assert.ok(Math.abs(e.bias) <= Math.min(...window.map((p) => Math.abs(p.bias))) + 1e-12);
     }
+  });
+});
+
+describe("effectivePolicy – several symbols", () => {
+  test("effectivePolicy: copies of a new symbol do not blend with older policies of another symbol", () => {
+    const eth = (conviction: number) => pol({ symbol: "PF_ETHUSD", conviction });
+    const history = [eth(0.8), eth(0.6), pol({ conviction: 0.1 }), pol({ conviction: 0.1 })];
+    assert.equal(effectivePolicy(history, 3), null);
+    const e = effectivePolicy(history, 2);
+    assert.equal(e?.symbol, "PF_ETHUSD");
+    assert.equal(e?.conviction, 0.6);
   });
 });
