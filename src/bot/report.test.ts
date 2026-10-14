@@ -4,12 +4,12 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { BotStore } from "./bot-store.ts";
-import { ackHalt, addPolicy, policyTemplate, type PolicyFixture } from "./cli.ts";
+import { ackHalt, addPolicy, policyTemplate, statusText, type PolicyFixture } from "./cli.ts";
 import { defaultEngineRecord, loadEngineRecord, saveEngineRecord } from "./engine-state.ts";
 import type { FuturesFill } from "./executor.ts";
 import { buildReport, rebuildTrades, renderReport, tercileOf } from "./report.ts";
 import { T0, config } from "./sim-fixtures.ts";
-import { FakeMarket, MENU, MIN, longPolicy, openPosition, world } from "./trader-fixtures.ts";
+import { BTC, ETH, FakeMarket, MENU, MIN, longPolicy, openPosition, world } from "./trader-fixtures.ts";
 import { FakeClock } from "./clock.ts";
 
 describe("buildReport", () => {
@@ -170,5 +170,54 @@ describe("ack-halt", () => {
   test("says so when the bot is not halted", () => {
     const store = new BotStore(":memory:");
     assert.match((ackHalt(store, T0) as { reason: string }).reason, /not halted/);
+  });
+});
+
+describe("several symbols", () => {
+  const SYMBOLS = [BTC, ETH];
+  const holdEth = async (w: ReturnType<typeof world>) => {
+    w.tick(99250);
+    w.tickEth(2980);
+    await w.ex.placeOrder({ symbol: ETH, side: "buy", orderType: "mkt", size: 0.05, reduceOnly: false, cliOrdId: "manual-1" });
+  };
+
+  test("statusText lists the allowed symbols and an ETH position", async () => {
+    const w = world({ symbols: SYMBOLS });
+    await holdEth(w);
+    const text = await statusText(w.store, w.deps.config, w.clock.now());
+    assert.match(text, /symbols: PF_XBTUSD, PF_ETHUSD/);
+    assert.match(text, /position: long 0\.05 PF_ETHUSD @ 2985/);
+  });
+
+  test("buildReport shows the symbol of each trade", () => {
+    const f = (id: string, side: "buy" | "sell", price: number, min: number): FuturesFill => ({
+      fill_id: `${id}-${min}`, order_id: "o", cliOrdId: id, symbol: ETH, side, size: 0.05, price,
+      fillTime: new Date(T0 + min * MIN).toISOString(), fillType: "taker", realized_pnl: 0,
+    });
+    const [trade] = rebuildTrades([f("bot-3-entry-0", "buy", 2985, 1), f("bot-3-tp1-0", "sell", 3150, 2)], config);
+    assert.equal(trade?.symbol, ETH);
+    const w = world({ symbols: SYMBOLS });
+    const report = buildReport(w.store, 0, config, T0);
+    assert.match(renderReport({ ...report, trades: [trade!] }), /\| PF_ETHUSD \|/);
+  });
+
+  test("report open position uses every symbol", async () => {
+    const w = world({ symbols: SYMBOLS });
+    await holdEth(w);
+    const r = buildReport(w.store, 0, w.deps.config, w.clock.now());
+    assert.equal(r.openPositions.length, 1);
+    const p = r.openPositions[0]!;
+    assert.deepEqual([p.symbol, p.side, p.size, p.avgPrice], [ETH, "long", 0.05, 2985]);
+    assert.ok(Math.abs(p.unrealizedPnl - 0.05 * (2980 - 2985)) < 0.01, String(p.unrealizedPnl)); // from the ETH mark, not BTC's
+    assert.match(renderReport(r), /PF_ETHUSD/);
+  });
+
+  test("policyTemplate builds levels for the requested symbol (menu and policy symbol)", async () => {
+    const w = world({ symbols: SYMBOLS });
+    const fx = await policyTemplate(w.ethMarket, w.deps.config, "long", T0, ETH);
+    assert.equal(fx.menu?.symbol, ETH);
+    assert.equal(fx.policy.symbol, ETH);
+    const levels = Object.fromEntries(fx.menu!.levels.map((l) => [l.id, l.price]));
+    assert.ok(levels.zone_a! < 3000 && levels.t1! > levels.zone_b!, JSON.stringify(levels)); // around the ETH price, not BTC's
   });
 });

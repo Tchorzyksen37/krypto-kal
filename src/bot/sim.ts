@@ -398,7 +398,7 @@ export async function collectScenario(seed: number, steps: number, opts: Scenari
       }
 
       // P1
-      const issues = checkProtection({ position, orders: orders.filter((o) => o.symbol === config.symbol), trade, filledRoles: [], config });
+      const issues = checkProtection({ position, orders: orders.filter((o) => o.symbol === "PF_XBTUSD"), trade, filledRoles: [], config });
       const bare = !!position && !!trade && issues.some((i) => i.kind === "no_sl");
       if (!bare) unprotectedForMs = 0;
       else if (!wrapped.unreadable) {
@@ -422,7 +422,7 @@ export async function collectScenario(seed: number, steps: number, opts: Scenari
       const calm = step > quietUntil && step > hungUntil && !wrapped.unreadable && step > refuseSlUntil && step > lieTpUntil && !opts.breakProtectTimeout;
       if (calm && rec.state === "OPEN" && trade && position) {
         const filledRoles = filledTargets(fills, trade.policyId);
-        const bad = checkProtection({ position, orders: orders.filter((o) => o.symbol === config.symbol), trade, filledRoles, config })
+        const bad = checkProtection({ position, orders: orders.filter((o) => o.symbol === "PF_XBTUSD"), trade, filledRoles, config })
           .filter((i) => i.kind === "no_sl" || i.kind === "wrong_sl_size" || (!tpTampered && (i.kind === "no_tp" || i.kind === "wrong_tp_size")));
         if (bad.length) flag("P4", `OPEN but ${bad.map((b) => `${b.kind} (${b.detail})`).join("; ")}`);
       }
