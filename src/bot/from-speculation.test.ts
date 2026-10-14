@@ -60,7 +60,7 @@ describe("fixturesFromSpeculation", () => {
     ]), config, T0);
     assert.deepEqual(c.fixtures.map((f) => f.betId), ["best"]);
     assert.deepEqual(c.skipped.map((s) => s.betId), ["x", "late", "second"]);
-    assert.match(c.skipped[0]!.reason, /trades PF_XBTUSD, this bet is on PF_XRPUSD/);
+    assert.match(c.skipped[0]!.reason, /does not trade PF_XRPUSD \(allowed: PF_XBTUSD\)/);
   });
 
   test("warns when the bot's own limits will refuse the entry or cut the window", () => {
@@ -74,6 +74,56 @@ describe("fixturesFromSpeculation", () => {
   test("an unchecked report or a report without bets gives nothing", () => {
     assert.match(fixturesFromSpeculation(meta([], { validated: undefined }), config, T0).warnings[0]!, /run `node src\/speculation\/check.ts/);
     assert.match(fixturesFromSpeculation(meta([]), config, T0).warnings[0]!, /no bets/);
+  });
+});
+
+describe("several symbols and calibrated conviction", () => {
+  const four = { ...config, symbols: ["PF_XBTUSD", "PF_ETHUSD", "PF_SOLUSD", "PF_XRPUSD"] };
+  const xrp = (over: Partial<Bet> = {}) =>
+    bet({ id: "xrp", symbol: "XRP", futures: "PF_XRPUSD", entry: 2.39, stop_loss: 2.3, take_profit: 2.6, ...over });
+
+  test("the best bet over four symbols is converted and its futures is the policy symbol", () => {
+    const c = fixturesFromSpeculation(meta([xrp(), bet({ id: "btc" })]), four, T0);
+    assert.deepEqual(c.fixtures.map((f) => f.betId), ["xrp"]);
+    assert.equal(c.fixtures[0]!.fixture.policy.symbol, "PF_XRPUSD");
+    assert.equal(c.fixtures[0]!.fixture.menu!.symbol, "PF_XRPUSD");
+    assert.deepEqual(c.skipped.map((s) => s.betId), ["btc"]);
+  });
+
+  test("a bet on a symbol outside config.symbols is skipped with the allowed list in the reason", () => {
+    const c = fixturesFromSpeculation(meta([bet({ id: "doge", symbol: "DOGE", futures: "PF_DOGEUSD" })]), four, T0);
+    assert.equal(c.fixtures.length, 0);
+    assert.match(c.skipped[0]!.reason, /does not trade PF_DOGEUSD \(allowed: PF_XBTUSD, PF_ETHUSD, PF_SOLUSD, PF_XRPUSD\)/);
+  });
+
+  test("risk_budget_pct equals base_risk_per_trade_pct", () => {
+    const c = fixturesFromSpeculation(meta([bet()]), config, T0);
+    assert.equal(c.fixtures[0]!.fixture.policy.risk_budget_pct, config.base_risk_per_trade_pct);
+  });
+
+  test("conviction equals stated x ratio (ratio 0.5, stated 0.6 gives 0.3) and is clamped to 1", () => {
+    const half = fixturesFromSpeculation(meta([bet({ probability: 0.6 })]), config, T0, "s", 0.5);
+    assert.ok(Math.abs(half.fixtures[0]!.fixture.policy.conviction - 0.3) < 1e-9);
+    const big = fixturesFromSpeculation(meta([bet({ probability: 0.6 })]), config, T0, "s", 5);
+    assert.equal(big.fixtures[0]!.fixture.policy.conviction, 1);
+  });
+
+  test("the rationale carries stated P and the ratio", () => {
+    const c = fixturesFromSpeculation(meta([bet({ probability: 0.6 })]), config, T0, "s", 0.5);
+    assert.match(c.fixtures[0]!.fixture.policy.rationale, /\[stated P=0\.60, ratio=0\.50\]$/);
+  });
+
+  test("default ratio 1 keeps conviction equal to the stated probability", () => {
+    const c = fixturesFromSpeculation(meta([bet({ probability: 0.55 })]), config, T0);
+    assert.equal(c.fixtures[0]!.fixture.policy.conviction, 0.55);
+  });
+
+  test("addFromSpeculation passes the ratio on and names the bet's symbol", () => {
+    const store = new BotStore(":memory:");
+    const r = addFromSpeculation(store, { ...four, max_policy_ttl_min: 120 }, meta([xrp({ probability: 0.6 })]), T0, { ratio: 0.5 });
+    assert.equal(r.added, 1);
+    assert.match(r.text, /PF_XRPUSD/);
+    assert.ok(Math.abs(store.latestPolicies(1)[0]!.policy.conviction - 0.3) < 1e-9);
   });
 });
 

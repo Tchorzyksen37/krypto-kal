@@ -15,6 +15,7 @@
 
 import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 import { createLogger } from "../core/logger.ts";
@@ -23,6 +24,7 @@ import { type AlertSink, logSink, VaultAlertSink, writeVaultReport } from "./ale
 import { ApprovingExecutor, type Ask } from "./approving-executor.ts";
 import { BotStore } from "./bot-store.ts";
 import { type Clock, SystemClock } from "./clock.ts";
+import { loadCalibration } from "./conviction.ts";
 import { type BotConfig, configHash, defaultConfig, loadConfig } from "./config.ts";
 import { DryRunExecutor } from "./dry-run-executor.ts";
 import { loadEngineRecord, saveEngineRecord } from "./engine-state.ts";
@@ -124,16 +126,16 @@ export async function policyTemplate(market: MarketData, config: BotConfig, dire
 
 // ---- from a speculation report -------------------------------------------------------------------------------------
 
-// Converts the report's best bet on the bot's symbol and stores it loosen_confirm_cycles times: one checked
+// Converts the report's best bet on any allowed symbol and stores it loosen_confirm_cycles times: one checked
 // speculation bet is one decision, and the engine acts only once that many agreeing policies exist.
 export function addFromSpeculation(
-  store: BotStore, config: BotConfig, meta: ReportMeta, nowMs: number, opts: { dry?: boolean; source?: string } = {},
+  store: BotStore, config: BotConfig, meta: ReportMeta, nowMs: number, opts: { dry?: boolean; source?: string; ratio?: number } = {},
 ): { added: number; text: string } {
-  const conv = fixturesFromSpeculation(meta, config, nowMs, opts.source ?? "speculation");
+  const conv = fixturesFromSpeculation(meta, config, nowMs, opts.source ?? "speculation", opts.ratio ?? 1);
   const lines: string[] = [];
   let added = 0;
   for (const f of conv.fixtures) {
-    lines.push(`bet ${f.betId}: ${f.fixture.policy.scenario?.direction} ${config.symbol}, entry zone ${f.fixture.menu!.levels[0]!.price}-${f.fixture.menu!.levels[1]!.price}, stop ${f.fixture.menu!.levels[2]!.price}, target ${f.fixture.menu!.levels[3]!.price}`);
+    lines.push(`bet ${f.betId}: ${f.fixture.policy.scenario?.direction} ${f.fixture.policy.symbol}, entry zone ${f.fixture.menu!.levels[0]!.price}-${f.fixture.menu!.levels[1]!.price}, stop ${f.fixture.menu!.levels[2]!.price}, target ${f.fixture.menu!.levels[3]!.price}`);
     lines.push(`  window: entries from ${f.window.notBefore} until ${f.window.entryUntil}; a position is closed by ${f.window.closeBy} at the latest`);
     if (opts.dry) continue;
     for (let i = 0; i < config.loosen_confirm_cycles; i++) {
@@ -263,8 +265,11 @@ async function main(argv: string[]): Promise<number> {
       }
       if (sub === "from-speculation" && arg) {
         const meta = JSON.parse(readFileSync(arg, "utf8")) as ReportMeta;
-        const r = addFromSpeculation(new BotStore(config.db_path), config, meta, now(), { dry: args.includes("--dry"), source: arg });
+        const brain = process.env.BRAIN_DIR;
+        const cal = brain ? loadCalibration(join(brain, "output", "speculation")) : { ratio: 1, touched: 0 };
+        const r = addFromSpeculation(new BotStore(config.db_path), config, meta, now(), { dry: args.includes("--dry"), source: arg, ratio: cal.ratio });
         console.log(r.text);
+        if ("warning" in cal && cal.warning) console.log(`warning: ${cal.warning}`);
         return r.added || args.includes("--dry") ? 0 : 1;
       }
       if (sub === "template" && (arg === "long" || arg === "short")) {

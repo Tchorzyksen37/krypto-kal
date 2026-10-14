@@ -294,3 +294,36 @@ describe("planTrade", () => {
     });
   });
 });
+
+describe("conviction sizing with a base risk below the cap", () => {
+  const cfg = { ...defaultConfig(), base_risk_per_trade_pct: 0.4, conviction_multiplier_cap: 1.25, max_risk_per_trade_pct: 0.5 };
+  const sizeFor = (conviction: number) =>
+    computeSize({
+      capital: 100_000, riskBudgetPct: cfg.base_risk_per_trade_pct, maxRiskPct: cfg.max_risk_per_trade_pct, conviction,
+      convictionCap: cfg.conviction_multiplier_cap, maxLeverage: 50, entry: 100, stop: 99, contract,
+    });
+
+  test("with base risk 0.4, cap 1.25 and max 0.5 the conviction multiplier is 0.5, 0.8, 1.0 and 1.25 for conviction 0, 0.4, 0.667 and 1", () => {
+    for (const [c, m] of [[0, 0.5], [0.4, 0.8], [2 / 3, 1.0], [1, 1.25]] as const) {
+      closeTo(convictionMultiplier(c, cfg.conviction_multiplier_cap), m, 1e-3);
+    }
+  });
+
+  test("the risk taken is within one size step of min(0.4 x multiplier, 0.5) percent of capital", () => {
+    for (const c of [0, 0.4, 2 / 3, 1]) {
+      const r = sizeFor(c);
+      assert.ok("size" in r);
+      const want = Math.min(0.4 * convictionMultiplier(c, 1.25), 0.5);
+      const stepRiskPct = (contract.sizeStep * 1) / 100_000 * 100; // one size step at a stop distance of 1
+      assert.ok(Math.abs(r.riskPct - want) <= stepRiskPct + 1e-9, `${c}: ${r.riskPct} vs ${want}`);
+    }
+  });
+
+  test("property: riskPct never exceeds max_risk_per_trade_pct for random conviction", () => {
+    for (let i = 0; i < 500; i++) {
+      const r = sizeFor(Math.random());
+      assert.ok("size" in r);
+      assert.ok(r.riskPct <= cfg.max_risk_per_trade_pct + 1e-9, String(r.riskPct));
+    }
+  });
+});

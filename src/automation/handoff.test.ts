@@ -49,6 +49,13 @@ describe("handoff", () => {
     assert.equal(store.latestPolicies(10).length, 0);
   });
 
+  test("handoff passes the ratio through", () => {
+    const store = new BotStore(":memory:");
+    const r = handoff(store, config, meta([bet({ probability: 0.6 })]), T0, "r.meta.json", 0.5);
+    assert.equal(r.status, "handed_off");
+    assert.ok(Math.abs(store.latestPolicies(1)[0]!.policy.conviction - 0.3) < 1e-9);
+  });
+
   test("a clean BTC bet is handed off", () => {
     const store = new BotStore(":memory:");
     const r = handoff(store, config, meta([bet()]), T0, "r.meta.json");
