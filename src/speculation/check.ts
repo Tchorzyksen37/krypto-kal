@@ -117,7 +117,7 @@ export function validateBets(meta: ReportMeta, options: Partial<CheckOptions> = 
   const windowStart = Date.parse(meta.window[0]);
   // A manual run after the window opened can only be filled from the moment it was generated.
   const start = Math.max(windowStart, Date.parse(meta.generated) || windowStart);
-  // Entries never outlive the report's window (a 2-hour slot ends before a session's deadline).
+  // Entries never outlive the report's window (a 30-minute slot ends before a session's deadline).
   const windowEnd = Date.parse(meta.window[1]);
   const deadline = Number.isFinite(windowEnd) ? Math.min(start + o.entryDeadlineMinutes * MIN, windowEnd) : start + o.entryDeadlineMinutes * MIN;
   if (deadline <= start) {

@@ -12,6 +12,7 @@ import { fileURLToPath } from "node:url";
 import { VaultAlertSink } from "../bot/alerts.ts";
 import { BotStore, expandHome } from "../bot/bot-store.ts";
 import { resolveConfig } from "../bot/cli.ts";
+import { loadCalibration } from "../bot/conviction.ts";
 import { assertDryRunOnly } from "../bot/live-executor.ts";
 import { optionsFromEnv, runCheck } from "../speculation/check.ts";
 import type { MarketSource } from "../speculation/check.ts";
@@ -91,7 +92,12 @@ export function buildDeps(env: NodeJS.ProcessEnv, nowMs: number): TickDeps {
       }
       await runCheck(metaPath, optionsFromEnv(env), market);
     },
-    handoff: (meta, at, source) => handoff(botStore(), config, meta, at, source),
+    handoff: (meta, at, source) => {
+      const cal = loadCalibration(join(brainDir, "output", "speculation"));
+      const r = handoff(botStore(), config, meta, at, source, cal.ratio);
+      return cal.warning ? { ...r, detail: `${r.detail}
+warning: ${cal.warning}` } : r;
+    },
     alert: alertTo(brainDir),
     timeoutMs: TIMEOUT_MS,
   };

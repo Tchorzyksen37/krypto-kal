@@ -5,10 +5,12 @@
 
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
-import { FailingJournalStore, MIN, SL, TP1, TP2, E, arm, iso, openPosition, reasons, world, contract } from "./trader-fixtures.ts";
+import { BTC, ETH, FailingJournalStore, Wrapped, MIN, SL, TP1, TP2, E, arm, iso, openPosition, reasons, world, contract } from "./trader-fixtures.ts";
 import { defaultEngineRecord, saveEngineRecord } from "./engine-state.ts";
+import type { TradeRecord } from "./engine.ts";
 import { T0, config } from "./sim-fixtures.ts";
-import { JOURNAL_HEARTBEAT_MS, buildSnapshot } from "./trader.ts";
+import { DryRunExecutor } from "./dry-run-executor.ts";
+import { JOURNAL_HEARTBEAT_MS, buildSnapshot, runCycle } from "./trader.ts";
 
 describe("buildSnapshot", () => {
   test("reads the exchange, the market, the stored policy and the counters", async () => {
@@ -348,7 +350,7 @@ describe("journal", () => {
     saveEngineRecord(w.store, {
       ...w.rec(), state: "PROTECTING", sinceMs: w.clock.now(),
       trade: {
-        policyId: 2, direction: "long", entryCliOrdId: E, entryPrice: 99255,
+        policyId: 2, symbol: "PF_XBTUSD", direction: "long", entryCliOrdId: E, entryPrice: 99255,
         plan: { size: 0.004, stop: 98000, ladder: [{ price: 102000, size: 0.002 }, { price: 104000, size: 0.002 }], leverage: 2 },
         horizonEndMs: w.clock.now() + 24 * 60 * MIN, protectSeq: 0,
       },
@@ -440,5 +442,103 @@ describe("safety", () => {
     w.tick(99244);
     await w.cycle();
     assert.deepEqual(await w.ids(), [SL, TP1, TP2]);
+  });
+});
+
+describe("several symbols", () => {
+  const SYMBOLS = [BTC, ETH];
+
+  test("flat with a policy for ETH reads the ETH ticker, ATR and contract and places an ETH entry", async () => {
+    const w = world({ symbols: SYMBOLS, policies: 0, ethPolicies: 2 });
+    w.tickEth(2980);
+    assert.deepEqual(reasons(await w.cycle()), ["awaiting_confirmation"]);
+    w.clock.advance(31_000);
+    w.tickEth(2980);
+    const a = await w.cycle();
+    assert.deepEqual(reasons(a), ["entry", "entry_placed"]);
+    const orders = await w.ex.getOpenOrders();
+    assert.equal(orders.length, 1);
+    assert.equal(orders[0]?.symbol, ETH);
+    assert.ok((orders[0]?.limitPrice ?? 0) >= 2970 && (orders[0]?.limitPrice ?? 0) <= 2990);
+    assert.equal(w.rec().trade?.symbol, ETH);
+    assert.equal(w.market.calls.ticker, 0);
+    assert.equal(w.market.calls.candles, 0);
+    assert.ok(w.ethMarket.calls.ticker > 0 && w.ethMarket.calls.candles > 0 && w.ethMarket.calls.contract > 0);
+  });
+
+  test("with an open BTC trade and a newer ETH policy the cycle keeps working on BTC", async () => {
+    const w = world({ symbols: SYMBOLS });
+    await openPosition(w);
+    for (let i = 0; i < 2; i++) w.store.putPolicy({ ...w.store.latestPolicies(1)[0]!.policy, menu_id: "m-eth", symbol: ETH }, w.clock.now() + i);
+    const before = w.ethMarket.calls.ticker;
+    w.tick(99300);
+    assert.deepEqual(reasons(await w.cycle()), ["holding"]);
+    assert.equal(w.rec().state, "OPEN");
+    assert.equal(w.ethMarket.calls.ticker, before);
+    assert.ok((await w.ex.getOpenOrders()).every((o) => o.symbol === BTC));
+  });
+
+  test("the in-zone timer restarts when the active symbol changes", async () => {
+    const w = world({ symbols: SYMBOLS, ethPolicies: 2 });
+    saveEngineRecord(w.store, { ...w.rec(), inZoneSinceMs: w.clock.now() - 10 * MIN, inZoneSymbol: BTC });
+    w.tickEth(2980);
+    assert.deepEqual(reasons(await w.cycle()), ["awaiting_confirmation"]); // the BTC timer is not reused for ETH
+    assert.equal(w.rec().inZoneSymbol, ETH);
+    assert.ok((w.rec().inZoneSinceMs ?? 0) > w.clock.now() - 5000);
+  });
+
+  test("a legacy trade record without symbol gets the held position's symbol", async () => {
+    const w = world({ symbols: SYMBOLS, policies: 0, ethPolicies: 2 });
+    w.tickEth(2980);
+    await w.ex.placeOrder({ symbol: ETH, side: "buy", orderType: "mkt", size: 0.05, reduceOnly: false, cliOrdId: "bot-2-entry-0" });
+    const legacy = {
+      policyId: 2, direction: "long", entryCliOrdId: "bot-2-entry-0", entryPrice: 2980,
+      plan: { size: 0.05, stop: 2900, ladder: [{ price: 3150, size: 0.025 }, { price: 3300, size: 0.025 }], leverage: 2 },
+      horizonEndMs: w.clock.now() + 24 * 60 * MIN, protectSeq: 0,
+    } as unknown as TradeRecord; // an old record has no symbol
+    saveEngineRecord(w.store, { ...w.rec(), state: "PROTECTING", sinceMs: w.clock.now(), trade: legacy });
+    await w.cycle();
+    assert.equal(w.rec().trade?.symbol, ETH);
+    const ids = await w.ex.getOpenOrders();
+    assert.ok(ids.length >= 2 && ids.every((o) => o.symbol === ETH));
+  });
+
+  test("two positions on different symbols halt for acknowledgement", async () => {
+    const w = world({ symbols: SYMBOLS });
+    w.tick(99250);
+    w.tickEth(2980);
+    await w.ex.placeOrder({ symbol: BTC, side: "buy", orderType: "mkt", size: 0.004, reduceOnly: false, cliOrdId: "manual-1" });
+    await w.ex.placeOrder({ symbol: ETH, side: "buy", orderType: "mkt", size: 0.05, reduceOnly: false, cliOrdId: "manual-2" });
+    await w.cycle();
+    assert.equal(w.rec().state, "HALTED");
+    assert.deepEqual([w.rec().halt?.reason, w.rec().halt?.manualAck], ["multiple_positions", true]);
+  });
+
+  test("a position on a symbol outside symbols halts for acknowledgement", async () => {
+    const both = world({ symbols: SYMBOLS });
+    both.tick(99250);
+    both.tickEth(2980);
+    await both.ex.placeOrder({ symbol: ETH, side: "buy", orderType: "mkt", size: 0.05, reduceOnly: false, cliOrdId: "manual-2" });
+    // The same store, now with a config that no longer lists ETH.
+    const narrow = { ...both.deps.config, symbols: [BTC] };
+    const { marketFor: _unused, ...rest } = both.deps;
+    await runCycle({ ...rest, config: narrow, executor: new Wrapped(new DryRunExecutor({ store: both.store, clock: both.clock, config: narrow })) });
+    assert.deepEqual([both.rec().halt?.reason, both.rec().halt?.manualAck], ["position_outside_symbols", true]);
+  });
+
+  test("the old contract cache key is still read for the primary symbol", async () => {
+    const w = world({ symbols: SYMBOLS });
+    w.tick(99250);
+    w.store.setKv("contract:cache", JSON.stringify(contract));
+    w.market.failContract = true;
+    assert.deepEqual((await buildSnapshot(w.deps)).contract, contract);
+  });
+
+  test("contract cache is stored per symbol", async () => {
+    const w = world({ symbols: SYMBOLS, policies: 0, ethPolicies: 2 });
+    w.tickEth(2980);
+    await w.cycle();
+    assert.ok(w.store.getKv("contract:cache:PF_ETHUSD"));
+    assert.equal(w.store.getKv("contract:cache:PF_XBTUSD"), undefined); // BTC was never the active symbol
   });
 });

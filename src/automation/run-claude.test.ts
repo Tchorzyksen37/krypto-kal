@@ -6,16 +6,17 @@ import type { Slot } from "./slots.ts";
 const slot: Slot = {
   id: "20261012-1400Z",
   startMs: Date.parse("2026-10-12T14:00:00Z"),
-  endMs: Date.parse("2026-10-12T16:00:00Z"),
+  endMs: Date.parse("2026-10-12T14:30:00Z"),
   session: "us",
-  entryCutoffMs: Date.parse("2026-10-12T15:00:00Z"),
+  entryCutoffMs: Date.parse("2026-10-12T14:30:00Z"),
 };
 
 test("speculatePrompt names the slot, window, session and file name", () => {
   const p = speculatePrompt(slot, "C:\\vault\\brain");
   assert.ok(p.includes("20261012-1400Z"));
   assert.ok(p.includes("2026-10-12T14:00:00.000Z"));
-  assert.ok(p.includes("2026-10-12T16:00:00.000Z"));
+  assert.ok(p.includes("2026-10-12T14:30:00.000Z"));
+  assert.ok(p.includes("30-minute slot"));
   assert.ok(p.includes("session us"));
   assert.ok(p.includes("HHMMZ=1400Z"));
   assert.ok(p.includes("Do not offer to hand bets to the bot."));

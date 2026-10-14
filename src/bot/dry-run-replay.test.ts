@@ -9,7 +9,7 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import type { FuturesCandle } from "../providers/kraken/kraken-futures-client.ts";
-import { T0, closeTo, goLong, place, setup } from "./sim-fixtures.ts";
+import { T0, closeTo, config, goLong, place, px, setup } from "./sim-fixtures.ts";
 
 const HOUR = 3_600_000;
 const candle = (startMs: number, o: number, h: number, l: number, c: number): FuturesCandle => ({
@@ -331,5 +331,56 @@ describe("shapes match the Futures* interfaces", () => {
     const w = setup();
     await goLong(w);
     check((await w.ex.getFills(new Date(0)))[0]!, ["fill_id", "order_id", "symbol", "side", "size", "price", "fillTime", "fillType"], ["cliOrdId", "realized_pnl"]);
+  });
+});
+
+describe("replay – several symbols", () => {
+  test("replay for a symbol walks that symbol's candles and does not touch another symbol's orders", async () => {
+    const BTC = "PF_XBTUSD";
+    const ETH = "PF_ETHUSD";
+    const w = setup({ ...config, symbols: [BTC, ETH] });
+    w.clock.advance(1000);
+    w.ex.onPrice(px(100000, w.clock.now()), BTC);
+    w.ex.onPrice(px(3000, w.clock.now()), ETH);
+    await place(w, { symbol: BTC, side: "buy", size: 0.01 });
+    await place(w, { symbol: ETH, side: "buy", size: 0.1 });
+    await place(w, { symbol: BTC, side: "sell", orderType: "stp", stopPrice: 99000, reduceOnly: true, size: 0.01 });
+    await place(w, { symbol: ETH, side: "sell", orderType: "stp", stopPrice: 2900, reduceOnly: true, size: 0.1 });
+    const start = w.clock.now() + 60_000;
+    w.clock.advance(120_000);
+    w.ex.replay([candle(start, 100000, 100100, 2800, 99500)], 60, BTC); // low 2800 crosses the BTC stop and, numerically, the ETH stop
+    const open = (await w.ex.getOpenOrders()).map((o) => o.symbol);
+    assert.deepEqual(open, [ETH]);
+    assert.deepEqual((await w.ex.getPositions()).map((p) => p.symbol), [ETH]);
+  });
+});
+
+describe("funding – several symbols", () => {
+  test("accruing the same funding time for two symbols in one pass charges both", async () => {
+    const BTC = "PF_XBTUSD";
+    const ETH = "PF_ETHUSD";
+    const w = setup({ ...config, symbols: [BTC, ETH] });
+    w.clock.advance(1000);
+    w.ex.onPrice(px(100000, w.clock.now()), BTC);
+    w.ex.onPrice(px(3000, w.clock.now()), ETH);
+    await place(w, { symbol: BTC, side: "buy", size: 0.01 });
+    await place(w, { symbol: ETH, side: "buy", size: 0.1 });
+    w.clock.advance(HOUR);
+    w.ex.onPrice(px(100000, w.clock.now()), BTC);
+    w.ex.onPrice(px(3000, w.clock.now()), ETH);
+    const rates = [{ t: T0 + HOUR, rate: 0.0001 }];
+    w.ex.accrueFunding(rates, BTC);
+    w.ex.accrueFunding(rates, ETH);
+    closeTo((await w.ex.getAccount()).funding, 0.01 * 100000 * 0.0001 + 0.1 * 3000 * 0.0001, 1e-9);
+  });
+
+  test("a database with the old single funding marker keeps it for the primary symbol", async () => {
+    const w = setup(config);
+    w.store.putDoc("sim_meta", "meta", T0, { nextOrderId: 1, nextFillId: 1, lastTickMs: T0, lastFundingMs: T0 + HOUR, price: px(100000, T0) });
+    await goLong(w, 100000, 0.01);
+    w.clock.advance(2 * HOUR);
+    w.ex.onPrice(px(100000, w.clock.now()));
+    w.ex.accrueFunding([{ t: T0 + HOUR, rate: 0.0001 }, { t: T0 + 2 * HOUR, rate: 0.0001 }]);
+    closeTo((await w.ex.getAccount()).funding, 0.01 * 100000 * 0.0001, 1e-9); // only the second time is new
   });
 });

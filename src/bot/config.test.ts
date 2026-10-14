@@ -4,10 +4,11 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, test } from "node:test";
 import { FakeClock, SystemClock } from "./clock.ts";
-import { type BotConfig, defaultConfig, loadConfig } from "./config.ts";
+import { type BotConfig, defaultConfig, isAllowedSymbol, loadConfig } from "./config.ts";
 
 // Writes `content` (an object, serialized as JSON, or a raw string) to a temp file and returns its path.
 const configFile = (content: object | string): string => {
@@ -23,10 +24,11 @@ describe("defaultConfig", () => {
       mode: "dry-run",
       live_enabled: false,
       manual_approval: false,
-      symbol: "PF_XBTUSD",
+      symbols: ["PF_XBTUSD"],
       trading_capital_usd: 1000,
       margin_mode: "isolated",
       max_leverage: 2,
+      base_risk_per_trade_pct: 0.4,
       max_risk_per_trade_pct: 0.5,
       max_total_open_risk_pct: 0.5,
       conviction_multiplier_cap: 1.25,
@@ -78,7 +80,7 @@ describe("loadConfig", () => {
     const { config } = loadConfig(configFile({ max_leverage: 3, fees_bps: { maker: 1, taker: 4 } }));
     assert.equal(config.max_leverage, 3);
     assert.deepEqual(config.fees_bps, { maker: 1, taker: 4 });
-    assert.equal(config.symbol, "PF_XBTUSD");
+    assert.deepEqual(config.symbols, ["PF_XBTUSD"]);
   });
 
   test("mode live without live_enabled fails to load", () => {
@@ -120,10 +122,57 @@ describe("loadConfig", () => {
   });
 });
 
+describe("symbols", () => {
+  test("defaults: symbols is [\"PF_XBTUSD\"] and base_risk_per_trade_pct is 0.4", () => {
+    const c = defaultConfig();
+    assert.deepEqual(c.symbols, ["PF_XBTUSD"]);
+    assert.equal(c.base_risk_per_trade_pct, 0.4);
+  });
+
+  test("symbols must be non-empty and unique", () => {
+    assert.throws(() => loadConfig(configFile({ symbols: [] })), /symbols/);
+    assert.throws(() => loadConfig(configFile({ symbols: ["PF_XBTUSD", "PF_XBTUSD"] })), /symbols/);
+  });
+
+  test("a config with the old key \"symbol\" is rejected and the message mentions \"symbols\"", () => {
+    assert.throws(() => loadConfig(configFile({ symbol: "PF_XBTUSD" })), /symbols/);
+  });
+
+  test("a symbols list need not contain the old default symbol", () => {
+    assert.deepEqual(loadConfig(configFile({ symbols: ["PF_ETHUSD"] })).config.symbols, ["PF_ETHUSD"]);
+  });
+
+  test("defaults have no symbol key", () => {
+    assert.equal("symbol" in defaultConfig(), false);
+  });
+
+  test("config/bot.auto.json loads and lists exactly the four symbols", () => {
+    const path = join(dirname(fileURLToPath(import.meta.url)), "../../config/bot.auto.json");
+    assert.deepEqual(loadConfig(path).config.symbols, ["PF_XBTUSD", "PF_ETHUSD", "PF_SOLUSD", "PF_XRPUSD"]);
+  });
+
+  test("base_risk_per_trade_pct above max_risk_per_trade_pct is rejected", () => {
+    assert.throws(() => loadConfig(configFile({ base_risk_per_trade_pct: 0.6 })), /base_risk_per_trade_pct/);
+  });
+
+  test("a file with four symbols loads and isAllowedSymbol accepts each and rejects PF_DOGEUSD", () => {
+    const four = ["PF_XBTUSD", "PF_ETHUSD", "PF_SOLUSD", "PF_XRPUSD"];
+    const { config } = loadConfig(configFile({ symbols: four }));
+    for (const s of four) assert.equal(isAllowedSymbol(config, s), true);
+    assert.equal(isAllowedSymbol(config, "PF_DOGEUSD"), false);
+  });
+
+  test("the config hash changes when symbols change", () => {
+    const a = loadConfig(configFile({})).hash;
+    const b = loadConfig(configFile({ symbols: ["PF_XBTUSD", "PF_ETHUSD"] })).hash;
+    assert.notEqual(a, b);
+  });
+});
+
 describe("config hash", () => {
   test("is stable for equal content, whatever the key order or formatting", () => {
-    const a = loadConfig(configFile('{"max_leverage":3,"symbol":"PF_XBTUSD"}')).hash;
-    const b = loadConfig(configFile('{\n  "symbol": "PF_XBTUSD",\n  "max_leverage": 3\n}')).hash;
+    const a = loadConfig(configFile('{"max_leverage":3,"symbols":["PF_XBTUSD"]}')).hash;
+    const b = loadConfig(configFile('{\n  "max_leverage": 3,\n  "symbols": ["PF_XBTUSD"]\n}')).hash;
     assert.equal(a, b);
   });
 

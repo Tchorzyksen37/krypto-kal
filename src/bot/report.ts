@@ -13,11 +13,13 @@
 import type { BotStore, Incident } from "./bot-store.ts";
 import type { BotConfig } from "./config.ts";
 import type { Snapshot, TradeRecord } from "./engine.ts";
+import { readSimPositions } from "./dry-run-executor.ts";
 import { loadEngineRecord } from "./engine-state.ts";
 import { type FuturesFill, parseCliOrdId } from "./executor.ts";
 
 export interface BotTrade {
   policyId: number;
+  symbol: string;
   direction: "long" | "short";
   entryCliOrdId: string;
   openedMs: number;
@@ -41,7 +43,7 @@ export interface BotReport {
   nowMs: number;
   state: string;
   halt: { reason: string; manualAck: boolean; untilMs: number | null } | null;
-  openPosition: { side: "long" | "short"; size: number; avgPrice: number; unrealizedPnl: number } | null;
+  openPositions: { symbol: string; side: "long" | "short"; size: number; avgPrice: number; unrealizedPnl: number }[]; // normally 0 or 1
   netPnl: number;
   realized: number;
   fees: number;
@@ -81,7 +83,7 @@ export function rebuildTrades(fills: FuturesFill[], config: BotConfig): BotTrade
       if (id.role !== "entry") continue; // an exit without its entry (history before the window): not a trade we can judge
       cur = {
         t: {
-          policyId: id.policyId, direction: f.side === "buy" ? "long" : "short", entryCliOrdId: f.cliOrdId!, openedMs: t, closedMs: t,
+          policyId: id.policyId, symbol: f.symbol, direction: f.side === "buy" ? "long" : "short", entryCliOrdId: f.cliOrdId!, openedMs: t, closedMs: t,
           size: 0, entryAvg: 0, exitAvg: 0, gross: 0, fees: 0, net: 0, exits: [],
         },
         net: 0, inQty: 0, inVal: 0, outQty: 0, outVal: 0,
@@ -186,12 +188,15 @@ export function buildReport(store: BotStore, sinceMs: number, config: BotConfig,
     return { tercile, n: inT.length, avgR: inT.length ? round(inT.reduce((a, t) => a + t.r!, 0) / inT.length, 3) : 0 };
   });
 
-  const pos = store.getDoc<{ size: number; avgPrice: number }>("sim_position", config.symbol);
-  const mark = store.getDoc<{ price: { mark: number } | null }>("sim_meta", "meta")?.price?.mark;
-  const openPosition = pos && pos.size !== 0
-    ? { side: pos.size > 0 ? "long" as const : "short" as const, size: Math.abs(pos.size), avgPrice: pos.avgPrice, unrealizedPnl: round(pos.size * ((mark ?? pos.avgPrice) - pos.avgPrice)) }
-    : null;
-  const equity = config.trading_capital_usd + account.realizedPnl - account.fees - account.funding + (openPosition?.unrealizedPnl ?? 0);
+  // The newest quote per symbol; a database from before several symbols has one quote for the primary symbol.
+  const meta = store.getDoc<{ prices?: Record<string, { mark: number }>; price?: { mark: number } | null }>("sim_meta", "meta");
+  const markOf = (symbol: string): number | undefined => meta?.prices?.[symbol]?.mark ?? (symbol === config.symbols[0] ? meta?.price?.mark : undefined);
+  const openPositions = readSimPositions(store, config).map((p) => ({
+    symbol: p.symbol, side: p.size > 0 ? "long" as const : "short" as const, size: Math.abs(p.size), avgPrice: p.avgPrice,
+    unrealizedPnl: round(p.size * ((markOf(p.symbol) ?? p.avgPrice) - p.avgPrice)),
+  }));
+  const equity = config.trading_capital_usd + account.realizedPnl - account.fees - account.funding
+    + openPositions.reduce((a, p) => a + p.unrealizedPnl, 0);
 
   let state = "unknown";
   let halt: BotReport["halt"] = null;
@@ -204,7 +209,7 @@ export function buildReport(store: BotStore, sinceMs: number, config: BotConfig,
   }
 
   return {
-    sinceMs, nowMs, state, halt, openPosition,
+    sinceMs, nowMs, state, halt, openPositions,
     netPnl: round(realized - fees - funding), realized: round(realized), fees: round(fees), funding: round(funding),
     slippageCost: round(slippageCost), equity: round(equity),
     trades, policyAccuracy, rejectedByReason, incidents: incidents.length, incidentsByKind, recentIncidents: incidents.slice(-10),
@@ -222,8 +227,8 @@ export function renderReport(r: BotReport): string {
     `Window ${iso(r.sinceMs)} to ${iso(r.nowMs)}. **No real orders: every fill below is simulated.**`,
     "",
     `**State:** ${r.state}${r.halt ? ` (halted: ${r.halt.reason}${r.halt.manualAck ? ", needs \`ack-halt\`" : r.halt.untilMs ? `, clears at ${iso(r.halt.untilMs)}` : ""})` : ""}`,
-    r.openPosition
-      ? `**Open position:** ${r.openPosition.side} ${r.openPosition.size} @ ${r.openPosition.avgPrice}, unrealised ${usd(r.openPosition.unrealizedPnl)}`
+    r.openPositions.length
+      ? `**Open position:** ${r.openPositions.map((p) => `${p.side} ${p.size} ${p.symbol} @ ${p.avgPrice}, unrealised ${usd(p.unrealizedPnl)}`).join("; ")}`
       : "**Open position:** none",
     "",
     "| Net PnL | Realised | Fees | Funding | Stop slippage (in the fills) | Equity |",
@@ -240,9 +245,9 @@ export function renderReport(r: BotReport): string {
   lines.push("## Trades", "");
   if (!r.trades.length) lines.push("No closed trades in this window.", "");
   else {
-    lines.push("| Closed | Policy | Side | Size | Entry | Exit | Exits | Net | R | Conviction |", "|---|---|---|---|---|---|---|---|---|---|");
+    lines.push("| Closed | Policy | Symbol | Side | Size | Entry | Exit | Exits | Net | R | Conviction |", "|---|---|---|---|---|---|---|---|---|---|---|");
     for (const t of r.trades) {
-      lines.push(`| ${iso(t.closedMs)} | ${t.policyId} | ${t.direction} | ${t.size} | ${t.entryAvg.toFixed(1)} | ${t.exitAvg.toFixed(1)} | ${t.exits.join(", ")} | ${usd(t.net)} | ${t.r?.toFixed(2) ?? "-"} | ${t.conviction ?? "-"} |`);
+      lines.push(`| ${iso(t.closedMs)} | ${t.policyId} | ${t.symbol} | ${t.direction} | ${t.size} | ${t.entryAvg.toFixed(1)} | ${t.exitAvg.toFixed(1)} | ${t.exits.join(", ")} | ${usd(t.net)} | ${t.r?.toFixed(2) ?? "-"} | ${t.conviction ?? "-"} |`);
     }
     lines.push("");
   }

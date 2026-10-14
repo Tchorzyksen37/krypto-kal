@@ -4,7 +4,7 @@
 // is rejected with a reason, never repaired.
 
 import { z } from "zod";
-import type { BotConfig } from "./config.ts";
+import { type BotConfig, isAllowedSymbol } from "./config.ts";
 import { formatIssues } from "./zod-issues.ts";
 
 export type LevelId = string;
@@ -80,14 +80,16 @@ export function validatePolicy(raw: unknown, ctx: PolicyContext): PolicyResult {
   if (!parsed.success) return reject(formatIssues(parsed.error));
   const policy = parsed.data;
 
-  if (policy.symbol !== config.symbol) return reject(`symbol ${policy.symbol} is not the configured ${config.symbol}`);
+  if (!isAllowedSymbol(config, policy.symbol)) {
+    return reject(`symbol ${policy.symbol} is not one of the configured symbols (${config.symbols.join(", ")})`);
+  }
   if (policy.risk_budget_pct > config.max_risk_per_trade_pct) {
     return reject(`risk_budget_pct ${policy.risk_budget_pct} exceeds max_risk_per_trade_pct ${config.max_risk_per_trade_pct}`);
   }
 
   const menu = ctx.getMenu(policy.menu_id);
   if (!menu) return reject(`unknown menu ${policy.menu_id}`);
-  if (menu.symbol !== config.symbol) return reject(`menu ${menu.id} is for symbol ${menu.symbol}, not ${config.symbol}`);
+  if (menu.symbol !== policy.symbol) return reject(`menu ${menu.id} is for symbol ${menu.symbol}, not ${policy.symbol}`);
   const menuAgeMs = nowMs - menu.createdAtMs;
   if (menuAgeMs < 0) return reject(`menu ${menu.id} was created in the future`);
   if (menuAgeMs > config.max_menu_age_min * 60_000) return reject(`menu ${menu.id} is older than max_menu_age_min`);
@@ -158,11 +160,15 @@ export function resolveScenario(
 
 // The policy the engine acts on. `history` is newest first. A field is the most conservative value over the
 // newest `n` policies, so tightening shows at once and loosening needs n agreeing cycles. Returns null until
-// n policies exist (an unconfirmed first policy is not acted on).
+// n policies exist (an unconfirmed first policy is not acted on). Only the leading run of policies for the
+// newest policy's symbol counts: another symbol's older policies never blend into it.
 export function effectivePolicy(history: Policy[], n: number): Policy | null {
   if (!Number.isInteger(n) || n < 1) throw new RangeError(`n must be a positive integer, got ${n}`);
-  if (history.length < n) return null;
-  const window = history.slice(0, n);
+  const symbol = history[0]?.symbol;
+  const run = history.findIndex((p) => p.symbol !== symbol);
+  const sameSymbol = run === -1 ? history : history.slice(0, run);
+  if (sameSymbol.length < n) return null;
+  const window = sameSymbol.slice(0, n);
   const newest = window[0] as Policy;
 
   const positive = window.every((p) => p.bias > 0);

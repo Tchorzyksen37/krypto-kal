@@ -10,12 +10,12 @@ import { createLogger } from "../core/logger.ts";
 import { type AlertSink, collectAlerts, dispatch, writeVaultReport } from "./alerts.ts";
 import type { BotStore } from "./bot-store.ts";
 import type { Clock } from "./clock.ts";
-import type { BotConfig } from "./config.ts";
-import type { DryRunExecutor } from "./dry-run-executor.ts";
+import { type BotConfig, isAllowedSymbol } from "./config.ts";
+import { type DryRunExecutor, readSimSymbols } from "./dry-run-executor.ts";
 import { dayStartMs, tradingDay } from "./limits.ts";
 import { reconcile, type ReconcileResult } from "./reconcile.ts";
 import { buildReport, renderReport } from "./report.ts";
-import { type TraderDeps, runCycle } from "./trader.ts";
+import { type TraderDeps, marketOf, runCycle } from "./trader.ts";
 import { watchdogTick } from "./watchdog.ts";
 
 const log = createLogger("bot-runner");
@@ -63,7 +63,13 @@ export async function traderStep(rt: Runtime): Promise<void> {
   const hour = Math.floor(clock.now() / HOUR_MS);
   if (store.getKv(LAST_FUNDING_KEY) !== String(hour)) {
     try {
-      rt.sim.accrueFunding(await rt.deps.market.fundingRates());
+      // The primary symbol, and every symbol that has traded: a position closed since the last step may still owe a
+      // funding time it was held through (the position history decides; a symbol that never traded costs nothing).
+      const { config } = rt.deps;
+      const symbols = new Set([config.symbols[0]!, ...readSimSymbols(store).filter((s) => isAllowedSymbol(config, s))]);
+      for (const symbol of symbols) {
+        rt.sim.accrueFunding(await marketOf(rt.deps, symbol).fundingRates(), symbol);
+      }
       const account = await rt.sim.getAccount();
       store.putDoc("funding_mark", String(hour), clock.now(), { t: clock.now(), funding: account.funding });
       store.setKv(LAST_FUNDING_KEY, String(hour));

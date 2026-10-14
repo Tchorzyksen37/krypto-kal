@@ -7,6 +7,8 @@
 //     have fired do fire (once), and charge the funding of the hours held. Real exchanges did this on their own.
 //  3. Rebuild the daily counters from the order history (a max, never an add), so a restart cannot reset the budget.
 //  4. Compare the record with the exchange:
+//       - two positions, or one on a symbol outside config.symbols: halt for acknowledgement (the bot manages one
+//         position on the configured symbols);
 //       - a position the bot has no trade record for, or on the wrong side of it: halt for acknowledgement, never close it
 //         (it may be the user's own);
 //       - a bot position whose stop is missing: halt for acknowledgement, and the engine closes it at market;
@@ -16,16 +18,17 @@
 
 import type { FuturesCandle } from "../providers/kraken/kraken-futures-client.ts";
 import type { Incident } from "./bot-store.ts";
+import { isAllowedSymbol } from "./config.ts";
 import { type EngineRecord, loadEngineRecord, saveEngineRecord } from "./engine-state.ts";
 import { type FuturesOpenOrder, isBotOrder, parseCliOrdId } from "./executor.ts";
 import { dayStartMs, rebuildCounters } from "./limits.ts";
-import type { TraderDeps } from "./trader.ts";
+import { type TraderDeps, marketOf } from "./trader.ts";
 
 // The simulated exchange's catch-up: DryRunExecutor satisfies it.
 export interface Replayer {
-  replay(candles: FuturesCandle[], intervalSec?: number): void;
-  accrueFunding(rates: { t: number; rate: number }[]): void;
-  lastTickMs(): number;
+  replay(candles: FuturesCandle[], intervalSec?: number, symbol?: string): void;
+  accrueFunding(rates: { t: number; rate: number }[], symbol?: string): void;
+  lastTickMs(symbol?: string): number;
 }
 
 export interface ReconcileResult {
@@ -37,7 +40,7 @@ const MAX_REPLAY_MINUTES = 2000; // one page of one-minute candles
 const LIVE_STATES = ["ENTERING", "PROTECTING", "OPEN", "REDUCING"];
 
 export async function reconcile(d: TraderDeps, opts: { replayer?: Replayer } = {}): Promise<ReconcileResult> {
-  const { store, clock, config, executor, market } = d;
+  const { store, clock, config, executor } = d;
   const nowMs = clock.now();
   const incidents: Incident[] = [];
   const report = (kind: string, detail: string) => {
@@ -71,41 +74,46 @@ export async function reconcile(d: TraderDeps, opts: { replayer?: Replayer } = {
     saveEngineRecord(store, rec);
     return { clean, incidents };
   };
-  const readSymbol = async () => {
+  // Everything the bot can see: all positions (also outside config.symbols) and the orders on the allowed symbols.
+  const readAll = async () => {
     const [positions, orders] = await Promise.all([executor.getPositions(), executor.getOpenOrders()]);
-    return {
-      position: positions.find((p) => p.symbol === config.symbol) ?? null,
-      orders: orders.filter((o) => o.symbol === config.symbol),
-    };
+    return { positions, orders: orders.filter((o) => isAllowedSymbol(config, o.symbol)) };
   };
 
   try {
     // 2. Catch the simulation up on the time it was not watched.
-    const before = await readSymbol();
-    const exposed = before.position !== null || before.orders.some((o) => isBotOrder(o.cliOrdId));
-    if (opts.replayer && exposed) {
-      const last = opts.replayer.lastTickMs();
-      if (last > 0 && nowMs > last) {
-        const minutes = Math.ceil((nowMs - last) / 60_000) + 2;
-        if (minutes > MAX_REPLAY_MINUTES) {
-          report("replay_gap_too_large", `${minutes} minutes of downtime with something open: more than ${MAX_REPLAY_MINUTES} candles`);
-          haltManual("replay_gap_too_large");
-          return finish(false);
+    // Every symbol with something open is caught up with its own market.
+    const before = await readAll();
+    const exposedSymbols = [...new Set([
+      ...before.positions.filter((p) => isAllowedSymbol(config, p.symbol)).map((p) => p.symbol),
+      ...before.orders.filter((o) => isBotOrder(o.cliOrdId)).map((o) => o.symbol),
+    ])];
+    if (opts.replayer) {
+      for (const symbol of exposedSymbols) {
+        const market = marketOf(d, symbol);
+        const last = opts.replayer.lastTickMs(symbol);
+        if (last > 0 && nowMs > last) {
+          const minutes = Math.ceil((nowMs - last) / 60_000) + 2;
+          if (minutes > MAX_REPLAY_MINUTES) {
+            report("replay_gap_too_large", `${minutes} minutes of downtime with something open: more than ${MAX_REPLAY_MINUTES} candles`);
+            haltManual("replay_gap_too_large");
+            return finish(false);
+          }
+          let candles: FuturesCandle[];
+          try {
+            candles = await market.candles("1m", minutes);
+          } catch (e) {
+            report("replay_failed", `cannot fetch the candles for ${minutes} minutes of downtime: ${e instanceof Error ? e.message : String(e)}`);
+            haltManual("replay_failed");
+            return finish(false);
+          }
+          opts.replayer.replay(candles, 60, symbol);
         }
-        let candles: FuturesCandle[];
         try {
-          candles = await market.candles("1m", minutes);
-        } catch (e) {
-          report("replay_failed", `cannot fetch the candles for ${minutes} minutes of downtime: ${e instanceof Error ? e.message : String(e)}`);
-          haltManual("replay_failed");
-          return finish(false);
+          opts.replayer.accrueFunding(await market.fundingRates(), symbol);
+        } catch {
+          /* funding is a small cost; a missing rate must not block a restart */
         }
-        opts.replayer.replay(candles);
-      }
-      try {
-        opts.replayer.accrueFunding(await market.fundingRates());
-      } catch {
-        /* funding is a small cost; a missing rate must not block a restart */
       }
     }
 
@@ -117,17 +125,30 @@ export async function reconcile(d: TraderDeps, opts: { replayer?: Replayer } = {
     rebuildCounters(store, config, history);
 
     // 4. Compare the record with the exchange (after the replay).
-    const { position, orders } = await readSymbol();
+    const { positions, orders } = await readAll();
+    const outside = positions.filter((p) => !isAllowedSymbol(config, p.symbol));
+    const inside = positions.filter((p) => isAllowedSymbol(config, p.symbol));
+    const issue = outside.length > 0 ? "position_outside_symbols" as const
+      : new Set(positions.map((p) => p.symbol)).size > 1 ? "multiple_positions" as const : null;
+    const position = inside.find((p) => p.symbol === rec.trade?.symbol) ?? inside[0] ?? null;
     const mine = orders.filter((o): o is FuturesOpenOrder & { cliOrdId: string } => isBotOrder(o.cliOrdId));
     const foreign = orders.filter((o) => !isBotOrder(o.cliOrdId));
     const trade = rec.trade;
     const tradeLive = trade !== null && LIVE_STATES.includes(rec.state);
     let clean = true;
 
-    if (position) {
+    if (issue) {
+      report(issue, `positions: ${positions.map((p) => `${p.side} ${p.size} ${p.symbol}`).join(", ")}; left alone`);
+      haltManual(issue);
+      clean = false;
+    } else if (position) {
       if (!trade || !tradeLive) {
         report("unexplained_position", `a ${position.side} position of ${position.size} with no trade record: left alone`);
         haltManual("unexplained_position");
+        clean = false;
+      } else if (trade.symbol && position.symbol !== trade.symbol) {
+        report("position_on_wrong_symbol", `the trade is on ${trade.symbol} but the position is on ${position.symbol}`);
+        haltManual("position_on_wrong_symbol");
         clean = false;
       } else if (position.side !== trade.direction) {
         report("position_on_wrong_side", `the trade is ${trade.direction} but the position is ${position.side}`);
@@ -145,7 +166,7 @@ export async function reconcile(d: TraderDeps, opts: { replayer?: Replayer } = {
     // Orders of the bot that no trade explains. The stops of a position nobody can explain are kept: they protect it.
     for (const o of mine) {
       const explained = tradeLive && trade !== null && parseCliOrdId(o.cliOrdId)?.policyId === trade.policyId;
-      if (explained || (position && !tradeLive)) continue;
+      if (explained || ((position || issue) && !tradeLive)) continue; // stops of positions nobody can explain stay
       try {
         await executor.cancelOrder({ cliOrdId: o.cliOrdId });
         report("orphan_bot_order", `cancelled ${o.cliOrdId}`);

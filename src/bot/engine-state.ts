@@ -20,6 +20,7 @@ export interface EngineRecord {
   lastClockMs: number; // the newest time seen; a clock that goes backwards is detected against this
   tradeStartedMs: number | null; // when the current trade began, for its PnL
   inZoneSinceMs: number | null; // since when the price has been continuously inside the entry zone
+  inZoneSymbol: string | null; // the symbol that timer belongs to (null with an old record: the primary symbol)
   liqAckMs: number; // liquidation fills at or before this time were acknowledged by the user
 }
 
@@ -29,7 +30,7 @@ const STATES: readonly string[] = ["FLAT", "ENTERING", "PROTECTING", "OPEN", "RE
 export function defaultEngineRecord(): EngineRecord {
   return {
     state: "FLAT", sinceMs: 0, halt: null, trade: null, cooldownUntilMs: null, reconciled: false, lastClockMs: 0,
-    tradeStartedMs: null, inZoneSinceMs: null, liqAckMs: 0,
+    tradeStartedMs: null, inZoneSinceMs: null, inZoneSymbol: null, liqAckMs: 0,
   };
 }
 

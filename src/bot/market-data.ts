@@ -62,7 +62,7 @@ export class KrakenMarketData implements MarketData {
 }
 
 export interface PriceSink {
-  onPrice(e: PriceEvent): void;
+  onPrice(e: PriceEvent, symbol?: string): void;
 }
 
 // Every quote read through this market is also fed to the simulated exchange (a quote that cannot be fed is still
@@ -71,18 +71,20 @@ export class FeedingMarket implements MarketData {
   readonly clock: Clock;
   private readonly inner: MarketData;
   private readonly sink: PriceSink;
+  private readonly symbol: string | undefined;
   onFeedError: (e: unknown) => void = () => {};
 
-  constructor(inner: MarketData, sink: PriceSink) {
+  constructor(inner: MarketData, sink: PriceSink, symbol?: string) {
     this.inner = inner;
     this.sink = sink;
+    this.symbol = symbol;
     this.clock = inner.clock;
   }
 
   async ticker(): Promise<PriceEvent> {
     const p = await this.inner.ticker();
     try {
-      this.sink.onPrice(p);
+      this.sink.onPrice(p, this.symbol);
     } catch (e) {
       this.onFeedError(e);
     }

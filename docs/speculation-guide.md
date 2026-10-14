@@ -10,7 +10,7 @@ Design details: [superpowers/plans/2026-10-03-speculation-mode.md](superpowers/p
 
 ## 1. What it is
 
-Every 2 hours (automated, or four times a day by session when run by hand), Claude writes a **speculative** report about the coming trading window into your Obsidian vault.
+Every 30 minutes (automated, or four times a day by session when run by hand), Claude writes a **speculative** report about the coming trading window into your Obsidian vault.
 It takes what is measured (prices, open interest, funding, liquidations, macro, X posts), what cannot be seen, and
 what is possible but unconfirmed, and states the most probable continuation of the session:
 
@@ -51,9 +51,9 @@ Read this before using any bet.
    - `BRAIN_DIR` pointing at the vault (`C:\Users\mtchorze\OneDrive\Documents\pierdoly`),
    - optionally `X_BEARER_TOKEN` for fresh X posts.
 2. **Scheduled tasks (automated).** Install with `powershell -File scripts/install-tasks.ps1`; it registers the
-   Windows Task Scheduler tasks that run `npm run auto -- tick` on the 2-hour grid of even UTC hours (00:00Z ...
-   22:00Z). Check with `npm run auto -- status`. Each report covers one 2-hour slot and is named by the slot start
-   (`output/speculation/YYYY-MM-DD/HHMMZ.md`, UTC), and its bets can only fill until the slot ends.
+   Windows Task Scheduler tasks that run `npm run auto -- tick` on the 30-minute grid of UTC half hours (00:00Z ...
+   23:30Z). Re-run the installer after changing the grid. Check with `npm run auto -- status`. Each report covers one 30-minute slot and is named by the slot start
+   (`output/speculation/YYYY-MM-DD/HHMMZ.md`, UTC), and its bets can only fill until the slot ends. Each new report is handed to the dry-run bot: when the bot is flat it may open the best bet inside that slot, when it holds a position a report that goes against it closes the position and one that agrees or concerns another symbol changes nothing, and a slot with no bet leaves the bot idle.
 
    The machine must be awake and the server running (a tick checks the server first and records `server_down`
    instead of starting a run without data). A late tick still generates the current slot until its entry cutoff;

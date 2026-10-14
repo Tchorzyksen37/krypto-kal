@@ -102,9 +102,9 @@ test("missed slots are recorded as skipped once", async () => {
   await withHarness(async (h) => {
     await tick(h.deps);
     const skipped = readLedger(h.stateDir).filter((r) => r.status === "skipped").length;
-    assert.equal(skipped, 12);
+    assert.equal(skipped, 48);
     await tick(h.deps);
-    assert.equal(readLedger(h.stateDir).filter((r) => r.status === "skipped").length, 12);
+    assert.equal(readLedger(h.stateDir).filter((r) => r.status === "skipped").length, 48);
   });
 });
 
@@ -339,12 +339,13 @@ test("a lock error is alerted and the tick does not run", async () => {
   });
 });
 
-test("a current slot past its entry cutoff is nothing_due", async () => {
+test("the last millisecond of a slot is still before its entry cutoff, the next one belongs to the next slot", async () => {
   await withHarness(async (h) => {
-    h.deps.nowMs = SLOT.entryCutoffMs;
+    assert.equal(SLOT.entryCutoffMs, SLOT.endMs); // every session's entry deadline is at least one slot long
+    h.deps.nowMs = SLOT.endMs - 1;
     const r = await tick(h.deps);
-    assert.equal(r.status, "nothing_due");
-    assert.equal(h.prompts.length, 0);
+    assert.equal(r.slot, SLOT.id);
+    assert.equal(h.prompts.length, 1);
   });
 });
 
@@ -416,7 +417,7 @@ test("a validated foreign meta is not handed off", async () => {
 
 test("the window is compared as timestamps, not strings", async () => {
   await withHarness(async (h) => {
-    writeMeta(h.metaPath, true, { window: ["2026-10-12T14:00:00Z", "2026-10-12T16:00:00+00:00"] });
+    writeMeta(h.metaPath, true, { window: ["2026-10-12T14:00:00Z", "2026-10-12T14:30:00+00:00"] });
     const r = await tick(h.deps);
     assert.equal(r.status, "handed_off");
   });

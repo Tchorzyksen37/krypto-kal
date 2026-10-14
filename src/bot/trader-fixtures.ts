@@ -42,8 +42,25 @@ export const longPolicy = (): Policy => ({
   valid_until: iso(T0 + 6 * 60 * MIN), rationale: "r", sources: [],
 });
 
+export const BTC = "PF_XBTUSD";
+export const ETH = "PF_ETHUSD";
+
+// A second world symbol: zone 2970..2990, stop 2900, targets 3150 and 3300, ATR 40.
+export const ETH_MENU: LevelMenu = {
+  id: "m-eth", symbol: ETH, createdAtMs: T0 - MIN,
+  levels: [
+    { id: "sup1", price: 2900, kind: "swing_low" }, { id: "e_lo", price: 2970, kind: "atr_band" },
+    { id: "e_hi", price: 2990, kind: "atr_band" }, { id: "res1", price: 3150, kind: "swing_high" },
+    { id: "res2", price: 3300, kind: "swing_high" },
+  ],
+};
+export const ethPolicy = (): Policy => ({ ...longPolicy(), menu_id: "m-eth", symbol: ETH });
+
 export class FakeMarket implements MarketData {
   last = 99250;
+  center = 100000; // the hourly candles' open and close
+  range = 800; // their high-low range, so the ATR
+  calls = { ticker: 0, candles: 0, contract: 0, funding: 0 }; // how often each read was made
   ageMs = 0; // how old the quote is
   failTicker = false;
   failContract = false;
@@ -55,20 +72,26 @@ export class FakeMarket implements MarketData {
     this.clock = clock;
   }
   async ticker(): Promise<PriceEvent> {
+    this.calls.ticker++;
     if (this.failTicker) throw new Error("ticker down");
     return px(this.last, this.clock.now() - this.ageMs);
   }
-  async candles(resolution: string): Promise<FuturesCandle[]> {
+  candleRequests: { resolution: string; n: number | undefined }[] = [];
+  async candles(resolution: string, n?: number): Promise<FuturesCandle[]> {
+    this.calls.candles++;
+    this.candleRequests.push({ resolution, n });
     if (this.failCandles) throw new Error("candles down");
     if (resolution === "1m") return this.minuteCandles;
     const hour = Math.floor(this.clock.now() / 3_600_000) * 3600; // seconds; sixteen closed hourly candles, each with a range of 800
-    return Array.from({ length: 16 }, (_, i) => ({ t: hour - (16 - i) * 3600, o: 100000, h: 100400, l: 99600, c: 100000, v: 1 }));
+    return Array.from({ length: 16 }, (_, i) => ({ t: hour - (16 - i) * 3600, o: this.center, h: this.center + this.range / 2, l: this.center - this.range / 2, c: this.center, v: 1 }));
   }
   async contract(): Promise<Contract> {
+    this.calls.contract++;
     if (this.failContract) throw new Error("instruments down");
     return contract;
   }
   async fundingRates() {
+    this.calls.funding++;
     return [{ t: this.clock.now() - 1000, rate: this.rate }];
   }
 }
@@ -117,23 +140,41 @@ export class FailingJournalStore extends BotStore {
   }
 }
 
-export function world(o: { store?: BotStore; policies?: number; reconciled?: boolean } = {}) {
+// `symbols` makes it a multi-symbol world: a second market (ETH, see ETH_MENU) is wired through `marketFor`, and
+// `ethPolicies` ETH policies are stored after the BTC ones, so they are the newer ones.
+export function world(o: { store?: BotStore; policies?: number; reconciled?: boolean; symbols?: string[]; ethPolicies?: number } = {}) {
   const store = o.store ?? new BotStore(":memory:");
   const clock = new FakeClock(T0);
-  const ex = new DryRunExecutor({ store, clock, config });
+  const cfg = o.symbols ? { ...config, symbols: o.symbols } : config;
+  const ex = new DryRunExecutor({ store, clock, config: cfg });
   const wrapped = new Wrapped(ex);
   const market = new FakeMarket(clock);
-  const deps: TraderDeps = { executor: wrapped, market, store, clock, config, configHash: "h1" };
+  const ethMarket = new FakeMarket(clock);
+  ethMarket.last = 2980;
+  ethMarket.center = 3000;
+  ethMarket.range = 40;
+  const deps: TraderDeps = {
+    executor: wrapped, market, store, clock, config: cfg, configHash: "h1",
+    ...(o.symbols ? { marketFor: (symbol: string) => (symbol === ETH ? ethMarket : market) } : {}),
+  };
   store.putMenu(MENU);
-  for (let i = 0; i < (o.policies ?? 2); i++) store.putPolicy(longPolicy(), T0 - 120_000 + i * MIN);
+  store.putMenu(ETH_MENU);
+  const nBtc = o.policies ?? 2;
+  for (let i = 0; i < nBtc; i++) store.putPolicy(longPolicy(), T0 - 120_000 + i * MIN);
+  for (let i = 0; i < (o.ethPolicies ?? 0); i++) store.putPolicy(ethPolicy(), T0 - 60_000 + i * MIN / 2);
   saveEngineRecord(store, { ...defaultEngineRecord(), reconciled: o.reconciled ?? true });
   const tick = (p: number) => {
     clock.advance(1000);
     market.last = p;
     ex.onPrice(px(p, clock.now()));
   };
+  const tickEth = (p: number) => {
+    clock.advance(1000);
+    ethMarket.last = p;
+    ex.onPrice(px(p, clock.now()), ETH);
+  };
   return {
-    store, clock, ex, wrapped, market, deps, tick,
+    store, clock, ex, wrapped, market, ethMarket, deps, tick, tickEth,
     cycle: () => runCycle(deps), rec: () => loadEngineRecord(store),
     ids: async () => (await ex.getOpenOrders()).map((x) => x.cliOrdId).sort(),
     order: async (id: string) => (await ex.getOpenOrders()).find((x) => x.cliOrdId === id),

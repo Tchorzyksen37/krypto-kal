@@ -7,9 +7,11 @@
 
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
-import { DryRunExecutor } from "./dry-run-executor.ts";
+import { DryRunExecutor, readSimPositions } from "./dry-run-executor.ts";
 import { type OrderRequest, isBotOrder, makeCliOrdId, parseCliOrdId } from "./executor.ts";
 import { T0, closeTo, config, goLong, place, px, req, setup } from "./sim-fixtures.ts";
+
+const HOUR = 3_600_000;
 
 describe("cliOrdId helpers", () => {
   test("makeCliOrdId is deterministic, prefixed with bot-, and within 100 characters", () => {
@@ -469,5 +471,116 @@ describe("DryRunExecutor – state lives in the store", () => {
     assert.notEqual(r.orderId, a);
     again.onPrice(px(98000, T0)); // older than the stored last tick: still ignored after a restart
     assert.equal((await again.getOpenOrders()).length, 2);
+  });
+});
+
+describe("DryRunExecutor – several symbols", () => {
+  const BTC = "PF_XBTUSD";
+  const ETH = "PF_ETHUSD";
+  const two = { ...config, symbols: [BTC, ETH] };
+  // Feeds a quote for one symbol, one second after the previous call.
+  const tickOn = (w: ReturnType<typeof setup>, symbol: string, p: number, over: Partial<ReturnType<typeof px>> = {}) => {
+    w.clock.advance(1000);
+    w.ex.onPrice({ ...px(p, w.clock.now()), ...over }, symbol);
+  };
+  // A long BTC (0.01) and a short ETH (0.1), both opened at the market.
+  const openBoth = async (w: ReturnType<typeof setup>) => {
+    tickOn(w, BTC, 100000);
+    tickOn(w, ETH, 3000);
+    await place(w, { symbol: BTC, side: "buy", size: 0.01 });
+    await place(w, { symbol: ETH, side: "sell", size: 0.1 });
+  };
+
+  test("quotes are per symbol: a stop on ETH fires only on an ETH quote, not on a BTC quote", async () => {
+    const w = setup(two);
+    tickOn(w, ETH, 3000);
+    await place(w, { symbol: ETH, side: "buy", size: 0.5 });
+    await place(w, { symbol: ETH, side: "sell", orderType: "stp", stopPrice: 2900, reduceOnly: true, size: 0.5 });
+    tickOn(w, BTC, 2000); // far below the stop, but it is the BTC quote
+    assert.equal((await w.ex.getOpenOrders()).length, 1);
+    assert.equal((await w.ex.getPositions()).length, 1);
+    tickOn(w, ETH, 2890);
+    assert.equal((await w.ex.getOpenOrders()).length, 0);
+    assert.deepEqual(await w.ex.getPositions(), []);
+  });
+
+  test("a position is kept per symbol and getPositions lists both", async () => {
+    const w = setup(two);
+    await openBoth(w);
+    const pos = Object.fromEntries((await w.ex.getPositions()).map((p) => [p.symbol, p]));
+    assert.equal(pos[BTC]?.side, "long");
+    assert.equal(pos[BTC]?.size, 0.01);
+    assert.equal(pos[ETH]?.side, "short");
+    assert.equal(pos[ETH]?.size, 0.1);
+  });
+
+  test("account equity uses each position's own mark", async () => {
+    const w = setup(two);
+    await openBoth(w);
+    tickOn(w, BTC, 101000); // long from 100005: +9.95
+    tickOn(w, ETH, 2900); // short from 2995: +9.5
+    const a = await w.ex.getAccount();
+    closeTo(a.unrealizedPnl, 0.01 * (101000 - 100005) + 0.1 * (2995 - 2900), 1e-6);
+    closeTo(a.equity, 1000 - a.fees - a.funding + a.unrealizedPnl, 1e-6);
+  });
+
+  test("available margin counts the notional of every position", async () => {
+    const w = setup(two);
+    await openBoth(w);
+    tickOn(w, BTC, 101000);
+    tickOn(w, ETH, 2900);
+    const a = await w.ex.getAccount();
+    closeTo(a.availableMargin, a.equity - (0.01 * 101000 + 0.1 * 2900) / two.max_leverage, 1e-6);
+  });
+
+  test("an order on a symbol outside config.symbols is rejected", async () => {
+    const w = setup(two);
+    tickOn(w, BTC, 100000);
+    const r = await w.ex.placeOrder(req({ symbol: "PF_DOGEUSD" }));
+    assert.ok(!r.ok);
+    assert.equal(r.kind, "unknown");
+    assert.match(r.message, /PF_DOGEUSD/);
+  });
+
+  test("a position on a symbol no longer in config.symbols is still reported", async () => {
+    const w = setup(two);
+    await openBoth(w);
+    const narrowed = new DryRunExecutor({ store: w.store, clock: w.clock, config: { ...config, symbols: [BTC] } });
+    const symbols = (await narrowed.getPositions()).map((p) => p.symbol).sort();
+    assert.deepEqual(symbols, [ETH, BTC]);
+    assert.deepEqual(readSimPositions(w.store, { ...config, symbols: [BTC] }).map((p) => p.symbol).sort(), [ETH, BTC]);
+  });
+
+  test("funding is charged to the position's own size history", async () => {
+    const w = setup(two);
+    await openBoth(w);
+    w.clock.advance(HOUR);
+    tickOn(w, BTC, 100000);
+    tickOn(w, ETH, 3000);
+    w.ex.accrueFunding([{ t: T0 + HOUR, rate: 0.0001 }], ETH);
+    const a = await w.ex.getAccount();
+    closeTo(a.funding, -0.1 * 3000 * 0.0001, 1e-9); // the short receives; the BTC long was not charged
+    const pos = Object.fromEntries((await w.ex.getPositions()).map((p) => [p.symbol, p]));
+    closeTo(pos[BTC]?.unrealizedFunding ?? NaN, 0, 1e-12);
+  });
+
+  test("legacy state loads: old meta price, position under the old symbol, history doc id hist", async () => {
+    const w = setup(config);
+    w.store.putDoc("sim_meta", "meta", T0, { nextOrderId: 1, nextFillId: 1, lastTickMs: T0, price: px(100000, T0) });
+    w.store.putDoc("sim_position", BTC, T0, { size: 0.01, avgPrice: 100000, fundingPaid: 0, openedAtMs: T0 - 5000 });
+    w.store.putDoc("sim_position_history", "hist", T0, [{ t: T0 - 5000, size: 0.01 }]);
+    const [p] = await w.ex.getPositions();
+    assert.equal(p?.symbol, BTC);
+    closeTo(p?.unrealizedPnl ?? NaN, 0);
+    await place(w, { side: "sell", orderType: "stp", stopPrice: 99000, reduceOnly: true, size: 0.01 });
+    tickOn(w, BTC, 98900);
+    assert.deepEqual(await w.ex.getPositions(), []);
+    // funding finds the legacy history (the position existed before the rate time)
+    const w2 = setup(config);
+    w2.store.putDoc("sim_meta", "meta", T0, { nextOrderId: 1, nextFillId: 1, lastTickMs: T0, price: px(100000, T0) });
+    w2.store.putDoc("sim_position", BTC, T0, { size: 0.01, avgPrice: 100000, fundingPaid: 0, openedAtMs: T0 - 5000 });
+    w2.store.putDoc("sim_position_history", "hist", T0, [{ t: T0 - 5000, size: 0.01 }]);
+    w2.ex.accrueFunding([{ t: T0 - 1000, rate: 0.0001 }]);
+    closeTo((await w2.ex.getAccount()).funding, 0.01 * 100000 * 0.0001);
   });
 });

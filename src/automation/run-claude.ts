@@ -21,7 +21,7 @@ export function speculatePrompt(slot: Slot, brainDir: string): string {
   return (
     `BRAIN is ${brainDir} (do not read .env; brain_write is not available, so write the report and meta files ` +
     `with the Edit or Write tool under BRAIN/output/speculation/). ` +
-    `Run the speculate skill for the 2-hour slot ${slot.id}: window start ${new Date(slot.startMs).toISOString()}, ` +
+    `Run the speculate skill for the 30-minute slot ${slot.id}: window start ${new Date(slot.startMs).toISOString()}, ` +
     `window end ${new Date(slot.endMs).toISOString()}, session ${slot.session}. ` +
     `Use exactly this window as the report's window and file name HHMMZ=${hhmm}Z. Do not offer to hand bets to the bot.`
   );

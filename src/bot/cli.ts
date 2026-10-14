@@ -15,6 +15,7 @@
 
 import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 import { createLogger } from "../core/logger.ts";
@@ -23,7 +24,8 @@ import { type AlertSink, logSink, VaultAlertSink, writeVaultReport } from "./ale
 import { ApprovingExecutor, type Ask } from "./approving-executor.ts";
 import { BotStore } from "./bot-store.ts";
 import { type Clock, SystemClock } from "./clock.ts";
-import { type BotConfig, configHash, defaultConfig, loadConfig } from "./config.ts";
+import { loadCalibration } from "./conviction.ts";
+import { type BotConfig, configHash, defaultConfig, isAllowedSymbol, loadConfig } from "./config.ts";
 import { DryRunExecutor } from "./dry-run-executor.ts";
 import { loadEngineRecord, saveEngineRecord } from "./engine-state.ts";
 import type { MarketData } from "./executor.ts";
@@ -90,7 +92,9 @@ export function addPolicy(store: BotStore, config: BotConfig, fixture: PolicyFix
 
 // A fixture around the current price: entry zone +-0.25 ATR, stop 1.5 ATR from the price (1.25 ATR beyond the zone),
 // targets 2.5 and 4 ATR, so the default min_reward_risk (1.5) and sl_min_atr_multiple (1) are met.
-export async function policyTemplate(market: MarketData, config: BotConfig, direction: "long" | "short", nowMs: number): Promise<PolicyFixture> {
+export async function policyTemplate(
+  market: MarketData, config: BotConfig, direction: "long" | "short", nowMs: number, symbol: string = config.symbols[0]!,
+): Promise<PolicyFixture> {
   const quote = await market.ticker();
   const candles = await market.candles(config.atr.resolution, config.atr.period + 3);
   const a = atr(candles, config.atr.period, config.atr.resolution, nowMs);
@@ -102,7 +106,7 @@ export async function policyTemplate(market: MarketData, config: BotConfig, dire
   const menuId = `manual-${new Date(nowMs).toISOString().slice(0, 16).replace(/[-:T]/g, "")}`;
   return {
     menu: {
-      id: menuId, symbol: config.symbol,
+      id: menuId, symbol,
       levels: [
         { id: "zone_a", price: tick(p - 0.25 * a), kind: "atr_band" },
         { id: "zone_b", price: tick(p + 0.25 * a), kind: "atr_band" },
@@ -112,7 +116,7 @@ export async function policyTemplate(market: MarketData, config: BotConfig, dire
       ],
     },
     policy: {
-      schema_version: 1, menu_id: menuId, symbol: config.symbol, bias: 0.5 * s, conviction: 0.5,
+      schema_version: 1, menu_id: menuId, symbol, bias: 0.5 * s, conviction: 0.5,
       risk_budget_pct: config.max_risk_per_trade_pct, allowed_directions: [direction],
       scenario: {
         direction, entry_zone: { from: "zone_a", to: "zone_b" }, targets: ["t1", "t2"], invalidation: "stop", horizon_hours: 12,
@@ -124,16 +128,16 @@ export async function policyTemplate(market: MarketData, config: BotConfig, dire
 
 // ---- from a speculation report -------------------------------------------------------------------------------------
 
-// Converts the report's best bet on the bot's symbol and stores it loosen_confirm_cycles times: one checked
+// Converts the report's best bet on any allowed symbol and stores it loosen_confirm_cycles times: one checked
 // speculation bet is one decision, and the engine acts only once that many agreeing policies exist.
 export function addFromSpeculation(
-  store: BotStore, config: BotConfig, meta: ReportMeta, nowMs: number, opts: { dry?: boolean; source?: string } = {},
+  store: BotStore, config: BotConfig, meta: ReportMeta, nowMs: number, opts: { dry?: boolean; source?: string; ratio?: number } = {},
 ): { added: number; text: string } {
-  const conv = fixturesFromSpeculation(meta, config, nowMs, opts.source ?? "speculation");
+  const conv = fixturesFromSpeculation(meta, config, nowMs, opts.source ?? "speculation", opts.ratio ?? 1);
   const lines: string[] = [];
   let added = 0;
   for (const f of conv.fixtures) {
-    lines.push(`bet ${f.betId}: ${f.fixture.policy.scenario?.direction} ${config.symbol}, entry zone ${f.fixture.menu!.levels[0]!.price}-${f.fixture.menu!.levels[1]!.price}, stop ${f.fixture.menu!.levels[2]!.price}, target ${f.fixture.menu!.levels[3]!.price}`);
+    lines.push(`bet ${f.betId}: ${f.fixture.policy.scenario?.direction} ${f.fixture.policy.symbol}, entry zone ${f.fixture.menu!.levels[0]!.price}-${f.fixture.menu!.levels[1]!.price}, stop ${f.fixture.menu!.levels[2]!.price}, target ${f.fixture.menu!.levels[3]!.price}`);
     lines.push(`  window: entries from ${f.window.notBefore} until ${f.window.entryUntil}; a position is closed by ${f.window.closeBy} at the latest`);
     if (opts.dry) continue;
     for (let i = 0; i < config.loosen_confirm_cycles; i++) {
@@ -181,10 +185,10 @@ export async function statusText(store: BotStore, config: BotConfig, nowMs: numb
   const rec = loadEngineRecord(store);
   const [positions, orders, account] = await Promise.all([sim.getPositions(), sim.getOpenOrders(), sim.getAccount()]);
   const lines = [
-    `mode: dry-run (no real orders)   symbol: ${config.symbol}   db: ${config.db_path}`,
+    `mode: dry-run (no real orders)   symbols: ${config.symbols.join(", ")}   db: ${config.db_path}`,
     `state: ${rec.state}${rec.sinceMs ? ` since ${new Date(rec.sinceMs).toISOString()}` : ""}${rec.halt ? `   HALT: ${rec.halt.reason}${rec.halt.manualAck ? " (needs ack-halt)" : ""}` : ""}`,
     `reconciled: ${rec.reconciled}   cooldown until: ${rec.cooldownUntilMs ? new Date(rec.cooldownUntilMs).toISOString() : "-"}`,
-    `position: ${positions[0] ? `${positions[0].side} ${positions[0].size} @ ${positions[0].price}, unrealised ${positions[0].unrealizedPnl?.toFixed(2)}` : "none"}`,
+    `position: ${positions.length ? positions.map((p) => `${p.side} ${p.size} ${p.symbol} @ ${p.price}, unrealised ${p.unrealizedPnl?.toFixed(2)}`).join("; ") : "none"}`,
     `open orders: ${orders.length ? orders.map((o) => `${o.cliOrdId} ${o.side} ${o.orderType} ${o.unfilledSize} @ ${o.limitPrice ?? o.stopPrice}`).join("; ") : "none"}`,
     `equity: ${account.equity.toFixed(2)}   realised ${account.realizedPnl.toFixed(2)}   fees ${account.fees.toFixed(2)}   funding ${account.funding.toFixed(2)}`,
     "",
@@ -220,17 +224,31 @@ export async function buildRuntime(config: BotConfig, hash: string, opts: { feed
   const store = new BotStore(config.db_path);
   // Public endpoints only; the empty keys keep the client from picking up any trading keys from the environment.
   const api = new KrakenFuturesClient({ apiKey: "", apiSecret: "" });
-  const real = new KrakenMarketData(api, config.symbol, clock);
+  // One market per symbol, made when first asked for. Each feeds the simulated exchange with its own symbol's quotes.
+  const reals = new Map<string, KrakenMarketData>();
+  const realFor = (symbol: string): KrakenMarketData => {
+    let m = reals.get(symbol);
+    if (!m) reals.set(symbol, (m = new KrakenMarketData(api, symbol, clock)));
+    return m;
+  };
   let sizeStep: number | undefined;
   try {
-    sizeStep = (await real.contract()).sizeStep;
+    sizeStep = (await realFor(config.symbols[0]!).contract()).sizeStep;
   } catch (e) {
     log.warn("contract unavailable at start; the simulator uses its default size step", { error: e instanceof Error ? e.message : String(e) });
   }
   const sim = new DryRunExecutor({ store, clock, config, ...(sizeStep ? { sizeStep } : {}) });
-  const market = opts.feed ? new FeedingMarket(real, sim) : real;
+  const feeding = new Map<string, MarketData>();
+  const marketFor = (symbol: string): MarketData => {
+    if (!isAllowedSymbol(config, symbol)) throw new Error(`no market for ${symbol}`);
+    if (!opts.feed) return realFor(symbol);
+    let m = feeding.get(symbol);
+    if (!m) feeding.set(symbol, (m = new FeedingMarket(realFor(symbol), sim, symbol)));
+    return m;
+  };
+  const market = marketFor(config.symbols[0]!);
   const executor = config.manual_approval ? new ApprovingExecutor(sim, terminalAsk(config.entry_timeout_sec)) : sim;
-  const deps: TraderDeps = { executor, market, store, clock, config, configHash: hash };
+  const deps: TraderDeps = { executor, market, marketFor, store, clock, config, configHash: hash };
   const sinks: AlertSink[] = [logSink];
   const brainDir = process.env.BRAIN_DIR;
   if (brainDir) sinks.push(new VaultAlertSink(brainDir));
@@ -263,13 +281,21 @@ async function main(argv: string[]): Promise<number> {
       }
       if (sub === "from-speculation" && arg) {
         const meta = JSON.parse(readFileSync(arg, "utf8")) as ReportMeta;
-        const r = addFromSpeculation(new BotStore(config.db_path), config, meta, now(), { dry: args.includes("--dry"), source: arg });
+        const brain = process.env.BRAIN_DIR;
+        const cal = brain ? loadCalibration(join(brain, "output", "speculation")) : { ratio: 1, touched: 0 };
+        const r = addFromSpeculation(new BotStore(config.db_path), config, meta, now(), { dry: args.includes("--dry"), source: arg, ratio: cal.ratio });
         console.log(r.text);
+        if ("warning" in cal && cal.warning) console.log(`warning: ${cal.warning}`);
         return r.added || args.includes("--dry") ? 0 : 1;
       }
       if (sub === "template" && (arg === "long" || arg === "short")) {
-        const market = new KrakenMarketData(new KrakenFuturesClient({ apiKey: "", apiSecret: "" }), config.symbol, new SystemClock());
-        console.log(JSON.stringify(await policyTemplate(market, config, arg, now()), null, 2));
+        const symbol = argValue(args, "--symbol") ?? config.symbols[0]!;
+        if (!isAllowedSymbol(config, symbol)) {
+          console.log(`${symbol} is not one of the configured symbols (${config.symbols.join(", ")})`);
+          return 1;
+        }
+        const market = new KrakenMarketData(new KrakenFuturesClient({ apiKey: "", apiSecret: "" }), symbol, new SystemClock());
+        console.log(JSON.stringify(await policyTemplate(market, config, arg, now(), symbol), null, 2));
         return 0;
       }
       break;
@@ -305,7 +331,7 @@ async function main(argv: string[]): Promise<number> {
       let stopping = false;
       process.on("SIGINT", () => (stopping = true));
       process.on("SIGTERM", () => (stopping = true));
-      log.info("trader started (dry-run)", { symbol: config.symbol, configHash: hash.slice(0, 12) });
+      log.info("trader started (dry-run)", { symbols: config.symbols, configHash: hash.slice(0, 12) });
       await startup(rt);
       await loop(() => traderStep(rt), intervals(config).traderMs, { stop: () => stopping });
       return 0;
@@ -315,7 +341,7 @@ async function main(argv: string[]): Promise<number> {
       let stopping = false;
       process.on("SIGINT", () => (stopping = true));
       process.on("SIGTERM", () => (stopping = true));
-      log.info("watchdog started (dry-run)", { symbol: config.symbol });
+      log.info("watchdog started (dry-run)", { symbols: config.symbols });
       await loop(() => watchdogStep(rt.deps), intervals(config).watchdogMs, { stop: () => stopping });
       return 0;
     }

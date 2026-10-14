@@ -15,10 +15,10 @@ export type HandoffResult =
 // Thrown inside the store transaction to roll back a partly stored bet.
 class RollbackError extends Error {}
 
-export function handoff(store: BotStore, config: BotConfig, meta: ReportMeta, nowMs: number, source: string): HandoffResult {
+export function handoff(store: BotStore, config: BotConfig, meta: ReportMeta, nowMs: number, source: string, ratio = 1): HandoffResult {
   if (!Array.isArray(meta.validated)) return { status: "failed", detail: "the checker has not run on this report (no validated bets)" };
 
-  const conv = fixturesFromSpeculation(meta, config, nowMs, source);
+  const conv = fixturesFromSpeculation(meta, config, nowMs, source, ratio);
   const notes = [
     ...conv.skipped.map((s) => `skipped ${s.betId}: ${s.reason}`),
     ...conv.warnings.map((w) => `warning: ${w}`),
@@ -31,7 +31,7 @@ export function handoff(store: BotStore, config: BotConfig, meta: ReportMeta, no
   // All copies or none: a throw rolls the whole transaction back.
   try {
     const text = store.transaction(() => {
-      const r = addFromSpeculation(store, config, meta, nowMs, { source });
+      const r = addFromSpeculation(store, config, meta, nowMs, { source, ratio });
       if (r.added !== 1) throw new RollbackError(r.text);
       return r.text;
     });

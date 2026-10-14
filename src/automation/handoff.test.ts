@@ -49,6 +49,13 @@ describe("handoff", () => {
     assert.equal(store.latestPolicies(10).length, 0);
   });
 
+  test("handoff passes the ratio through", () => {
+    const store = new BotStore(":memory:");
+    const r = handoff(store, config, meta([bet({ probability: 0.6 })]), T0, "r.meta.json", 0.5);
+    assert.equal(r.status, "handed_off");
+    assert.ok(Math.abs(store.latestPolicies(1)[0]!.policy.conviction - 0.3) < 1e-9);
+  });
+
   test("a clean BTC bet is handed off", () => {
     const store = new BotStore(":memory:");
     const r = handoff(store, config, meta([bet()]), T0, "r.meta.json");
@@ -108,14 +115,14 @@ describe("handoff", () => {
   });
 });
 
-test("config/bot.auto.json only raises max_policy_ttl_min", () => {
+test("config/bot.auto.json only raises max_policy_ttl_min and lists the symbols", () => {
   const dir = mkdtempSync(join(tmpdir(), "auto-cfg-"));
   try {
     writeFileSync(join(dir, "empty.json"), "{}");
     const defaults = loadConfig(join(dir, "empty.json")).config;
     const auto = loadConfig(join(dirname(fileURLToPath(import.meta.url)), "../../config/bot.auto.json")).config;
-    assert.equal(auto.max_policy_ttl_min, 120);
-    assert.deepEqual({ ...auto, max_policy_ttl_min: 0 }, { ...defaults, max_policy_ttl_min: 0 });
+    assert.equal(auto.max_policy_ttl_min, 30);
+    assert.deepEqual({ ...auto, max_policy_ttl_min: 0, symbols: defaults.symbols }, { ...defaults, max_policy_ttl_min: 0 });
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
