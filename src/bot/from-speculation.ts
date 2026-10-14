@@ -18,7 +18,7 @@
 
 import type { Bet, ReportMeta } from "../speculation/types.ts";
 import type { PolicyFixture } from "./cli.ts";
-import { type BotConfig, isAllowedSymbol } from "./config.ts";
+import type { BotConfig } from "./config.ts";
 import { calibratedConviction } from "./conviction.ts";
 
 export const ZONE_ATR = 0.1; // width of the entry band, in 1h ATRs
@@ -30,6 +30,10 @@ export interface SpeculationConversion {
 }
 
 const minutes = (ms: number) => Math.round(ms / 60_000);
+
+// The configured spelling of a bet's contract (the report's casing varies), or undefined when the bot does not trade it.
+const configured = (config: BotConfig, futures: string): string | undefined =>
+  config.symbols.find((s) => s.toUpperCase() === futures.toUpperCase());
 
 export function fixturesFromSpeculation(meta: ReportMeta, config: BotConfig, nowMs: number, source = "speculation", ratio = 1): SpeculationConversion {
   const out: SpeculationConversion = { fixtures: [], skipped: [], warnings: [] };
@@ -60,7 +64,7 @@ export function fixturesFromSpeculation(meta: ReportMeta, config: BotConfig, now
 }
 
 function skipReason(bet: Bet, config: BotConfig, nowMs: number, haveOne: boolean): string | undefined {
-  if (!isAllowedSymbol(config, bet.futures)) return `the bot does not trade ${bet.futures} (allowed: ${config.symbols.join(", ")})`;
+  if (!configured(config, bet.futures)) return `the bot does not trade ${bet.futures} (allowed: ${config.symbols.join(", ")})`;
   if (Date.parse(bet.entry_deadline) <= nowMs) return `its entry window closed at ${bet.entry_deadline}`;
   if (haveOne) return "the bot holds one position at a time; a better bet was taken";
   return undefined;
@@ -69,6 +73,7 @@ function skipReason(bet: Bet, config: BotConfig, nowMs: number, haveOne: boolean
 function toFixture(
   bet: Bet, atr: number, config: BotConfig, nowMs: number, source: string, ratio: number, warnings: string[],
 ): SpeculationConversion["fixtures"][number] {
+  const symbol = configured(config, bet.futures)!; // skipReason already refused any other contract
   const long = bet.side === "long";
   const risk = Math.abs(bet.entry - bet.stop_loss);
   const reward = Math.abs(bet.take_profit - bet.entry);
@@ -98,7 +103,7 @@ function toFixture(
 
   const fixture: PolicyFixture = {
     menu: {
-      id: menuId, symbol: bet.futures, createdAtMs: nowMs,
+      id: menuId, symbol, createdAtMs: nowMs,
       levels: [
         { id: "zone_lo", price: zoneLow, kind: "speculation_entry" },
         { id: "zone_hi", price: zoneHigh, kind: "speculation_entry" },
@@ -107,7 +112,7 @@ function toFixture(
       ],
     },
     policy: {
-      schema_version: 1, menu_id: menuId, symbol: bet.futures,
+      schema_version: 1, menu_id: menuId, symbol,
       bias: (long ? 1 : -1) * Math.min(1, Math.max(0.05, bet.probability)),
       conviction: calibratedConviction(stated, ratio),
       risk_budget_pct: config.base_risk_per_trade_pct,

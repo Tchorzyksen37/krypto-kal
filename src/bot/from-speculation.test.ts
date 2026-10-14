@@ -96,6 +96,13 @@ describe("several symbols and calibrated conviction", () => {
     assert.match(c.skipped[0]!.reason, /does not trade PF_DOGEUSD \(allowed: PF_XBTUSD, PF_ETHUSD, PF_SOLUSD, PF_XRPUSD\)/);
   });
 
+  test("a bet whose futures is spelled in lower case still matches, and the policy uses the configured spelling", () => {
+    const c = fixturesFromSpeculation(meta([bet({ futures: "pf_xbtusd" })]), four, T0);
+    assert.equal(c.fixtures.length, 1);
+    assert.equal(c.fixtures[0]!.fixture.policy.symbol, "PF_XBTUSD");
+    assert.equal(c.fixtures[0]!.fixture.menu!.symbol, "PF_XBTUSD");
+  });
+
   test("risk_budget_pct equals base_risk_per_trade_pct", () => {
     const c = fixturesFromSpeculation(meta([bet()]), config, T0);
     assert.equal(c.fixtures[0]!.fixture.policy.risk_budget_pct, config.base_risk_per_trade_pct);

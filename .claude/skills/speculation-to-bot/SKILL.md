@@ -22,12 +22,12 @@ trade. The bot runs in dry-run only (simulated fills on real prices); nothing he
 1. **Pick the report.** The newest `BRAIN/output/speculation/<YYYY-MM-DD>/<HHMMZ>.meta.json` (`BRAIN` = `BRAIN_DIR`
    from `.env`), unless the user names one. Say which report and which session you use.
 2. **Dry run:** `npm run bot -- policy from-speculation <meta.json> --dry` (add `--config <file>` if the user runs the
-   bot with one). It prints, for the best bet on the bot's symbol: the side, entry zone, stop and target, and the
+   bot with one). It prints, for the best bet on any of the bot's symbols: the side, entry zone, stop and target, and the
    window: entries from (session window start) until (the bet's fill-by time), close by (fill-by + hold time). It also
    lists skipped bets and warnings.
 3. **Read the warnings before storing:**
-   - `trades PF_..., this bet is on PF_...`: the bot trades one symbol (its config `symbol`). Bets on other contracts
-     need a second bot with its own config and `db_path`; tell the user, do not change the config.
+   - `does not trade PF_... (allowed: ...)`: the bot trades the contracts in its config `symbols`, one position at a
+     time. A bet on another contract is skipped; tell the user, do not change the config.
    - `sl_min_atr_multiple` or `min_reward_risk`: the bot's own limits are stricter than the speculation checker and it
      will refuse the entry. Store it only if the user still wants to see the refusal in the report; otherwise stop.
    - `max_policy_ttl_min`: the bet's entry window is longer than a policy may live (default 60 min, e.g. the night
