@@ -208,7 +208,7 @@ describe("runner – several symbols", () => {
     return { w, rt };
   };
 
-  test("hourly funding accrues for the held symbol only and is skipped while flat", async () => {
+  test("hourly funding accrues for the primary symbol and for every symbol that has traded, not for the others", async () => {
     const { w, rt } = runtime2();
     const accrued: (string | undefined)[] = [];
     const accrue = rt.sim.accrueFunding.bind(rt.sim);
@@ -218,16 +218,32 @@ describe("runner – several symbols", () => {
     };
     w.tick(99250);
     w.tickEth(2980);
-    await traderStep(rt); // flat: nothing accrued, but the hour is still marked
-    assert.deepEqual(accrued, []);
+    await traderStep(rt); // nothing has traded: only the primary symbol
+    assert.deepEqual(accrued, [BTC]);
     assert.equal(w.store.listDocs("funding_mark", 0).length, 1);
 
     await w.ex.placeOrder({ symbol: ETH, side: "buy", orderType: "mkt", size: 0.05, reduceOnly: false, cliOrdId: "manual-1" });
     w.clock.advance(3_600_000);
     w.tick(99250);
     w.tickEth(2980);
+    accrued.length = 0;
     await traderStep(rt);
-    assert.deepEqual(accrued, [ETH]);
+    assert.deepEqual([...accrued].sort(), [ETH, BTC]);
+  });
+
+  test("a position opened and closed between two hourly steps is still charged the funding time it straddled", async () => {
+    const { w, rt } = runtime2();
+    w.tick(99250);
+    w.tickEth(2980);
+    await traderStep(rt); // marks the first hour
+    await w.ex.placeOrder({ symbol: ETH, side: "buy", orderType: "mkt", size: 0.05, reduceOnly: false, cliOrdId: "manual-1" });
+    w.clock.advance(3_600_000 + 5000); // past the next funding time
+    w.tickEth(2980);
+    await w.ex.placeOrder({ symbol: ETH, side: "sell", orderType: "mkt", size: 0.05, reduceOnly: true, cliOrdId: "manual-2" });
+    w.ethMarket.fundingRates = async () => [{ t: T0 + 3_600_000, rate: 0.0001 }];
+    w.tick(99250);
+    await traderStep(rt);
+    assert.ok(Math.abs((await w.ex.getAccount()).funding - 0.05 * 2980 * 0.0001) < 1e-6);
   });
 
   test("the vault report path is unchanged", async () => {

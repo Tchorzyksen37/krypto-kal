@@ -85,6 +85,11 @@ export function readSimPositions(store: BotStore, config: BotConfig): { symbol: 
   return out;
 }
 
+// Every symbol that ever had a fill (the funding of a position that is already closed is still owed).
+export function readSimSymbols(store: BotStore): string[] {
+  return store.getDoc<string[]>(SYMBOLS, "index") ?? [];
+}
+
 export interface DryRunOptions {
   store: BotStore;
   clock: Clock;

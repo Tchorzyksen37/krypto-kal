@@ -146,6 +146,10 @@ export async function reconcile(d: TraderDeps, opts: { replayer?: Replayer } = {
         report("unexplained_position", `a ${position.side} position of ${position.size} with no trade record: left alone`);
         haltManual("unexplained_position");
         clean = false;
+      } else if (trade.symbol && position.symbol !== trade.symbol) {
+        report("position_on_wrong_symbol", `the trade is on ${trade.symbol} but the position is on ${position.symbol}`);
+        haltManual("position_on_wrong_symbol");
+        clean = false;
       } else if (position.side !== trade.direction) {
         report("position_on_wrong_side", `the trade is ${trade.direction} but the position is ${position.side}`);
         haltManual("position_on_wrong_side");

@@ -17,6 +17,7 @@ import { reconcile } from "./reconcile.ts";
 import { BTC, ETH, E, MIN, SL, TP1, TP2, Wrapped, arm, openPosition, reasons, world } from "./trader-fixtures.ts";
 import { DryRunExecutor } from "./dry-run-executor.ts";
 import type { Replayer } from "./reconcile.ts";
+import type { TradeRecord } from "./engine.ts";
 import { T0, config } from "./sim-fixtures.ts";
 
 const kinds = (r: { incidents: { kind: string }[] }) => r.incidents.map((i) => i.kind).sort();
@@ -375,6 +376,20 @@ describe("several symbols", () => {
     assert.equal(w.rec().state, "HALTED");
     assert.deepEqual([w.rec().halt?.reason, w.rec().halt?.manualAck], ["multiple_positions", true]);
     assert.ok(kinds(r).includes("multiple_positions"));
+  });
+
+  test("a position on another allowed symbol than the trade record's: unclean, halt position_on_wrong_symbol", async () => {
+    const w = world({ symbols: SYMBOLS, reconciled: false });
+    w.tick(99250);
+    w.tickEth(2980);
+    await buy(w, ETH, 0.05, "bot-2-entry-0");
+    const trade: TradeRecord = { policyId: 2, symbol: BTC, direction: "long", entryCliOrdId: "bot-2-entry-0", entryPrice: 99250,
+      plan: { size: 0.004, stop: 98000, ladder: [{ price: 102000, size: 0.002 }], leverage: 2 }, horizonEndMs: w.clock.now() + 60 * MIN, protectSeq: 0 };
+    saveEngineRecord(w.store, { ...w.rec(), state: "OPEN", sinceMs: w.clock.now(), trade });
+    const r = await reconcile(w.deps, { replayer: w.ex });
+    assert.equal(r.clean, false);
+    assert.deepEqual([w.rec().halt?.reason, w.rec().halt?.manualAck], ["position_on_wrong_symbol", true]);
+    assert.ok(kinds(r).includes("position_on_wrong_symbol"));
   });
 
   test("a position on a symbol outside config.symbols: unclean, halt position_outside_symbols", async () => {
