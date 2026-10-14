@@ -138,7 +138,7 @@ describe("status", () => {
     const text = statusText(dir, NOW);
     assert.ok(!text.includes("S1 "), text);
     assert.ok(text.includes("S2 ") && text.includes("S13 "), text);
-    assert.match(text, /next slot: 2026-10-12T12:00:00\.000Z/);
+    assert.match(text, /next slot: 2026-10-12T10:30:00\.000Z/);
   });
 
   test("the last run-log line is shown on one line", () => {

@@ -1,6 +1,6 @@
 ---
 name: speculate
-description: Session-based speculation report for crypto futures (BTC, ETH, XRP plus screened symbols), every 2 hours on an automated UTC grid, or per session when run by hand (Europe open, Europe/US overlap, US, Asian night). Builds a KNOWN / UNKNOWN / POSSIBLE prompt from the krypto-kal MCP tools, takes the session's regions and investor profiles into account, states an overall LONG / SHORT / NEUTRAL bias, and writes scenarios plus best bets (entry, SL, TP, TTL), catalysts and risks to the Obsidian vault under output/speculation/. Use when the scheduled routine fires, or when the user says speculate, "next session", "best bets", or asks for a speculation report. Horizon is one session (hours). Not for the multi-day market regime and macro briefing (crypto-market-sentiment), not for positions the user already holds (position-review), not for verifying a headline against the price (social-check-before-trade), not for updating the wiki (brain-ingest).
+description: Session-based speculation report for crypto futures (BTC, ETH, XRP plus screened symbols), every 30 minutes on an automated UTC grid, or per session when run by hand (Europe open, Europe/US overlap, US, Asian night). Builds a KNOWN / UNKNOWN / POSSIBLE prompt from the krypto-kal MCP tools, takes the session's regions and investor profiles into account, states an overall LONG / SHORT / NEUTRAL bias, and writes scenarios plus best bets (entry, SL, TP, TTL), catalysts and risks to the Obsidian vault under output/speculation/. Use when the scheduled routine fires, or when the user says speculate, "next session", "best bets", or asks for a speculation report. Horizon is one session (hours). Not for the multi-day market regime and macro briefing (crypto-market-sentiment), not for positions the user already holds (position-review), not for verifying a headline against the price (social-check-before-trade), not for updating the wiki (brain-ingest).
 ---
 
 # Speculate
@@ -10,14 +10,14 @@ known, what is unknown and what is possible. It is not analysis of history and n
 and opens positions by hand (limit entries: wait for the touch). Design and rationale:
 `docs/superpowers/plans/2026-10-03-speculation-mode.md`.
 
-Schedule: the automated schedule is a 2-hour grid on even UTC hours (00:00Z, 02:00Z ... 22:00Z), run by
+Schedule: the automated schedule is a 30-minute grid on the hour and half hour UTC (00:00Z, 00:30Z ... 23:30Z), run by
 `npm run auto -- tick` (Windows Task Scheduler). Each automated report covers exactly one such slot. A manual
 `/speculate` (no slot in the prompt) still reports on the running session: Europe open (08:00-12:00 Warsaw),
 Europe/US overlap (13:30-17:30), US (17:30-22:00), Night/Asia (22:00-08:00).
 
 ## Slot mode
 
-The automation's prompt has this form: `Run the speculate skill for the 2-hour slot <id>: window start <ISO>,
+The automation's prompt has this form: `Run the speculate skill for the 30-minute slot <id>: window start <ISO>,
 window end <ISO>, session <id>. Use exactly this window as the report's window and file name HHMMZ=<HHMM>Z. Do not
 offer to hand bets to the bot.` When the prompt names `window start`, `window end` and `session`, the run is in slot
 mode, otherwise it is a normal session run. In slot mode:
@@ -30,8 +30,8 @@ mode, otherwise it is a normal session run. In slot mode:
   Equal: use the tool's session block (profile, regions, investors, watch, caution) as it is. Different: take profile,
   regions, investors, watch and caution NOT from the tool but from `node src/speculation/sessions.ts <window start
   ISO>` (its output has limits, regions, investors, profile, watch and caution of the session it picks at that
-  instant; for an even-UTC-hour slot start it picks the slot's session with the default 20-minute lead, because session
-  starts fall on :00 or :30 UTC and none lies in the 20 minutes after an even hour; a larger
+  instant; for a slot start (always :00 or :30 UTC) it picks the slot's session with the default 20-minute lead, because session
+  starts fall on :00 or :30 UTC and none lies in the 20 minutes after a slot start; a larger
   `SPECULATION_LEAD_MINUTES` could make it pick the next session). In that case state under KNOWN / UNKNOWN that the
   tool's session block described a different session, and that the `volume` share line is for the tool's session.
   A slot that falls between two sessions (the gap after the US close, for example) runs with the next session's
@@ -41,8 +41,8 @@ mode, otherwise it is a normal session run. In slot mode:
   an X archive older than the last sync) under UNKNOWN as "calendar unknown" / "not available in automated runs".
 - **Time references.** Everywhere this file says "the session to report on", "this session", "the window start" or
   "since window start" (steps 1, 2, 3, 6, 7, 8), in slot mode it means the prompt's window: "this session so far" is
-  measured from the slot start, and the window is the 2-hour slot.
-- The report covers **only the 2-hour window**: scenarios, catalysts, risks and bets must fit inside it. The checker
+  measured from the slot start, and the window is the 30-minute slot.
+- The report covers **only the 30-minute window**: scenarios, catalysts, risks and bets must fit inside it. The checker
   caps each bet's `entry_deadline` at the window end, so a bet's fill window ends at the slot end; choose entries
   that can plausibly be touched within the slot, and keep `ttl_minutes` short.
 - Files are named by the slot start: folder `YYYY-MM-DD` is the UTC date of the window start, `HHMMZ` is the window
@@ -185,7 +185,7 @@ mode, otherwise it is a normal session run. In slot mode:
      A breakout entry is not supported; express it as a pullback limit instead.
    **Night session (manual runs only):** the window is 10 hours, so each bet names the phase it targets (US wind-down, Asia open,
    HK/China open, Europe pre-open); prefer few, high reward:risk, limit-at-range-edge bets, wide stops.
-   In slot mode the window is 2 hours: a bet names the phase it targets only if that phase fits the slot, and
+   In slot mode the window is 30 minutes: a bet names the phase it targets only if that phase fits the slot, and
    `ttl_minutes` stays short.
 8. **Write the report** to `BRAIN/output/speculation/YYYY-MM-DD/HHMMZ.md` (HHMM = window start in UTC; slot mode: see above); the KNOWN
    digest carries an "Opening and positioning base rates" line per core symbol (with `days` / `events`), with

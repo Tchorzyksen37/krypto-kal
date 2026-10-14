@@ -1,12 +1,12 @@
-// automation/slots.ts – the 2-hour UTC report slots of the scheduled speculation run, and the catch-up rule:
+// automation/slots.ts – the 30-minute UTC report slots of the scheduled speculation run, and the catch-up rule:
 // a slot is due only while its bets could still fill (before its entry cutoff); older unhandled slots are
 // only reported as missed so the caller can record them as skipped.
 
 import { pickSession, sessionById, sessionOptionsFromEnv } from "../speculation/sessions.ts";
 import type { SessionId } from "../speculation/sessions.ts";
 
-export const SLOT_MS = 7_200_000;
-const MISSED_LOOKBACK_SLOTS = 12; // the last 24 hours
+export const SLOT_MS = 1_800_000;
+const MISSED_LOOKBACK_SLOTS = 48; // the last 24 hours
 
 export interface Slot {
   id: string; // YYYYMMDD-HHMMZ of the start (UTC)

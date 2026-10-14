@@ -7,9 +7,9 @@
   -WhatIf plan and the real install are built from the same definitions:
 
     speculation-tick   npm run auto -- tick   (BOT_CONFIG=config\bot.auto.json)
-                       twelve daily triggers at 00:00Z, 02:00Z ... 22:00Z (start boundaries in UTC), each
-                       repeated every 10 minutes for 40 minutes: up to 5 starts per slot (+0, +10, +20, +30,
-                       +40 min; retries, the tick is idempotent). Plus at logon and on wake from sleep
+                       48 daily triggers at 00:00Z, 00:30Z ... 23:30Z (start boundaries in UTC), each
+                       repeated every 10 minutes for 20 minutes: up to 3 starts per 30-minute slot (+0, +10,
+                       +20 min; retries, the tick is idempotent). Plus at logon and on wake from sleep
                        (Power-Troubleshooter event 1), both delayed 2 minutes so the MCP server listens first.
                        Ignores a new start while one runs, stops after 30 minutes, starts when available.
     speculation-score  npm run auto -- score  (BOT_CONFIG=config\bot.auto.json), daily 23:30 local.
@@ -172,20 +172,20 @@ function New-NpmCommand([string]$NpmArgs, [string]$BotConfig) {
 }
 
 # ---------------------------------------------------------------------------------------------- triggers
-# Every even UTC hour of today (00:00Z ... 22:00Z), as UTC DateTimes.
+# Every half hour of today (00:00Z, 00:30Z ... 23:30Z), as UTC DateTimes.
 function Get-SlotUtcTimes {
   $utcMidnight = [DateTime]::SpecifyKind([DateTime]::UtcNow.Date, [DateTimeKind]::Utc)
   $times = @()
-  for ($h = 0; $h -lt 24; $h += 2) { $times += $utcMidnight.AddHours($h) }
+  for ($m = 0; $m -lt 24 * 60; $m += 30) { $times += $utcMidnight.AddMinutes($m) }
   return $times
 }
 
 # A daily trigger whose start boundary is written in UTC ("...Z", "synchronize across time zones"), repeated
-# every 10 minutes for 40 minutes. The boundary is set explicitly, not left to the cmdlet's conversion.
+# every 10 minutes for 20 minutes (one 30-minute slot). The boundary is set explicitly, not left to the cmdlet's conversion.
 function New-RetryingDailyTrigger([DateTime]$AtUtc) {
   $trigger = New-ScheduledTaskTrigger -Daily -At $AtUtc.ToLocalTime()
   $repeat = New-ScheduledTaskTrigger -Once -At $AtUtc.ToLocalTime() -RepetitionInterval (New-TimeSpan -Minutes 10) `
-    -RepetitionDuration (New-TimeSpan -Minutes 40)
+    -RepetitionDuration (New-TimeSpan -Minutes 20)
   $trigger.Repetition = $repeat.Repetition
   $trigger.StartBoundary = $AtUtc.ToString('yyyy-MM-ddTHH:mm:ss') + 'Z'
   return $trigger
@@ -231,8 +231,7 @@ function New-WakeTrigger([string]$Delay) {
 $slotTimes = Get-SlotUtcTimes
 $offset = [TimeZoneInfo]::Local.GetUtcOffset([DateTime]::UtcNow)
 $offsetText = '{0}{1:hh\:mm}' -f $(if ($offset -lt [TimeSpan]::Zero) { '-' } else { '+' }), $offset
-$slotText = ($slotTimes | ForEach-Object { $_.ToLocalTime() } | Sort-Object { $_.TimeOfDay } |
-  ForEach-Object { $_.ToString('HH:mm') }) -join ' '
+$slotText = "every half hour, $(@($slotTimes).Count) a day"
 
 $supervisedSettings = {
   New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) `
@@ -249,10 +248,10 @@ $shortText = 'ignore new instance while running; time limit 30 min; start when a
 $Tasks = @(
   [pscustomobject]@{
     Name        = 'speculation-tick'
-    Description = 'krypto-kal: 2-hour speculation report, checker and bot policy handoff (npm run auto -- tick).'
+    Description = 'krypto-kal: 30-minute speculation report, checker and bot policy handoff (npm run auto -- tick).'
     Arguments   = (New-NpmCommand 'run auto -- tick' 'config\bot.auto.json')
-    TriggerText = "daily at 00:00Z 02:00Z ... 22:00Z (UTC boundaries; now local $slotText at UTC$offsetText), " +
-                  'each repeated every 10 min for 40 min (up to 5 starts per slot: +0..+40 min); ' +
+    TriggerText = "daily at 00:00Z 00:30Z ... 23:30Z (UTC boundaries; local $slotText at UTC$offsetText), " +
+                  'each repeated every 10 min for 20 min (up to 3 starts per slot: +0..+20 min); ' +
                   'at logon, delayed 2 min; on wake from sleep, delayed 2 min'
     Triggers    = { @($slotTimes | ForEach-Object { New-RetryingDailyTrigger $_ }) + @(New-LogonTrigger 'PT2M') + @(New-WakeTrigger 'PT2M') }
     Settings    = $shortSettings
