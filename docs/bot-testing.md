@@ -19,10 +19,12 @@ assumptions: [superpowers/2026-10-03-trader-core-status.md](superpowers/2026-10-
 ## Setup (once)
 
 1. Optional config file (anything you leave out uses the defaults: capital 1000 USD, 0.5% risk per trade, leverage 2,
-   PF_XBTUSD):
+   PF_XBTUSD only):
    ```json
-   { "symbol": "PF_XBTUSD", "trading_capital_usd": 1000, "manual_approval": false }
+   { "symbols": ["PF_XBTUSD", "PF_ETHUSD", "PF_SOLUSD", "PF_XRPUSD"], "trading_capital_usd": 1000, "manual_approval": false }
    ```
+   `symbols` lists the contracts the bot may trade (one position at a time across all of them; the old `symbol` key is
+   refused). `base_risk_per_trade_pct` (0.4) is the risk at middling conviction and `max_risk_per_trade_pct` (0.5) the hard cap.
    Pass it with `--config bot.json` or `BOT_CONFIG=bot.json` in `.env`.
 2. `BRAIN_DIR` in `.env` (already set for the brain) makes the bot write alerts and reports into the vault.
 
@@ -31,7 +33,7 @@ assumptions: [superpowers/2026-10-03-trader-core-status.md](superpowers/2026-10-
 The bot only trades policies. Until the analyst exists, you write them:
 
 ```powershell
-npm run bot -- policy template long > policy.json   # levels around the current price (entry zone, stop, two targets)
+npm run bot -- policy template long > policy.json   # levels around the current price (entry zone, stop, two targets); --symbol PF_ETHUSD for another contract
 # edit policy.json if you like, then add it twice (the engine acts only when 2 agreeing policies exist):
 npm run bot -- policy add policy.json
 npm run bot -- policy add policy.json
@@ -39,8 +41,9 @@ npm run bot -- run                                   # trader + watchdog; Ctrl+C
 ```
 
 **From a speculation report:** `npm run bot -- policy from-speculation <vault>/output/speculation/<day>/<HHMMZ>.meta.json`
-(add `--dry` first to see it), or the skill `speculation-to-bot` in Claude Code. It takes the best checked bet on the
-bot's symbol and lets the bot trade it only inside the bet's time: no entry before the session window opens or after
+(add `--dry` first to see it), or the skill `speculation-to-bot` in Claude Code. It takes the best checked bet on any of the
+bot's symbols and lets the bot trade it only inside the bet's time (its conviction is the stated probability corrected by
+the scorecard history, see `docs/bot-architecture.md` section 10a): no entry before the session window opens or after
 the bet's fill-by time, and the time-stop closes the position after the bet's hold time. For the night session's 3-hour
 entry window, set `"max_policy_ttl_min": 180` in the bot config.
 

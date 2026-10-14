@@ -1,1 +1,1 @@
-{ "max_policy_ttl_min": 120 }
+{ "max_policy_ttl_min": 30, "symbols": ["PF_XBTUSD", "PF_ETHUSD", "PF_SOLUSD", "PF_XRPUSD"] }

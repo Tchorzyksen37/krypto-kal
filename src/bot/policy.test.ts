@@ -181,7 +181,7 @@ describe("validatePolicy – menu and symbol", () => {
     accepted(raw(), ctx({ nowMs: menu.createdAtMs + limitMs, }));
   });
 
-  test("a symbol that differs from config.symbol is rejected", () => {
+  test("a symbol that is not in config.symbols is rejected", () => {
     rejected(raw({ symbol: "PF_ETHUSD" }), /symbol/i);
   });
 

@@ -4,7 +4,8 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, test } from "node:test";
 import { FakeClock, SystemClock } from "./clock.ts";
 import { type BotConfig, defaultConfig, isAllowedSymbol, loadConfig } from "./config.ts";
@@ -23,7 +24,6 @@ describe("defaultConfig", () => {
       mode: "dry-run",
       live_enabled: false,
       manual_approval: false,
-      symbol: "PF_XBTUSD",
       symbols: ["PF_XBTUSD"],
       trading_capital_usd: 1000,
       margin_mode: "isolated",
@@ -80,7 +80,7 @@ describe("loadConfig", () => {
     const { config } = loadConfig(configFile({ max_leverage: 3, fees_bps: { maker: 1, taker: 4 } }));
     assert.equal(config.max_leverage, 3);
     assert.deepEqual(config.fees_bps, { maker: 1, taker: 4 });
-    assert.equal(config.symbol, "PF_XBTUSD");
+    assert.deepEqual(config.symbols, ["PF_XBTUSD"]);
   });
 
   test("mode live without live_enabled fails to load", () => {
@@ -134,8 +134,21 @@ describe("symbols", () => {
     assert.throws(() => loadConfig(configFile({ symbols: ["PF_XBTUSD", "PF_XBTUSD"] })), /symbols/);
   });
 
-  test("symbols must contain symbol", () => {
-    assert.throws(() => loadConfig(configFile({ symbols: ["PF_ETHUSD"] })), /symbols/);
+  test("a config with the old key \"symbol\" is rejected and the message mentions \"symbols\"", () => {
+    assert.throws(() => loadConfig(configFile({ symbol: "PF_XBTUSD" })), /symbols/);
+  });
+
+  test("a symbols list need not contain the old default symbol", () => {
+    assert.deepEqual(loadConfig(configFile({ symbols: ["PF_ETHUSD"] })).config.symbols, ["PF_ETHUSD"]);
+  });
+
+  test("defaults have no symbol key", () => {
+    assert.equal("symbol" in defaultConfig(), false);
+  });
+
+  test("config/bot.auto.json loads and lists exactly the four symbols", () => {
+    const path = join(dirname(fileURLToPath(import.meta.url)), "../../config/bot.auto.json");
+    assert.deepEqual(loadConfig(path).config.symbols, ["PF_XBTUSD", "PF_ETHUSD", "PF_SOLUSD", "PF_XRPUSD"]);
   });
 
   test("base_risk_per_trade_pct above max_risk_per_trade_pct is rejected", () => {
@@ -158,8 +171,8 @@ describe("symbols", () => {
 
 describe("config hash", () => {
   test("is stable for equal content, whatever the key order or formatting", () => {
-    const a = loadConfig(configFile('{"max_leverage":3,"symbol":"PF_XBTUSD"}')).hash;
-    const b = loadConfig(configFile('{\n  "symbol": "PF_XBTUSD",\n  "max_leverage": 3\n}')).hash;
+    const a = loadConfig(configFile('{"max_leverage":3,"symbols":["PF_XBTUSD"]}')).hash;
+    const b = loadConfig(configFile('{\n  "max_leverage": 3,\n  "symbols": ["PF_XBTUSD"]\n}')).hash;
     assert.equal(a, b);
   });
 

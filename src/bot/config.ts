@@ -15,8 +15,7 @@ export const ConfigSchema = z
     mode: z.enum(["dry-run", "live"]),
     live_enabled: z.boolean(),
     manual_approval: z.boolean(),
-    symbol: z.string().min(1), // transitional primary symbol, replaced by `symbols` (removed later)
-    symbols: z.array(z.string().min(1)).min(1),
+    symbols: z.array(z.string().min(1)).min(1), // the contracts the bot may trade; the first is the primary one
     trading_capital_usd: z.number().positive(),
     margin_mode: z.literal("isolated"), // a constant, not a setting
     max_leverage: z.number().positive(),
@@ -55,7 +54,6 @@ export const ConfigSchema = z
   })
   .refine((c) => c.mode !== "live" || c.live_enabled, { message: 'mode "live" requires live_enabled: true' })
   .refine((c) => new Set(c.symbols).size === c.symbols.length, { message: "symbols must be unique" })
-  .refine((c) => c.symbols.includes(c.symbol), { message: "symbols must contain symbol" })
   .refine((c) => c.base_risk_per_trade_pct <= c.max_risk_per_trade_pct, {
     message: "base_risk_per_trade_pct must not exceed max_risk_per_trade_pct",
   });
@@ -67,7 +65,6 @@ const DEFAULTS: BotConfig = {
   mode: "dry-run",
   live_enabled: false,
   manual_approval: false,
-  symbol: "PF_XBTUSD",
   symbols: ["PF_XBTUSD"],
   trading_capital_usd: 1000,
   margin_mode: "isolated",
@@ -150,6 +147,7 @@ export function loadConfig(path: string): { config: BotConfig; hash: string } {
     throw new Error(`Cannot read bot config ${path}: ${e instanceof Error ? e.message : String(e)}`);
   }
   if (!isPlainObject(raw)) throw new Error(`Bot config ${path} must be a JSON object`);
+  if ("symbol" in raw) throw new Error(`Invalid bot config ${path}: "symbol" was replaced by "symbols", a list such as ["PF_XBTUSD"]`);
 
   const parsed = ConfigSchema.safeParse(merge(DEFAULTS, raw));
   if (!parsed.success) throw new Error(`Invalid bot config ${path}: ${formatIssues(parsed.error)}`);

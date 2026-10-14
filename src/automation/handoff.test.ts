@@ -115,14 +115,14 @@ describe("handoff", () => {
   });
 });
 
-test("config/bot.auto.json only raises max_policy_ttl_min", () => {
+test("config/bot.auto.json only raises max_policy_ttl_min and lists the symbols", () => {
   const dir = mkdtempSync(join(tmpdir(), "auto-cfg-"));
   try {
     writeFileSync(join(dir, "empty.json"), "{}");
     const defaults = loadConfig(join(dir, "empty.json")).config;
     const auto = loadConfig(join(dirname(fileURLToPath(import.meta.url)), "../../config/bot.auto.json")).config;
-    assert.equal(auto.max_policy_ttl_min, 120);
-    assert.deepEqual({ ...auto, max_policy_ttl_min: 0 }, { ...defaults, max_policy_ttl_min: 0 });
+    assert.equal(auto.max_policy_ttl_min, 30);
+    assert.deepEqual({ ...auto, max_policy_ttl_min: 0, symbols: defaults.symbols }, { ...defaults, max_policy_ttl_min: 0 });
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
