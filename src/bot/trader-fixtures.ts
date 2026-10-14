@@ -76,8 +76,10 @@ export class FakeMarket implements MarketData {
     if (this.failTicker) throw new Error("ticker down");
     return px(this.last, this.clock.now() - this.ageMs);
   }
-  async candles(resolution: string): Promise<FuturesCandle[]> {
+  candleRequests: { resolution: string; n: number | undefined }[] = [];
+  async candles(resolution: string, n?: number): Promise<FuturesCandle[]> {
     this.calls.candles++;
+    this.candleRequests.push({ resolution, n });
     if (this.failCandles) throw new Error("candles down");
     if (resolution === "1m") return this.minuteCandles;
     const hour = Math.floor(this.clock.now() / 3_600_000) * 3600; // seconds; sixteen closed hourly candles, each with a range of 800

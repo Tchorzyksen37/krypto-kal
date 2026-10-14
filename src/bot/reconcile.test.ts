@@ -350,6 +350,20 @@ describe("several symbols", () => {
     assert.equal(w.market.calls.funding, 0);
   });
 
+  test("each symbol's downtime replay reaches back to that symbol's own last quote", async () => {
+    const w = world({ symbols: SYMBOLS, reconciled: false });
+    w.tick(99250); // BTC quote at T0 + 1 s
+    await w.ex.placeOrder({ symbol: BTC, side: "buy", orderType: "lmt", size: 0.004, limitPrice: 90000, reduceOnly: false, cliOrdId: "bot-9-entry-0" });
+    w.clock.advance(30 * MIN);
+    w.tickEth(2980); // ETH quote 30 minutes later
+    await w.ex.placeOrder({ symbol: ETH, side: "buy", orderType: "lmt", size: 0.05, limitPrice: 2500, reduceOnly: false, cliOrdId: "bot-8-entry-0" });
+    w.clock.advance(5 * MIN);
+    await reconcile(w.deps, { replayer: w.ex });
+    const asked = (m: typeof w.market) => m.candleRequests.filter((r) => r.resolution === "1m").map((r) => r.n ?? 0);
+    assert.ok(asked(w.market).every((n) => n >= 35), `BTC asked for ${asked(w.market)} minutes`); // 35 minutes of silence
+    assert.ok(asked(w.ethMarket).every((n) => n >= 5 && n <= 9), `ETH asked for ${asked(w.ethMarket)} minutes`); // only 5
+  });
+
   test("two positions on different symbols: unclean, halt multiple_positions", async () => {
     const w = world({ symbols: SYMBOLS, reconciled: false });
     w.tick(99250);

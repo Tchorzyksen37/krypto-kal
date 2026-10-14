@@ -51,7 +51,8 @@ interface SimMeta {
   nextOrderId: number;
   nextFillId: number;
   lastTickMs: number;
-  lastFundingMs?: number; // newest funding time already processed
+  lastFunding?: Record<string, number>; // newest funding time already processed, per symbol
+  lastFundingMs?: number; // legacy single marker: read as the primary symbol's, never written
   prices: Record<string, PriceEvent>; // the newest quote per symbol
   price?: PriceEvent | null; // legacy single quote: read as the primary symbol's quote, never written
 }
@@ -155,7 +156,7 @@ export class DryRunExecutor implements Executor {
     this.store.transaction(() => {
       const meta = this.loadMeta();
       const nowMs = this.clock.now();
-      const last = meta.lastFundingMs ?? 0;
+      const last = meta.lastFunding?.[symbol] ?? 0;
       const due = rates
         .filter((r) => Number.isFinite(r.t) && Number.isFinite(r.rate) && r.t > last && r.t <= nowMs)
         .sort((a, b) => a.t - b.t);
@@ -174,7 +175,7 @@ export class DryRunExecutor implements Executor {
         acct.funding += payment;
         if (pos.size !== 0 && r.t > (pos.openedAtMs ?? 0)) pos.fundingPaid = (pos.fundingPaid ?? 0) + payment;
       }
-      meta.lastFundingMs = due[due.length - 1]!.t;
+      meta.lastFunding = { ...meta.lastFunding, [symbol]: due[due.length - 1]!.t };
       this.store.putDoc(ACCOUNT, "acct", nowMs, acct);
       this.store.putDoc(POSITION, symbol, nowMs, pos);
       this.saveMeta(meta);
@@ -247,9 +248,13 @@ export class DryRunExecutor implements Executor {
     return this.store.transaction(() => this.account());
   }
 
-  // The time of the newest quote seen (0 if none): how far a downtime replay has to reach back.
-  lastTickMs(): number {
-    return this.store.transaction(() => this.loadMeta().lastTickMs);
+  // The time of the newest quote seen (0 if none): how far a downtime replay has to reach back. With a symbol: the
+  // newest quote of that symbol, so replaying one symbol does not shorten the window of another.
+  lastTickMs(symbol?: string): number {
+    return this.store.transaction(() => {
+      const meta = this.loadMeta();
+      return symbol === undefined ? meta.lastTickMs : (meta.prices[symbol]?.t ?? 0);
+    });
   }
 
   // ---- faults ------------------------------------------------------------------------------------------------
@@ -501,10 +506,14 @@ export class DryRunExecutor implements Executor {
   private loadMeta(): SimMeta {
     const stored = this.store.getDoc<SimMeta>(META, "meta");
     if (!stored) return { nextOrderId: 1, nextFillId: 1, lastTickMs: 0, prices: {} };
-    if (stored.prices) return stored;
-    // Legacy state had one quote, for the single symbol the bot traded.
-    const { price, ...rest } = stored;
-    return { ...rest, prices: price ? { [this.config.symbols[0]!]: price } : {} };
+    // Legacy state had one quote and one funding marker, for the single symbol the bot traded.
+    const primary = this.config.symbols[0]!;
+    const { price, lastFundingMs, ...rest } = stored;
+    return {
+      ...rest,
+      prices: stored.prices ?? (price ? { [primary]: price } : {}),
+      ...(stored.lastFunding ? {} : lastFundingMs !== undefined ? { lastFunding: { [primary]: lastFundingMs } } : {}),
+    };
   }
 
   private saveMeta(m: SimMeta): void {

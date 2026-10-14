@@ -28,7 +28,7 @@ import { type TraderDeps, marketOf } from "./trader.ts";
 export interface Replayer {
   replay(candles: FuturesCandle[], intervalSec?: number, symbol?: string): void;
   accrueFunding(rates: { t: number; rate: number }[], symbol?: string): void;
-  lastTickMs(): number;
+  lastTickMs(symbol?: string): number;
 }
 
 export interface ReconcileResult {
@@ -91,7 +91,7 @@ export async function reconcile(d: TraderDeps, opts: { replayer?: Replayer } = {
     if (opts.replayer) {
       for (const symbol of exposedSymbols) {
         const market = marketOf(d, symbol);
-        const last = opts.replayer.lastTickMs();
+        const last = opts.replayer.lastTickMs(symbol);
         if (last > 0 && nowMs > last) {
           const minutes = Math.ceil((nowMs - last) / 60_000) + 2;
           if (minutes > MAX_REPLAY_MINUTES) {
