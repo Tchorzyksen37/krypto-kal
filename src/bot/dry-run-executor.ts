@@ -18,7 +18,7 @@
 import type { FuturesCandle } from "../providers/kraken/kraken-futures-client.ts";
 import type { BotStore } from "./bot-store.ts";
 import type { Clock } from "./clock.ts";
-import type { BotConfig } from "./config.ts";
+import { type BotConfig, isAllowedSymbol } from "./config.ts";
 import { floorTo } from "./sizing.ts";
 import type {
   AccountState, Executor, FuturesFill, FuturesOpenOrder, FuturesPosition, OrderAck, OrderEdit, OrderRequest,
@@ -52,7 +52,8 @@ interface SimMeta {
   nextFillId: number;
   lastTickMs: number;
   lastFundingMs?: number; // newest funding time already processed
-  price: PriceEvent | null;
+  prices: Record<string, PriceEvent>; // the newest quote per symbol
+  price?: PriceEvent | null; // legacy single quote: read as the primary symbol's quote, never written
 }
 
 // Document kinds in the store. Open and finished orders are separate so listing open orders stays cheap,
@@ -63,12 +64,25 @@ const FILL = "sim_fill";
 const POSITION = "sim_position";
 const ACCOUNT = "sim_account";
 const META = "sim_meta";
-const HISTORY = "sim_position_history"; // [{ t, size }]: the signed position after each fill, for funding
+const HISTORY = "sim_position_history"; // [{ t, size }] per symbol: the signed position after each fill, for funding
+const LEGACY_HISTORY = "hist"; // the history document id before there was one per symbol (primary symbol only)
+const SYMBOLS = "sim_symbols"; // one document: every symbol that ever had a fill, so a position outside config.symbols is found
 
 const EPS = 1e-12;
 const ok = (orderId: string): OrderAck => ({ ok: true, orderId });
 const rejected = (kind: RejectKind, message: string): OrderAck => ({ ok: false, kind, message });
 const finitePos = (x: unknown): x is number => typeof x === "number" && Number.isFinite(x) && x > 0;
+
+// Every symbol with a non-zero simulated position, including symbols that are no longer in config.symbols.
+export function readSimPositions(store: BotStore, config: BotConfig): { symbol: string; size: number; avgPrice: number }[] {
+  const known = store.getDoc<string[]>(SYMBOLS, "index") ?? [];
+  const out: { symbol: string; size: number; avgPrice: number }[] = [];
+  for (const symbol of new Set([...config.symbols, ...known])) {
+    const pos = store.getDoc<SimPosition>(POSITION, symbol);
+    if (pos && pos.size !== 0) out.push({ symbol, size: pos.size, avgPrice: pos.avgPrice });
+  }
+  return out;
+}
 
 export interface DryRunOptions {
   store: BotStore;
@@ -110,9 +124,10 @@ export class DryRunExecutor implements Executor {
     this.faults = { ...this.faults, ...f };
   }
 
-  // Feeds one quote: stores it, then fires every resting order it triggers. Older quotes are ignored.
-  onPrice(e: PriceEvent): void {
-    this.feed(e, false);
+  // Feeds one quote of `symbol` (default: the primary symbol): stores it, then fires every resting order of that
+  // symbol it triggers. A quote older than the symbol's last one is ignored.
+  onPrice(e: PriceEvent, symbol: string = this.config.symbols[0]!): void {
+    this.feed(e, false, symbol);
   }
 
   // Walks candles (oldest first) to find what would have fired while the bot was down. Each candle is visited
@@ -120,14 +135,14 @@ export class DryRunExecutor implements Executor {
   // short (a flat account is walked low first). So a stop beats a target inside one candle. Orders placed after a
   // candle never fire in it. Candles older than the last quote and malformed candles are skipped.
   // Candle t is in epoch SECONDS, as in the client. The whole replay is one transaction.
-  replay(candles: FuturesCandle[], intervalSec = 60): void {
+  replay(candles: FuturesCandle[], intervalSec = 60, symbol: string = this.config.symbols[0]!): void {
     this.store.transaction(() => {
       for (const c of [...candles].sort((a, b) => a.t - b.t)) {
         if (![c.o, c.h, c.l, c.c, c.t].every(finitePos) || c.h < c.l) continue;
         const startMs = c.t * 1000;
-        const path = this.position().size < 0 ? [c.o, c.h, c.l, c.c] : [c.o, c.l, c.h, c.c];
+        const path = this.position(symbol).size < 0 ? [c.o, c.h, c.l, c.c] : [c.o, c.l, c.h, c.c];
         path.forEach((p, k) => {
-          this.feed({ t: startMs + Math.floor((k * intervalSec * 1000) / 4), mark: p, last: p, bid: p, ask: p }, true);
+          this.feed({ t: startMs + Math.floor((k * intervalSec * 1000) / 4), mark: p, last: p, bid: p, ask: p }, true, symbol);
         });
       }
     });
@@ -136,7 +151,7 @@ export class DryRunExecutor implements Executor {
   // Charges hourly funding to the position held at each funding time. Rates are { t: epoch ms, rate: fraction of the
   // price per hour, positive = longs pay }. A time is charged once; times in the future, while flat, or before the
   // position opened cost nothing. The mark used is the latest one (an approximation within the hour).
-  accrueFunding(rates: { t: number; rate: number }[]): void {
+  accrueFunding(rates: { t: number; rate: number }[], symbol: string = this.config.symbols[0]!): void {
     this.store.transaction(() => {
       const meta = this.loadMeta();
       const nowMs = this.clock.now();
@@ -146,10 +161,10 @@ export class DryRunExecutor implements Executor {
         .sort((a, b) => a.t - b.t);
       if (!due.length) return;
 
-      const history = this.store.getDoc<{ t: number; size: number }[]>(HISTORY, "hist") ?? [];
-      const pos = this.position();
+      const history = this.history(symbol);
+      const pos = this.position(symbol);
       const acct = this.account0();
-      const mark = meta.price?.mark ?? pos.avgPrice;
+      const mark = meta.prices[symbol]?.mark ?? pos.avgPrice;
       for (const r of due) {
         // The position at funding time is the newest one that existed strictly before it (a position closed at the
         // exact funding time still pays).
@@ -161,7 +176,7 @@ export class DryRunExecutor implements Executor {
       }
       meta.lastFundingMs = due[due.length - 1]!.t;
       this.store.putDoc(ACCOUNT, "acct", nowMs, acct);
-      this.store.putDoc(POSITION, this.config.symbol, nowMs, pos);
+      this.store.putDoc(POSITION, symbol, nowMs, pos);
       this.saveMeta(meta);
     });
   }
@@ -201,13 +216,15 @@ export class DryRunExecutor implements Executor {
 
   async getPositions(): Promise<FuturesPosition[]> {
     return this.store.transaction(() => {
-      const pos = this.position();
-      if (pos.size === 0) return [];
-      const mark = this.loadMeta().price?.mark ?? pos.avgPrice;
-      return [{
-        symbol: this.config.symbol, side: pos.size > 0 ? "long" : "short", size: Math.abs(pos.size), price: pos.avgPrice,
-        unrealizedPnl: pos.size * (mark - pos.avgPrice), unrealizedFunding: -(pos.fundingPaid ?? 0), pnlCurrency: "USD",
-      }];
+      const meta = this.loadMeta();
+      return readSimPositions(this.store, this.config).map(({ symbol }) => {
+        const pos = this.position(symbol);
+        const mark = meta.prices[symbol]?.mark ?? pos.avgPrice;
+        return {
+          symbol, side: pos.size > 0 ? "long" : "short", size: Math.abs(pos.size), price: pos.avgPrice,
+          unrealizedPnl: pos.size * (mark - pos.avgPrice), unrealizedFunding: -(pos.fundingPaid ?? 0), pnlCurrency: "USD",
+        } satisfies FuturesPosition;
+      });
     });
   }
 
@@ -267,9 +284,9 @@ export class DryRunExecutor implements Executor {
     if (existing) return ok(existing.orderId); // a retry never creates a second order, whatever became of the first
 
     const meta = this.loadMeta();
-    const price = meta.price;
+    const price = meta.prices[req.symbol];
     const buy = req.side === "buy";
-    const pos = this.position();
+    const pos = this.position(req.symbol);
 
     if (req.reduceOnly && closable(pos, req.side) <= 0) return rejected("reduce_only_violation", "nothing to reduce");
     if (req.orderType === "mkt" && !price) return rejected("unknown", "no price yet");
@@ -320,14 +337,15 @@ export class DryRunExecutor implements Executor {
     this.saveOrder(next);
     // A stop moved beyond the current price fires at once.
     const meta = this.loadMeta();
-    if (meta.price) this.match(meta, next, meta.price, nowMs, false);
+    const quote = meta.prices[next.req.symbol];
+    if (quote) this.match(meta, next, quote, nowMs, false);
     this.saveMeta(meta);
     return ok(order.orderId);
   }
 
   // Returns the first problem with a request, or undefined.
   private validate(r: OrderRequest): string | undefined {
-    if (r.symbol !== this.config.symbol) return `symbol ${r.symbol} is not ${this.config.symbol}`;
+    if (!isAllowedSymbol(this.config, r.symbol)) return `symbol ${r.symbol} is not one of ${this.config.symbols.join(", ")}`;
     if (typeof r.cliOrdId !== "string" || r.cliOrdId.length === 0 || r.cliOrdId.length > 100) return "cliOrdId must be 1-100 characters";
     if (!finitePos(r.size)) return "size must be a positive number";
     switch (r.orderType) {
@@ -355,14 +373,14 @@ export class DryRunExecutor implements Executor {
 
   // ---- matching ----------------------------------------------------------------------------------------------
 
-  private feed(e: PriceEvent, replaying: boolean): void {
+  private feed(e: PriceEvent, replaying: boolean, symbol: string): void {
     this.store.transaction(() => {
       const meta = this.loadMeta();
-      if (e.t < meta.lastTickMs) return;
-      meta.lastTickMs = e.t;
-      meta.price = e;
+      if (e.t < (meta.prices[symbol]?.t ?? 0)) return;
+      meta.lastTickMs = Math.max(meta.lastTickMs, e.t);
+      meta.prices[symbol] = e;
       const rank = (o: SimOrder) => (o.req.orderType === "stp" ? 0 : o.req.orderType === "take_profit" ? 1 : 2);
-      const open = this.openOrders().sort((a, b) => rank(a) - rank(b) || a.receivedMs - b.receivedMs);
+      const open = this.openOrders().filter((o) => o.req.symbol === symbol).sort((a, b) => rank(a) - rank(b) || a.receivedMs - b.receivedMs);
       for (const order of open) {
         if (replaying && order.receivedMs > e.t) continue; // the order did not exist yet at this point of the replay
         const current = this.getOrder(order.req.cliOrdId);
@@ -411,7 +429,7 @@ export class DryRunExecutor implements Executor {
     let qty = r.size - order.filledSize;
     let finish = true; // the order is over after this fill
     if (r.reduceOnly) {
-      const room = closable(this.position(), r.side);
+      const room = closable(this.position(r.symbol), r.side);
       if (room <= 0) {
         this.saveOrder({ ...order, status: "cancelled", updatedMs: tMs }); // nothing left to reduce
         return;
@@ -433,7 +451,7 @@ export class DryRunExecutor implements Executor {
     meta: SimMeta, order: SimOrder, price: number, qty: number, fillType: "maker" | "taker", tMs: number, finish: boolean,
   ): void {
     const r = order.req;
-    const pos = this.position();
+    const pos = this.position(r.symbol);
     const acct = this.account0();
     const sign = r.side === "buy" ? 1 : -1;
 
@@ -456,8 +474,9 @@ export class DryRunExecutor implements Executor {
     const fresh = pos.size === 0 || Math.sign(pos.size) !== Math.sign(size);
     const fundingPaid = fresh ? 0 : (pos.fundingPaid ?? 0);
     const openedAtMs = fresh ? tMs : (pos.openedAtMs ?? tMs);
-    const history = this.store.getDoc<{ t: number; size: number }[]>(HISTORY, "hist") ?? [];
-    this.store.putDoc(HISTORY, "hist", tMs, [...history, { t: tMs, size }].slice(-500));
+    this.store.putDoc(HISTORY, r.symbol, tMs, [...this.history(r.symbol), { t: tMs, size }].slice(-500));
+    const known = this.store.getDoc<string[]>(SYMBOLS, "index") ?? [];
+    if (!known.includes(r.symbol)) this.store.putDoc(SYMBOLS, "index", tMs, [...known, r.symbol]);
 
     const bps = fillType === "maker" ? this.config.fees_bps.maker : this.config.fees_bps.taker;
     acct.realizedPnl += realized;
@@ -469,7 +488,7 @@ export class DryRunExecutor implements Executor {
       fillTime: new Date(tMs).toISOString(), fillType, realized_pnl: realized,
     };
     this.store.putDoc(FILL, fillId, tMs, fill);
-    this.store.putDoc(POSITION, this.config.symbol, tMs, { size, avgPrice: avg, fundingPaid, openedAtMs } satisfies SimPosition);
+    this.store.putDoc(POSITION, r.symbol, tMs, { size, avgPrice: avg, fundingPaid, openedAtMs } satisfies SimPosition);
     this.store.putDoc(ACCOUNT, "acct", tMs, acct);
 
     const filledSize = order.filledSize + qty;
@@ -480,7 +499,12 @@ export class DryRunExecutor implements Executor {
   // ---- state -------------------------------------------------------------------------------------------------
 
   private loadMeta(): SimMeta {
-    return this.store.getDoc<SimMeta>(META, "meta") ?? { nextOrderId: 1, nextFillId: 1, lastTickMs: 0, price: null };
+    const stored = this.store.getDoc<SimMeta>(META, "meta");
+    if (!stored) return { nextOrderId: 1, nextFillId: 1, lastTickMs: 0, prices: {} };
+    if (stored.prices) return stored;
+    // Legacy state had one quote, for the single symbol the bot traded.
+    const { price, ...rest } = stored;
+    return { ...rest, prices: price ? { [this.config.symbols[0]!]: price } : {} };
   }
 
   private saveMeta(m: SimMeta): void {
@@ -501,8 +525,16 @@ export class DryRunExecutor implements Executor {
     this.store.deleteDoc(open ? DONE : OPEN, o.req.cliOrdId);
   }
 
-  private position(): SimPosition {
-    return this.store.getDoc<SimPosition>(POSITION, this.config.symbol) ?? { size: 0, avgPrice: 0 };
+  private position(symbol: string): SimPosition {
+    return this.store.getDoc<SimPosition>(POSITION, symbol) ?? { size: 0, avgPrice: 0 };
+  }
+
+  // The signed position after each fill of `symbol`; the primary symbol falls back to the pre-multi-symbol document.
+  private history(symbol: string): { t: number; size: number }[] {
+    const own = this.store.getDoc<{ t: number; size: number }[]>(HISTORY, symbol);
+    if (own) return own;
+    const legacy = symbol === this.config.symbols[0] ? this.store.getDoc<{ t: number; size: number }[]>(HISTORY, LEGACY_HISTORY) : undefined;
+    return legacy ?? [];
   }
 
   private account0(): SimAccount {
@@ -511,11 +543,16 @@ export class DryRunExecutor implements Executor {
 
   private account(): AccountState {
     const a = this.account0();
-    const pos = this.position();
-    const mark = this.loadMeta().price?.mark ?? pos.avgPrice;
-    const unrealizedPnl = pos.size * (mark - pos.avgPrice);
+    const prices = this.loadMeta().prices;
+    let unrealizedPnl = 0;
+    let notional = 0;
+    for (const { symbol, size, avgPrice } of readSimPositions(this.store, this.config)) {
+      const mark = prices[symbol]?.mark ?? avgPrice;
+      unrealizedPnl += size * (mark - avgPrice);
+      notional += Math.abs(size) * mark;
+    }
     const equity = this.config.trading_capital_usd + a.realizedPnl - a.fees - a.funding + unrealizedPnl;
-    const availableMargin = equity - (Math.abs(pos.size) * mark) / this.config.max_leverage;
+    const availableMargin = equity - notional / this.config.max_leverage;
     return { equity, availableMargin, realizedPnl: a.realizedPnl, unrealizedPnl, fees: a.fees, funding: a.funding };
   }
 }
