@@ -300,12 +300,15 @@ const DRIVER_IDS = ["nasdaq", "yields", "dollar", "oil"];
 const MOVES = ["up", "down", "flat"];
 
 // `node src/speculation/sessions.ts` prints the window as {startUtc, endUtc}; the meta wants [start, end]. The model
-// sometimes copies the object, so both are accepted and the array form is what gets stored.
+// sometimes copies the object, or spells it {start, end} (a real slot report did), so all are accepted and the array
+// form is what gets stored.
 export function normalizeWindow(meta: ReportMeta): ReportMeta {
   const w = meta.window as unknown;
   if (w && typeof w === "object" && !Array.isArray(w)) {
-    const { startUtc, endUtc } = w as { startUtc?: unknown; endUtc?: unknown };
-    if (typeof startUtc === "string" && typeof endUtc === "string") meta.window = [startUtc, endUtc];
+    const o = w as { startUtc?: unknown; endUtc?: unknown; start?: unknown; end?: unknown };
+    const start = o.startUtc ?? o.start;
+    const end = o.endUtc ?? o.end;
+    if (typeof start === "string" && typeof end === "string") meta.window = [start, end];
   }
   return meta;
 }

@@ -291,6 +291,12 @@ describe("bias", () => {
     assert.deepEqual(normalizeWindow(m).window, ["2026-10-14T16:00:00.000Z", "2026-10-14T18:00:00.000Z"]);
   });
 
+  test("normalizeWindow also accepts the {start, end} spelling", () => {
+    const m = meta([xrpLong]);
+    m.window = { start: "2026-10-15T14:00:00.000Z", end: "2026-10-15T14:30:00.000Z" } as never;
+    assert.deepEqual(normalizeWindow(m).window, ["2026-10-15T14:00:00.000Z", "2026-10-15T14:30:00.000Z"]);
+  });
+
   test("runCheck accepts a bias written in capitals and stores it in lower case", async () => {
     const root = await mkdtemp(join(tmpdir(), "spec-bias-caps-"));
     const day = join(root, "2026-10-03");

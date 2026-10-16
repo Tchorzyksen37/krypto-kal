@@ -22,8 +22,8 @@ window end <ISO>, session <id>. Use exactly this window as the report's window a
 offer to hand bets to the bot.` When the prompt names `window start`, `window end` and `session`, the run is in slot
 mode, otherwise it is a normal session run. In slot mode:
 
-- `window` in the meta is exactly `[window start, window end]` from the prompt (ISO UTC), not the session's
-  `startUtc` / `endUtc`. `session` in the meta is ALWAYS the `session <id>` from the prompt; the checker takes the
+- `window` in the meta is exactly the two-element array `[window start, window end]` from the prompt (ISO UTC), not
+  an object such as `{start, end}` and not the session's `startUtc` / `endUtc`. `session` in the meta is ALWAYS the `session <id>` from the prompt; the checker takes the
   session limits from `meta.session`.
 - **Profile source.** `speculation_context` describes the RUNNING session, which can differ from the slot's session
   near a session boundary and on late or catch-up runs. Compare `session.id` from the tool with the prompt's session.
