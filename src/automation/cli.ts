@@ -17,7 +17,7 @@ import { assertDryRunOnly } from "../bot/live-executor.ts";
 import { optionsFromEnv, runCheck } from "../speculation/check.ts";
 import type { MarketSource } from "../speculation/check.ts";
 import { handoff } from "./handoff.ts";
-import { claudeArgs, realClaudeRunner } from "./run-claude.ts";
+import { claudeArgs, makeClaudeRunner } from "./run-claude.ts";
 import type { ClaudeRunner } from "./run-claude.ts";
 import { SLOT_MS, slotAt } from "./slots.ts";
 import { readLedger } from "./state.ts";
@@ -28,6 +28,7 @@ const STATE_DIR = "~/.krypto-kal/automation";
 const TIMEOUT_MS = 900_000;
 const PROBE_TIMEOUT_MS = 3_000;
 const RUN_LOG = "run-log.jsonl";
+const RUNS_DIR = "runs"; // raw stdout/stderr of every claude -p run, one file each (see writeRunLog)
 const scorePrompt = (brainDir: string): string => `BRAIN is ${brainDir} (do not read .env). Run the speculation-score skill.`;
 // MCP tools the speculation-score skill calls beyond the speculate allowlist: the scorer itself, and the fills
 // for its fallback when the tool is unavailable (kraken_futures_candles is already in the base list).
@@ -83,7 +84,7 @@ export function buildDeps(env: NodeJS.ProcessEnv, nowMs: number): TickDeps {
     brainDir,
     serverPort,
     probeServer: () => probeTcp("127.0.0.1", serverPort, PROBE_TIMEOUT_MS),
-    runner: realClaudeRunner,
+    runner: makeClaudeRunner({ logDir: join(stateDir, RUNS_DIR), kind: "tick" }),
     async check(metaPath) {
       let market: MarketSource | undefined;
       if (env.SPECULATION_VERIFY?.toLowerCase() !== "false") {
@@ -211,7 +212,8 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env)
     case "score": {
       const brainDir = setup("score", now, () => brainDirOf(env));
       if (!brainDir) return 1;
-      const r = await runScore({ brainDir, runner: realClaudeRunner, alert: alertTo(brainDir), timeoutMs: TIMEOUT_MS });
+      const runner = makeClaudeRunner({ logDir: join(stateDirPath(), RUNS_DIR), kind: "score" });
+      const r = await runScore({ brainDir, runner, alert: alertTo(brainDir), timeoutMs: TIMEOUT_MS });
       console.log(`score ${r.ok ? "ok" : "failed"}: ${r.detail}`);
       return r.ok ? 0 : 1;
     }
